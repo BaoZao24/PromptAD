@@ -8,6 +8,7 @@ from .visa import load_visa, visa_classes
 from .spectrum import load_spectrum, spectrum_classes
 from .sample import load_sample, sample_classes
 from .dcase2025 import load_dcase2025, dcase2025_classes
+from .deceptive import load_deceptive, deceptive_classes
 
 
 mean_train = [0.48145466, 0.4578275, 0.40821073]
@@ -19,6 +20,7 @@ load_function_dict = {
     'spectrum': load_spectrum,
     'sample': load_sample,
     'dcase2025': load_dcase2025,
+    'deceptive': load_deceptive,
 }
 
 dataset_classes = {
@@ -27,6 +29,7 @@ dataset_classes = {
     'spectrum': spectrum_classes,
     'sample': sample_classes,
     'dcase2025': dcase2025_classes,
+    'deceptive': deceptive_classes,
 }
 
 def denormalization(x):
