@@ -206,7 +206,7 @@ def fit(model,
 
         test_imgs, score_maps, gt_mask_list = specify_resolution(test_imgs, score_maps, gt_mask_list, resolution=(args.resolution, args.resolution))
 
-        if args.vis or args.dataset == 'dcase2025':
+        if args.vis:
             vis_indices = select_balanced_visualization_indices(gt_list, normal_count=10, abnormal_count=10)
             if vis_indices:
                 vis_names = [names[idx] for idx in vis_indices]
@@ -281,7 +281,7 @@ def str2bool(v):
 
 def get_args():
     parser = argparse.ArgumentParser(description='Anomaly detection')
-    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa', 'spectrum', 'sample', 'dcase2025', 'deceptive'])
+    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa', 'spectrum', 'sample', 'deceptive'])
     parser.add_argument('--class_name', type=str, default='carpet')
 
     parser.add_argument('--img-resize', type=int, default=240)
