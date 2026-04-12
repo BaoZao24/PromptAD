@@ -70,7 +70,7 @@ class_state_abnormal = {
     'stealthy': ['{} with interference', '{} with intentional interference', '{} with injected interference', '{} with anomalous signal'],
 
     # 欺骗信号检测 - 强调频段/位置异常（视觉特征正常但频段错误）
-    'spoofing_signal': [
+    'deceptive': [
         '{} in wrong frequency band',
         '{} in unauthorized band',
         '{} in unexpected frequency',
