@@ -1,5 +1,6 @@
 
 
+# 部分数据集类名在生成 prompt 前需要统一成标准写法。
 class_mapping = {
     "macaroni1": "macaroni",
     "macaroni2": "macaroni",
@@ -13,6 +14,7 @@ class_mapping = {
 }
 
 
+# 所有类别都会共用的通用异常描述模板。
 state_anomaly = ["damaged {}",
                  "flawed {}",
                  "abnormal {}",
@@ -22,9 +24,11 @@ state_anomaly = ["damaged {}",
                  "{} with defect",
                  "{} with damage"]
 
+# 旧实验里保留的备用异常模板集合。
 abnormal_state0 = ['damaged {}', 'broken {}', '{} with flaw', '{} with defect', '{} with damage']
 
 #
+# 每个类别自己的专属异常模板，会和上面的通用模板一起用于构造异常 prompt。
 class_state_abnormal = {
     'bottle': ['{} with large breakage', '{} with small breakage', '{} with contamination'],
     'toothbrush': ['{} with defect', '{} with anomaly'],
@@ -54,4 +58,26 @@ class_state_abnormal = {
     'pcb2': ['{} with bent', '{} with scratch', '{} with missing', '{} with melt'],
     'pcb3': ['{} with bent', '{} with scratch', '{} with missing', '{} with melt'],
     'pcb4': ['{} with scratch', '{} with extra', '{} with missing', '{} with wrong place', '{} with damage', '{} with burnt', '{} with dirt'],
-    'pipe_fryum': ['{} with breakage', '{} with small scratches', '{} with burnt', '{} with stuck together', '{} with colour spot', '{} with cracks']}
+    'pipe_fryum': ['{} with breakage', '{} with small scratches', '{} with burnt', '{} with stuck together', '{} with colour spot', '{} with cracks'],
+
+    # 频谱类别使用更贴近”干扰 / 人为干扰 / 注入干扰 / 异常信号”的描述。
+    '16QAM': ['{} with interference', '{} with intentional interference', '{} with injected interference', '{} with anomalous signal'],
+    'CHIRP': ['{} with interference', '{} with intentional interference', '{} with injected interference', '{} with anomalous signal'],
+    'GMSK': ['{} with interference', '{} with intentional interference', '{} with injected interference', '{} with anomalous signal'],
+    'QPSK': ['{} with interference', '{} with intentional interference', '{} with injected interference', '{} with anomalous signal'],
+    'bearing': ['{} with interference', '{} with intentional interference', '{} with injected interference', '{} with anomalous signal'],
+    'burst': ['{} with interference', '{} with intentional interference', '{} with injected interference', '{} with anomalous signal'],
+    'stealthy': ['{} with interference', '{} with intentional interference', '{} with injected interference', '{} with anomalous signal'],
+
+    # 欺骗信号检测 - 强调频段/位置异常（视觉特征正常但频段错误）
+    'spoofing_signal': [
+        '{} in wrong frequency band',
+        '{} in unauthorized band',
+        '{} in unexpected frequency',
+        '{} with frequency shift',
+        '{} in out-of-band location',
+        '{} with spectral displacement',
+        '{} appearing in wrong place',
+        '{} in forbidden frequency',
+    ],
+    }

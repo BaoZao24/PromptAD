@@ -5,6 +5,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import os
+from collections import OrderedDict
+from pathlib import Path
 import seaborn as sns
 
 ##
@@ -45,6 +47,104 @@ def plot_sample_cv2(names, imgs, scores_: dict, gts, save_folder=None):
             visz_map = cv2.addWeighted(heat_map, 0.5, imgs[idx], 0.5, 0)
             cv2.imwrite(os.path.join(save_folder, f'{names[idx]}_{key}.jpg'),
                         visz_map)
+
+
+def _parse_segment_name(name: str):
+    sample_key = name
+    segment_index = 0
+
+    if '_seg_' in name:
+        prefix, suffix = name.rsplit('_seg_', 1)
+        sample_key = prefix
+        try:
+            segment_index = int(Path(suffix).stem)
+        except ValueError:
+            segment_index = 0
+
+    return sample_key, segment_index
+
+
+def plot_sample_sequence_cv2(names, imgs, scores_: dict, gts, save_folder=None, max_cols=8, tile_size=256):
+    if save_folder is None:
+        return
+
+    os.makedirs(save_folder, exist_ok=True)
+
+    grouped = OrderedDict()
+    for idx, name in enumerate(names):
+        sample_key, segment_index = _parse_segment_name(name)
+        if sample_key not in grouped:
+            grouped[sample_key] = []
+        grouped[sample_key].append((segment_index, idx))
+
+    for key, v in scores_.items():
+        score_array = np.asarray(v)
+
+        for sample_key, items in grouped.items():
+            items = sorted(items, key=lambda item: item[0])
+            segment_indices = [item[1] for item in items]
+
+            sample_scores = score_array[segment_indices]
+            sample_imgs = [imgs[i] for i in segment_indices]
+            sample_gts = [gts[i] for i in segment_indices]
+
+            score_min = float(sample_scores.min())
+            score_max = float(sample_scores.max())
+            score_den = max(score_max - score_min, 1e-8)
+
+            tiles = []
+            for order_idx, (seg_idx, data_idx) in enumerate(items):
+                image = sample_imgs[order_idx].copy()
+                gt = sample_gts[order_idx]
+                score = sample_scores[order_idx]
+
+                if image.ndim == 2:
+                    image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+
+                image = cv2.resize(image, (tile_size, tile_size), interpolation=cv2.INTER_CUBIC)
+                gt = cv2.resize(gt, (tile_size, tile_size), interpolation=cv2.INTER_NEAREST)
+                score = cv2.resize(score, (tile_size, tile_size), interpolation=cv2.INTER_CUBIC)
+                score = ((score - score_min) / score_den * 255.0).clip(0, 255).astype(np.uint8)
+
+                heat_map = cv2.applyColorMap(score, cv2.COLORMAP_JET)
+                overlay = cv2.addWeighted(heat_map, 0.5, image, 0.5, 0)
+                overlay[gt > 0.5] = (0, 0, 255)
+                cv2.putText(
+                    overlay,
+                    f'seg {seg_idx}',
+                    (10, 24),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+                tiles.append(overlay)
+
+            cols = min(max_cols, len(tiles))
+            rows = int(np.ceil(len(tiles) / cols))
+            canvas = np.zeros((rows * tile_size, cols * tile_size, 3), dtype=np.uint8)
+
+            for tile_idx, tile in enumerate(tiles):
+                row = tile_idx // cols
+                col = tile_idx % cols
+                canvas[row * tile_size:(row + 1) * tile_size, col * tile_size:(col + 1) * tile_size] = tile
+
+            cv2.imwrite(os.path.join(save_folder, f'{sample_key}_{key}_sequence.jpg'), canvas)
+
+            sample_dir = os.path.join(save_folder, sample_key)
+            os.makedirs(sample_dir, exist_ok=True)
+            for order_idx, (seg_idx, data_idx) in enumerate(items):
+                image = sample_imgs[order_idx].copy()
+                if image.ndim == 2:
+                    image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+                image = cv2.resize(image, (tile_size, tile_size), interpolation=cv2.INTER_CUBIC)
+                score = sample_scores[order_idx]
+                score = cv2.resize(score, (tile_size, tile_size), interpolation=cv2.INTER_CUBIC)
+                score = ((score - score_min) / score_den * 255.0).clip(0, 255).astype(np.uint8)
+                heat_map = cv2.applyColorMap(score, cv2.COLORMAP_JET)
+                overlay = cv2.addWeighted(heat_map, 0.5, image, 0.5, 0)
+                cv2.imwrite(os.path.join(sample_dir, f'{sample_key}_{key}_seg_{seg_idx:04d}.jpg'), overlay)
 
 
 def plot_anomaly_score_distributions(scores: dict, ground_truths_list, save_folder, class_name):

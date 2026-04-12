@@ -34,7 +34,7 @@ class PromptLearner(nn.Module):
         else:
             dtype = torch.float32
 
-        state_anomaly1 = state_anomaly + class_state_abnormal[classname]
+        state_anomaly1 = state_anomaly + class_state_abnormal.get(classname, [])
 
         if classname in class_mapping:
             classname = class_mapping[classname]
@@ -289,10 +289,16 @@ class PromptAD(torch.nn.Module):
 
     def build_image_feature_gallery(self, features1, features2):
         b1, n1, d1 = features1.shape
-        self.feature_gallery1.copy_(F.normalize(features1.reshape(-1, d1), dim=-1))
+        gallery1 = F.normalize(features1.reshape(-1, d1), dim=-1)
+        if self.feature_gallery1.shape[0] != gallery1.shape[0] or self.feature_gallery1.shape[1] != gallery1.shape[1]:
+            self.feature_gallery1 = gallery1.new_zeros(gallery1.shape)
+        self.feature_gallery1.copy_(gallery1)
 
         b2, n2, d2 = features2.shape
-        self.feature_gallery2.copy_(F.normalize(features2.reshape(-1, d2), dim=-1))
+        gallery2 = F.normalize(features2.reshape(-1, d2), dim=-1)
+        if self.feature_gallery2.shape[0] != gallery2.shape[0] or self.feature_gallery2.shape[1] != gallery2.shape[1]:
+            self.feature_gallery2 = gallery2.new_zeros(gallery2.shape)
+        self.feature_gallery2.copy_(gallery2)
 
     def calculate_textual_anomaly_score(self, visual_features, task):
         # t = 100

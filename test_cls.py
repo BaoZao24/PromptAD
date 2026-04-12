@@ -1,6 +1,16 @@
+import os
+
+os.environ.setdefault('OMP_NUM_THREADS', '1')
+os.environ.setdefault('MKL_NUM_THREADS', '1')
+os.environ.setdefault('OPENBLAS_NUM_THREADS', '1')
+
 import argparse
 
 import torch.optim.lr_scheduler
+import torch
+
+torch.set_num_threads(1)
+torch.set_num_interop_threads(1)
 
 from datasets import *
 from datasets import dataset_classes
@@ -105,7 +115,7 @@ def str2bool(v):
 
 def get_args():
     parser = argparse.ArgumentParser(description='Anomaly detection')
-    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa'])
+    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa', 'spectrum'])
     parser.add_argument('--class_name', type=str, default='carpet')
 
     parser.add_argument('--img-resize', type=int, default=240)

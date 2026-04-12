@@ -30,8 +30,6 @@ def write_results(results:dict, cur_class, total_classes, csv_path):
 
 
 def save_metric(metrics, total_classes, class_name, dataset, csv_path):
-    # if dataset != 'mvtec':
-    for indx in range(len(total_classes)):
-        total_classes[indx] = f"{dataset}-{total_classes[indx]}"
+    total_classes = [f"{dataset}-{class_name_item}" for class_name_item in total_classes]
     class_name = f"{dataset}-{class_name}"
     write_results(metrics, class_name, total_classes, csv_path)
