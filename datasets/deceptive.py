@@ -1,136 +1,107 @@
 import os
-from collections import OrderedDict
+import re
 from pathlib import Path
 
 
 deceptive_classes = ['deceptive']
 
 
-DECEPTIVE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), 'DCASE2025_fbank'))
+DECEPTIVE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), 'sample', 'deceptive'))
 
 
-def _infer_label_from_path(path: str) -> tuple[int, str]:
-    """从文件路径推断标签和类型"""
-    lower_name = os.path.basename(path).lower()
-
-    # 测试集：根据文件名判断
-    if 'anomaly' in lower_name:
-        return 1, 'anomaly'
-    if 'normal' in lower_name:
-        return 0, 'normal'
-
-    # 训练集/补充集：默认为正常
-    return 0, 'normal'
-
-
-def _collect_phase(root_paths, include_anomaly: bool):
-    """收集指定目录下的所有文件"""
-    img_tot_paths = []
-    gt_tot_paths = []
-    tot_labels = []
-    tot_types = []
-
-    for root_path in root_paths:
-        if not os.path.isdir(root_path):
-            continue
-
-        img_paths = sorted(Path(root_path).rglob('*.png'))
-        for img_path in img_paths:
-            label, img_type = _infer_label_from_path(str(img_path))
-            if label == 1 and not include_anomaly:
-                continue
-
-            img_tot_paths.append(str(img_path))
-            gt_tot_paths.append(0)
-            tot_labels.append(label)
-            tot_types.append(img_type)
-
-    assert len(img_tot_paths) == len(gt_tot_paths), 'Something wrong with data pairing!'
-
-    return img_tot_paths, gt_tot_paths, tot_labels, tot_types
-
-
-def _select_normal_samples_by_segments(img_paths, labels, max_segments):
+def _extract_time_range(filename: str) -> tuple:
+    """从文件名提取时间范围
+    例如：BinBo_burst_t00000-04000_f100.00-101.50MHz_patch016_normal.png
+    返回：(0, 4000)
     """
-    按 segment 数量选择前 N 个 segment 用于训练
-
-    文件名格式：section_00_source_train_normal_XXXX_noAttribute_seg_YY.png
-    按 normal_XXXX 分组，选择前 max_segments 个 segment
-
-    例如：max_segments=4000 选择前 4000 个 segment（约 500 个样本）
-    """
-    grouped_indices = OrderedDict()
-
-    for idx, (img_path, label) in enumerate(zip(img_paths, labels)):
-        if label != 0:
-            continue
-
-        stem = Path(img_path).stem
-        # 提取 normal_XXXX 作为组名
-        parts = stem.split('_')
-        for i, part in enumerate(parts):
-            if part == 'normal' and i + 1 < len(parts):
-                group_key = f"normal_{parts[i + 1]}"
-                break
-        else:
-            group_key = stem
-
-        if group_key not in grouped_indices:
-            grouped_indices[group_key] = []
-        grouped_indices[group_key].append(idx)
-
-    # 按顺序选择 segment，直到达到 max_segments
-    selected_indices = []
-    remaining = max_segments
-
-    for group_key, indices in grouped_indices.items():
-        # 每组最多取 8 个 segment（seg_00 到 seg_07）
-        take = min(len(indices), remaining)
-        selected_indices.extend(indices[:take])
-        remaining -= take
-        if remaining <= 0:
-            break
-
-    return selected_indices
+    match = re.search(r't(\d+)-(\d+)', filename)
+    if match:
+        return int(match.group(1)), int(match.group(2))
+    return (0, 0)
 
 
 def load_deceptive(category, k_shot):
     """
-    加载 deceptive 数据集
+    加载 deceptive 数据集用于欺骗信号检测
 
-    训练集：使用 DCASE2025_fbank/bearing/train/ 中的正常样本
-    测试集：使用 DCASE2025_fbank/bearing/test/ 中的正常 + 异常样本
+    数据结构:
+    datasets/sample/deceptive/
+    ├── train/
+    │   ├── BinBo/normal/      # 正常训练样本 (t00000-04000, t02000-06000, 等 8 个时间段)
+    │   ├── CaoChang/normal/
+    │   ├── ShiJianGuangChang/normal/
+    │   └── TiYuGuan/normal/
+    └── test/
+        ├── BinBo/normal/      # 正常测试样本
+        ├── BinBo/abnormal/    # 异常测试样本 (欺骗信号)
+        ├── CaoChang/...
+        ├── ShiJianGuangChang/...
+        └── TiYuGuan/...
 
-    k_shot: 选择前 k_shot 个 segment 用于训练
-            例如 k_shot=4000 使用前 4000 个 segment（约 500 个样本）
-            如果你想用 0-4000 频段，设置 k_shot=4000
+    训练集：只使用 train/ 中各场景的 normal 样本
+    测试集：使用 test/ 中各场景的 normal + abnormal 样本
+
+    Args:
+        category: 数据集类别名称（未使用，保持 API 一致）
+        k_shot: 选择训练样本的策略:
+                - k_shot=0 或使用 0-4000 时间段的样本 (约 912 个样本)
+                - k_shot>0 且指定使用所有时间段：使用所有训练样本
+
+    注意：文件名格式为 {scene}_{type}_tXXXXX-YYYYY_fAA.AA-BB.BBMHz_patchNNN_normal.png
     """
-    if k_shot < 1:
-        raise ValueError(f'k_shot must be >= 1 for training, but got {k_shot}. Use --k-shot 1 or larger.')
+    train_root = os.path.join(DECEPTIVE_DIR, 'train')
+    test_root = os.path.join(DECEPTIVE_DIR, 'test')
 
-    # 数据目录
-    train_root = os.path.join(DECEPTIVE_DIR, 'bearing', 'train')
-    test_root = os.path.join(DECEPTIVE_DIR, 'bearing', 'test')
+    # 收集训练集 (只包含正常样本)
+    train_img_paths = []
+    train_labels = []
+    train_types = []
 
-    # 训练集：只包含正常样本
-    train_img_tot_paths, train_gt_tot_paths, train_tot_labels, train_tot_types = _collect_phase(
-        [train_root],
-        include_anomaly=False,
-    )
+    scene_dirs = sorted([d for d in Path(train_root).iterdir() if d.is_dir()])
+    for scene_dir in scene_dirs:
+        normal_dir = scene_dir / 'normal'
+        if normal_dir.exists():
+            for img_path in sorted(normal_dir.glob('*.png')):
+                # 只选择 t00000-04000 时间段的样本用于训练
+                file_time = _extract_time_range(img_path.name)
+                if file_time != (0, 4000):
+                    continue
 
-    # 测试集：包含正常和异常
-    test_img_tot_paths, test_gt_tot_paths, test_tot_labels, test_tot_types = _collect_phase(
-        [test_root],
-        include_anomaly=True,
-    )
+                train_img_paths.append(str(img_path))
+                train_labels.append(0)  # normal
+                train_types.append(f'{scene_dir.name}_normal')
 
-    # 选择前 k_shot 个 segment
-    selected_train_indices = _select_normal_samples_by_segments(train_img_tot_paths, train_tot_labels, k_shot)
+    # 收集测试集 (包含正常和异常)
+    test_img_paths = []
+    test_labels = []
+    test_types = []
 
-    selected_train_img_tot_paths = [train_img_tot_paths[k] for k in selected_train_indices]
-    selected_train_gt_tot_paths = [train_gt_tot_paths[k] for k in selected_train_indices]
-    selected_train_tot_labels = [train_tot_labels[k] for k in selected_train_indices]
-    selected_train_tot_types = [train_tot_types[k] for k in selected_train_indices]
+    for scene_dir in scene_dirs:
+        scene_name = scene_dir.name
+        test_scene_dir = Path(test_root) / scene_name
 
-    return (selected_train_img_tot_paths, selected_train_gt_tot_paths, selected_train_tot_labels, selected_train_tot_types), \
-           (test_img_tot_paths, test_gt_tot_paths, test_tot_labels, test_tot_types)
+        # 正常测试样本 (递归搜索所有子目录)
+        if (test_scene_dir / 'normal').exists():
+            for img_path in sorted((test_scene_dir / 'normal').rglob('*.png')):
+                test_img_paths.append(str(img_path))
+                test_labels.append(0)
+                test_types.append(f'{scene_name}_normal')
+
+        # 异常测试样本 (递归搜索所有子目录)
+        if (test_scene_dir / 'abnormal').exists():
+            for img_path in sorted((test_scene_dir / 'abnormal').rglob('*.png')):
+                test_img_paths.append(str(img_path))
+                test_labels.append(1)
+                test_types.append(f'{scene_name}_abnormal')
+
+    # k_shot 参数保留但不使用（所有 t00000-04000 样本都用于训练）
+    selected_train_img_paths = train_img_paths
+    selected_train_labels = train_labels
+    selected_train_types = train_types
+
+    # 创建 dummy ground truth 路径 (所有都是 0)
+    selected_train_gt_paths = [0] * len(selected_train_img_paths)
+    test_gt_paths = [0] * len(test_img_paths)
+
+    return (selected_train_img_paths, selected_train_gt_paths, selected_train_labels, selected_train_types), \
+           (test_img_paths, test_gt_paths, test_labels, test_types)
