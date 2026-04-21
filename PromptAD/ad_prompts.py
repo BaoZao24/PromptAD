@@ -63,21 +63,83 @@ class_state_abnormal = {
     # 频谱类别使用更贴近”干扰 / 人为干扰 / 注入干扰 / 异常信号”的描述。
     '16QAM': ['{} with interference', '{} with intentional interference', '{} with injected interference', '{} with anomalous signal'],
     'CHIRP': ['{} with interference', '{} with intentional interference', '{} with injected interference', '{} with anomalous signal'],
+
+    # Chirp 信号检测 - 强调斜线特征（时频图中频率随时间扫描呈斜线）
+    'chirp': [
+        # 斜线异常 - 断裂/缺失
+        '{} with broken diagonal line',
+        '{} with interrupted slanted streak',
+        '{} with diagonal line missing segment',
+        '{} with discontinuous slope trace',
+        # 斜线异常 - 形态畸变
+        '{} with distorted diagonal pattern',
+        '{} with bent slanted line',
+        '{} with curved instead of diagonal trace',
+        '{} with irregular slope angle',
+        # 斜线异常 - 多余/干扰
+        '{} with extra diagonal artifact',
+        '{} with anomalous cross streak',
+        '{} with stray slanted line',
+        '{} with spurious diagonal interference',
+    ],
     'GMSK': ['{} with interference', '{} with intentional interference', '{} with injected interference', '{} with anomalous signal'],
     'QPSK': ['{} with interference', '{} with intentional interference', '{} with injected interference', '{} with anomalous signal'],
     'bearing': ['{} with interference', '{} with intentional interference', '{} with injected interference', '{} with anomalous signal'],
     'burst': ['{} with interference', '{} with intentional interference', '{} with injected interference', '{} with anomalous signal'],
     'stealthy': ['{} with interference', '{} with intentional interference', '{} with injected interference', '{} with anomalous signal'],
 
-    # 欺骗信号检测 - 强调频段/位置异常（视觉特征正常但频段错误）
+    # 欺骗信号检测 - 强调"与正常信号极度相似但出现在未授权频段"
     'deceptive': [
-        '{} in wrong frequency band',
-        '{} in unauthorized band',
-        '{} in unexpected frequency',
-        '{} with frequency shift',
-        '{} in out-of-band location',
-        '{} with spectral displacement',
-        '{} appearing in wrong place',
-        '{} in forbidden frequency',
+        # 强调视觉相似但频段错误
+        '{} with identical appearance in unauthorized frequency',
+        '{} visually identical but in wrong frequency band',
+        '{} same signal pattern in forbidden frequency',
+        '{} indistinguishable from normal but in unlicensed band',
+        # 强调欺骗性/伪装性
+        '{} spoofed signal in unauthorized band',
+        '{} deceptive signal mimicking normal in wrong frequency',
+        '{} camouflage signal in unexpected frequency',
+        '{} counterfeit signal in out-of-band location',
+        # 强调频段违规
+        '{} in prohibited frequency with identical spectrum',
+        '{} in restricted band with same visual pattern',
+    ],
+
+    # DSSS 信号检测 - 强调宽带扩频谱的断裂、畸变、功率分布异常
+    'dsss': [
+        # 宽带谱断裂/缺失
+        '{} with broken wideband spectrum',
+        '{} with discontinuous spread spectrum band',
+        '{} with missing frequency segment in wideband',
+        # 宽带谱畸变/失真
+        '{} with distorted wideband pattern',
+        '{} with deformed spread spectrum shape',
+        '{} with warped wideband structure',
+        # 功率分布异常（扩频应该功率均匀散布）
+        '{} with uneven power distribution across band',
+        '{} with anomalous power concentration',
+        '{} with irregular spectral density pattern',
+        # 异常谱线/伪影
+        '{} with spurious spectral artifact',
+        '{} with unexpected spectral spike in band',
+        # 扩频码异常（视觉层面描述）
+        '{} with abnormal spread spectrum texture',
+        '{} with disrupted wideband noise-like pattern',
+    ],
+
+    # Burst 信号检测 - 强调短时、窄带、隐蔽、纵轴不完整等视觉特征
+    'burst': [
+        # 短时特征（时间维度窄条）
+        '{} with short-duration narrow signal',
+        '{} with transient narrow pulse',
+        # 窄带特征（频率维度集中）
+        '{} with narrowband burst signal',
+        '{} with concentrated narrow frequency burst',
+        # 隐蔽性（低强度、微弱、难以察觉）
+        '{} with stealthy short narrow signal',
+        '{} with hidden low-power burst',
+        # 纵轴不完整（频谱截断、频率维度被切割）
+        '{} with vertically truncated narrow signal',
+        '{} with incomplete frequency range burst',
     ],
     }

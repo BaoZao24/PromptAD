@@ -360,7 +360,7 @@ class PromptAD(torch.nn.Module):
             # anomaly_map = visual_anomaly_map
             # anomaly_map = textual_anomaly_map
 
-            anomaly_map = F.interpolate(anomaly_map, size=(self.out_size_h, self.out_size_w), mode='bilinear', align_corners=False)
+            anomaly_map = F.interpolate(anomaly_map, size=(self.out_size_h, self.out_size_w), mode='nearest')
 
             am_pix = anomaly_map.squeeze(1).numpy()
 

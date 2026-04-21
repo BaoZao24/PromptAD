@@ -29,10 +29,24 @@ def get_dir_from_args(TASK, root_dir, **kwargs):
     k_shot = kwargs['k_shot']
     dataset = kwargs['dataset']
     class_name = kwargs['class_name']
+    train_site = kwargs.get('train_site', None)
 
-    csv_dir = os.path.join(root_dir, f'{dataset}', f'{class_name}', f'k_{k_shot}', 'csv')
-    check_dir = os.path.join(root_dir, f'{dataset}', f'{class_name}', f'k_{k_shot}', 'checkpoint')
-    img_dir = os.path.join(root_dir, f'{dataset}', f'{class_name}', f'k_{k_shot}', 'imgs')
+    # 跨站点测试时，目录名包含训练站点信息
+    if train_site and train_site != class_name:
+        dir_class_name = f'{train_site}_to_{class_name}'
+    else:
+        dir_class_name = class_name
+
+    # 对于 burst/dsss 等有 noise_level 的数据集，按 noise_level 区分目录
+    noise_level = kwargs.get('noise_level', None)
+    if noise_level:
+        base_dir = os.path.join(root_dir, f'{dataset}', f'{dir_class_name}', f'{noise_level}', f'k_{k_shot}')
+    else:
+        base_dir = os.path.join(root_dir, f'{dataset}', f'{dir_class_name}', f'k_{k_shot}')
+
+    csv_dir = os.path.join(base_dir, 'csv')
+    check_dir = os.path.join(base_dir, 'checkpoint')
+    img_dir = os.path.join(base_dir, 'imgs')
 
     csv_path = os.path.join(csv_dir, f"Seed_{kwargs['seed']}-results.csv")
     check_path = os.path.join(check_dir, f"{TASK}-Seed_{kwargs['seed']}-{kwargs['class_name']}-check_point.pt")

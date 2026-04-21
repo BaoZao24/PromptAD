@@ -44,7 +44,15 @@ python run_seg.py  # pixel-level for all classes
 - `visa` - VisA dataset
 - `spectrum` - Spectrum dataset
 - `sample` - Sample dataset
-- `dcase2025` - DCASE2025 audio dataset
+- `deceptive_signal` - Deceptive(stealthy) signal detection (共用 normal 训练数据，测试数据在 /mnt/data/wangbei/data/datasets/deceptive/)
+- `burst_signal` - Burst signal detection (共用 normal 训练数据，测试数据在 /mnt/data/wangbei/data/datasets/burst/)
+
+场景分类均为：BinBo, CaoChang, ShiJianGuangChang, TiYuGuan
+
+### Data Paths
+- 训练数据 (normal): `/mnt/data/wangbei/data/datasets/normal/{scene}/normal/`
+- Deceptive 测试: `/mnt/data/wangbei/data/datasets/deceptive/{scene}/{normal,abnormal,groundtruth}/0db/`
+- Burst 测试: `/mnt/data/wangbei/data/datasets/burst/{scene}/{normal,abnormal,groundtruth}/{m10db,m20db,m30db}/`
 
 ### Common Arguments
 - `--dataset`: dataset name (mvtec/visa/spectrum/sample/dcase2025)

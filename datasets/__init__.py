@@ -7,7 +7,10 @@ from .mvtec import load_mvtec, mvtec_classes
 from .visa import load_visa, visa_classes
 from .spectrum import load_spectrum, spectrum_classes
 from .sample import load_sample, sample_classes
-from .deceptive import load_deceptive, deceptive_classes
+from .deceptive_signal import load_deceptive_signal, deceptive_signal_classes
+from .burst_signal import load_burst_signal, burst_signal_classes
+from .dsss_signal import load_dsss_signal, dsss_classes
+from .chirp_signal import load_chirp_signal, chirp_signal_classes
 
 
 mean_train = [0.48145466, 0.4578275, 0.40821073]
@@ -18,7 +21,10 @@ load_function_dict = {
     'visa': load_visa,
     'spectrum': load_spectrum,
     'sample': load_sample,
-    'deceptive': load_deceptive,
+    'deceptive_signal': load_deceptive_signal,
+    'burst_signal': load_burst_signal,
+    'dsss_signal': load_dsss_signal,
+    'chirp_signal': load_chirp_signal,
 }
 
 dataset_classes = {
@@ -26,7 +32,10 @@ dataset_classes = {
     'visa': visa_classes,
     'spectrum': spectrum_classes,
     'sample': sample_classes,
-    'deceptive': deceptive_classes,
+    'deceptive_signal': deceptive_signal_classes,
+    'burst_signal': burst_signal_classes,
+    'dsss_signal': dsss_classes,
+    'chirp_signal': chirp_signal_classes,
 }
 
 def denormalization(x):
@@ -35,11 +44,29 @@ def denormalization(x):
 
 def get_dataloader_from_args(phase, **kwargs):
 
+    # 提取 burst_signal 额外的参数
+    extra_kwargs = {}
+    if kwargs.get('dataset') == 'burst_signal':
+        extra_kwargs['noise_level'] = kwargs.get('noise_level', 'm10db')
+        if kwargs.get('train_site'):
+            extra_kwargs['train_category'] = kwargs.get('train_site')
+    elif kwargs.get('dataset') == 'dsss_signal':
+        extra_kwargs['noise_level'] = kwargs.get('noise_level', 'm10db')
+        if kwargs.get('train_site'):
+            extra_kwargs['train_category'] = kwargs.get('train_site')
+    elif kwargs.get('dataset') == 'chirp_signal':
+        extra_kwargs['noise_level'] = kwargs.get('noise_level', 'm10db')
+        if kwargs.get('train_site'):
+            extra_kwargs['train_category'] = kwargs.get('train_site')
+    elif kwargs.get('dataset') == 'deceptive_signal':
+        extra_kwargs['freq'] = kwargs.get('freq', None)
+
     dataset_inst = CLIPDataset(
         load_function=load_function_dict[kwargs['dataset']],
         category=kwargs['class_name'],
         phase=phase,
-        k_shot=kwargs['k_shot']
+        k_shot=kwargs['k_shot'],
+        **extra_kwargs
     )
 
     if phase == 'train':

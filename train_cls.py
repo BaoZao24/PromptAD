@@ -281,8 +281,9 @@ def str2bool(v):
 
 def get_args():
     parser = argparse.ArgumentParser(description='Anomaly detection')
-    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa', 'spectrum', 'sample', 'deceptive'])
+    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa', 'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal'])
     parser.add_argument('--class_name', type=str, default='carpet')
+    parser.add_argument('--train-site', type=str, default=None, help='训练站点（跨站点测试时指定，默认与 class_name 相同）')
 
     parser.add_argument('--img-resize', type=int, default=240)
     parser.add_argument('--img-cropsize', type=int, default=240)
@@ -312,7 +313,10 @@ def get_args():
     parser.add_argument("--n_ctx_ab", type=int, default=1)
     parser.add_argument("--n_pro", type=int, default=3)
     parser.add_argument("--n_pro_ab", type=int, default=4)
-    parser.add_argument("--Epoch", type=int, default=10)
+    parser.add_argument("--Epoch", type=int, default=50)
+
+    # burst_signal related
+    parser.add_argument("--noise-level", type=str, default='m10db', choices=['m10db', 'm20db', 'm30db'])
 
     # optimizer
     parser.add_argument("--lr", type=float, default=0.002)
