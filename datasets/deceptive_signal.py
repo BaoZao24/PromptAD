@@ -2,6 +2,8 @@ import os
 import re
 from pathlib import Path
 
+from . import map_category_to_dir
+
 
 deceptive_signal_classes = ['BinBo', 'CaoChang', 'ShiJianGuangChang', 'TiYuGuan']
 
@@ -55,10 +57,10 @@ def load_deceptive_signal(category, k_shot, freq=None):
         train_data: (img_paths, gt_paths, labels, types)
         test_data: (img_paths, gt_paths, labels, types)
     """
-    train_root = os.path.join(NORMAL_DIR, category, 'normal')
-    test_normal_root = os.path.join(DECEPTIVE_SIGNAL_DIR, category, 'normal', '0db')
-    test_abnormal_root = os.path.join(DECEPTIVE_SIGNAL_DIR, category, 'abnormal', '0db')
-    groundtruth_root = os.path.join(DECEPTIVE_SIGNAL_DIR, category, 'groundtruth', '0db')
+    train_root = os.path.join(NORMAL_DIR, map_category_to_dir(category), 'normal')
+    test_normal_root = os.path.join(DECEPTIVE_SIGNAL_DIR, map_category_to_dir(category), 'normal', '0db')
+    test_abnormal_root = os.path.join(DECEPTIVE_SIGNAL_DIR, map_category_to_dir(category), 'abnormal', '0db')
+    groundtruth_root = os.path.join(DECEPTIVE_SIGNAL_DIR, map_category_to_dir(category), 'groundtruth', '0db')
 
     # 收集训练集 (只包含正常样本，t00000-04000 时间段，按 k_shot 采样)
     train_img_paths = []

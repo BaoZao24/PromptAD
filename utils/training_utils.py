@@ -6,6 +6,7 @@ import torch
 
 from utils.visualization import *
 from loguru import logger
+from datasets import map_category_to_dir
 
 def get_optimizer_from_args(model, lr, weight_decay, **kwargs) -> torch.optim.Optimizer:
     return torch.optim.AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=lr,
@@ -32,10 +33,12 @@ def get_dir_from_args(TASK, root_dir, **kwargs):
     train_site = kwargs.get('train_site', None)
 
     # 跨站点测试时，目录名包含训练站点信息
+    mapped_class = map_category_to_dir(class_name)
+    mapped_train_site = map_category_to_dir(train_site) if train_site else None
     if train_site and train_site != class_name:
-        dir_class_name = f'{train_site}_to_{class_name}'
+        dir_class_name = f'{mapped_train_site}_to_{mapped_class}'
     else:
-        dir_class_name = class_name
+        dir_class_name = mapped_class
 
     # 对于 burst/dsss 等有 noise_level 的数据集，按 noise_level 区分目录
     noise_level = kwargs.get('noise_level', None)

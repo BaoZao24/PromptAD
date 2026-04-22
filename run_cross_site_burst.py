@@ -13,6 +13,8 @@ import subprocess
 
 import pandas as pd
 
+from datasets import map_category_to_dir
+
 DATASET = 'burst_signal'
 TRAIN_SITE = 'BinBo'
 TEST_SCENES = ['CaoChang', 'ShiJianGuangChang', 'TiYuGuan']
@@ -21,12 +23,12 @@ K_SHOT = 24
 
 
 def read_i_roc(root_dir, dataset, train_site, test_scene, noise_level, seed):
-    dir_class = f'{train_site}_to_{test_scene}'
+    dir_class = f'{map_category_to_dir(train_site)}_to_{map_category_to_dir(test_scene)}'
     csv_path = os.path.join(root_dir, dataset, dir_class, noise_level,
                             f'k_{K_SHOT}', 'csv', f'Seed_{seed}-results.csv')
     try:
         df = pd.read_csv(csv_path, index_col=0)
-        key = f'{dataset}-{test_scene}'
+        key = f'{dataset}-{map_category_to_dir(test_scene)}'
         return round(float(df.loc[key, 'i_roc']), 4)
     except Exception:
         return None
