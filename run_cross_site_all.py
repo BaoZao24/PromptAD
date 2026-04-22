@@ -18,10 +18,8 @@ from itertools import product
 
 import pandas as pd
 
-from datasets import map_category_to_dir
-
-TRAIN_SITE = 'BinBo'
-TEST_SCENES = ['CaoChang', 'ShiJianGuangChang', 'TiYuGuan']
+TRAIN_SITE = 'WeaponMuseum_spectrum'
+TEST_SCENES = ['Playground_spectrum', 'TimeSquare_spectrum', 'Gymnasium_spectrum']
 NOISE_LEVELS = ['m10db', 'm20db', 'm30db']
 DATASETS = ['dsss_signal', 'burst_signal', 'chirp_signal']
 K_SHOT = 24
@@ -32,12 +30,12 @@ K_SHOT = 24
 # --------------------------------------------------------------------------- #
 
 def read_i_roc(root_dir, dataset, train_site, test_scene, noise_level, seed):
-    dir_class = f'{map_category_to_dir(train_site)}_to_{map_category_to_dir(test_scene)}'
+    dir_class = f'{train_site}_to_{test_scene}'
     csv_path = os.path.join(root_dir, dataset, dir_class, noise_level,
                             f'k_{K_SHOT}', 'csv', f'Seed_{seed}-results.csv')
     try:
         df = pd.read_csv(csv_path, index_col=0)
-        key = f'{dataset}-{map_category_to_dir(test_scene)}'
+        key = f'{dataset}-{test_scene}'
         return round(float(df.loc[key, 'i_roc']), 4)
     except Exception:
         return None
@@ -189,3 +187,6 @@ if __name__ == '__main__':
     if not args.dry_run:
         for dataset in DATASETS:
             print_summary_table(args.root_dir, args.seed, dataset)
+        # 绘制热力图
+        import subprocess as sp
+        sp.run(f'python plot_heatmap.py --root-dir {args.root_dir} --seed {args.seed}', shell=True)

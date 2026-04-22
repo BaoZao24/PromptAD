@@ -1,8 +1,6 @@
 import pandas as pd
 import os
 
-from datasets import map_category_to_dir
-
 
 def write_results(results:dict, cur_class, total_classes, csv_path):
     keys_ = list(results.keys())
@@ -32,6 +30,6 @@ def write_results(results:dict, cur_class, total_classes, csv_path):
 
 
 def save_metric(metrics, total_classes, class_name, dataset, csv_path):
-    total_classes = [f"{dataset}-{map_category_to_dir(class_name_item)}" for class_name_item in total_classes]
-    class_name = f"{dataset}-{map_category_to_dir(class_name)}"
+    total_classes = [f"{dataset}-{class_name_item}" for class_name_item in total_classes]
+    class_name = f"{dataset}-{class_name}"
     write_results(metrics, class_name, total_classes, csv_path)

@@ -15,8 +15,8 @@ import matplotlib.gridspec as gridspec
 from PIL import Image
 
 
-TRAIN_SITE   = 'BinBo'
-TEST_SITES   = ['CaoChang', 'ShiJianGuangChang', 'TiYuGuan']
+TRAIN_SITE   = 'WeaponMuseum_spectrum'
+TEST_SITES   = ['Playground_spectrum', 'TimeSquare_spectrum', 'Gymnasium_spectrum']
 NOISE_LEVELS = ['m10db', 'm20db', 'm30db']
 DATASETS     = ['dsss_signal', 'burst_signal', 'chirp_signal']
 K_SHOT       = 24

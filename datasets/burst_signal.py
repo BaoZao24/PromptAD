@@ -2,10 +2,8 @@ import os
 import re
 from pathlib import Path
 
-from . import map_category_to_dir
 
-
-burst_signal_classes = ['BinBo', 'CaoChang', 'ShiJianGuangChang', 'TiYuGuan']
+burst_signal_classes = ['WeaponMuseum_spectrum', 'Playground_spectrum', 'TimeSquare_spectrum', 'Gymnasium_spectrum']
 
 
 NORMAL_DIR = '/mnt/data/wangbei/data/datasets/normal'
@@ -59,10 +57,10 @@ def load_burst_signal(category, k_shot, noise_level='m10db', freq=None, train_ca
         test_data: (img_paths, gt_paths, labels, types)
     """
     train_cat = train_category if train_category is not None else category
-    train_root = os.path.join(NORMAL_DIR, map_category_to_dir(train_cat), 'normal')
-    test_normal_root = os.path.join(BURST_SIGNAL_DIR, map_category_to_dir(category), 'normal', noise_level)
-    test_abnormal_root = os.path.join(BURST_SIGNAL_DIR, map_category_to_dir(category), 'abnormal', noise_level)
-    groundtruth_root = os.path.join(BURST_SIGNAL_DIR, map_category_to_dir(category), 'groundtruth', noise_level)
+    train_root = os.path.join(NORMAL_DIR, train_cat)
+    test_normal_root = os.path.join(BURST_SIGNAL_DIR, category, 'normal', noise_level)
+    test_abnormal_root = os.path.join(BURST_SIGNAL_DIR, category, 'abnormal', noise_level)
+    groundtruth_root = os.path.join(BURST_SIGNAL_DIR, category, 'groundtruth', noise_level)
 
     # 收集训练集 (只包含正常样本，t00000-04000 时间段，按 k_shot 采样)
     train_img_paths = []

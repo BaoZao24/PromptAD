@@ -4,8 +4,6 @@ import cv2
 import numpy as np
 from torch.utils.data import Dataset
 
-from . import map_category_to_dir
-
 
 class CLIPDataset(Dataset):
     def __init__(self, load_function, category, phase, k_shot, **kwargs):
@@ -59,6 +57,6 @@ class CLIPDataset(Dataset):
         img = cv2.resize(img, (target_size, target_size))
         gt = cv2.resize(gt, (target_size, target_size), interpolation=cv2.INTER_NEAREST)
 
-        img_name = f'{map_category_to_dir(self.category)}-{img_type}-{os.path.basename(img_path[:-4])}'
+        img_name = f'{self.category}-{img_type}-{os.path.basename(img_path[:-4])}'
 
         return img, gt, label, img_name, img_type

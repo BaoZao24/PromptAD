@@ -16,14 +16,14 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-TRAIN_SITE  = 'BinBo'
-TEST_SITES  = ['CaoChang', 'ShiJianGuangChang', 'TiYuGuan']
+TRAIN_SITE  = 'WeaponMuseum_spectrum'
+TEST_SITES  = ['Playground_spectrum', 'TimeSquare_spectrum', 'Gymnasium_spectrum']
 NOISE_LEVELS = ['m10db', 'm20db', 'm30db']
 DATASETS    = ['dsss_signal', 'burst_signal', 'chirp_signal']
 K_SHOT      = 24
 
 COL_LABELS  = ['DSSS', 'Burst', 'Chirp']
-SITE_SHORT  = {'CaoChang': 'CC', 'ShiJianGuangChang': 'SJGC', 'TiYuGuan': 'TYG'}
+SITE_SHORT  = {'Playground_spectrum': 'PG', 'TimeSquare_spectrum': 'TS', 'Gymnasium_spectrum': 'GYM'}
 JSR_SHORT   = {'m10db': '−10dB', 'm20db': '−20dB', 'm30db': '−30dB'}
 
 

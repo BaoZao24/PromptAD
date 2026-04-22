@@ -16,19 +16,6 @@ from .chirp_signal import load_chirp_signal, chirp_signal_classes
 mean_train = [0.48145466, 0.4578275, 0.40821073]
 std_train = [0.26862954, 0.26130258, 0.27577711]
 
-# 旧类别名 → 新磁盘目录名 的映射（数据集已改名）
-CATEGORY_DIR_MAPPING = {
-    'BinBo': 'WeaponMuseum_spectrum',
-    'CaoChang': 'Playground_spectrum',
-    'ShiJianGuangChang': 'TimeSquare_spectrum',
-    'TiYuGuan': 'Gymnasium_spectrum',
-}
-
-
-def map_category_to_dir(category):
-    """将逻辑类别名映射为磁盘上的实际目录名，无映射则原样返回"""
-    return CATEGORY_DIR_MAPPING.get(category, category)
-
 load_function_dict = {
     'mvtec': load_mvtec,
     'visa': load_visa,
@@ -73,6 +60,8 @@ def get_dataloader_from_args(phase, **kwargs):
             extra_kwargs['train_category'] = kwargs.get('train_site')
     elif kwargs.get('dataset') == 'deceptive_signal':
         extra_kwargs['freq'] = kwargs.get('freq', None)
+        if kwargs.get('train_site'):
+            extra_kwargs['train_category'] = kwargs.get('train_site')
 
     dataset_inst = CLIPDataset(
         load_function=load_function_dict[kwargs['dataset']],

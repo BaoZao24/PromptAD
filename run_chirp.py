@@ -10,7 +10,7 @@ import argparse
 import subprocess
 import os
 
-SCENES = ['BinBo', 'CaoChang', 'ShiJianGuangChang', 'TiYuGuan']
+SCENES = ['WeaponMuseum_spectrum', 'Playground_spectrum', 'TimeSquare_spectrum', 'Gymnasium_spectrum']
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
