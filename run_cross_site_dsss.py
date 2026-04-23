@@ -1,5 +1,5 @@
 """
-跨站点测试：用 BinBo 的正常样本训练（k-shot=24），对所有 JSR 级别的其他站点做 cross-site 测试，
+跨站点测试：用 WeaponMuseum_spectrum 的正常样本训练（k-shot=24），对所有 JSR 级别的其他站点做 cross-site 测试，
 运行结束后汇总输出结果表。
 
 用法:

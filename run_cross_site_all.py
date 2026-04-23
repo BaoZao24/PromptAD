@@ -1,5 +1,5 @@
 """
-并行跨站点测试：用 BinBo 正常样本训练（k-shot=24），
+并行跨站点测试：用 WeaponMuseum_spectrum 正常样本训练（k-shot=24），
 对所有信号类型 × 所有 JSR 级别 × 其他站点做 cross-site 测试。
 将所有 job 分发到可用 GPU 上并行运行，完成后打印汇总表。
 
