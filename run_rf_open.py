@@ -15,6 +15,8 @@ import subprocess
 
 import pandas as pd
 
+from plot_rf_open_heatmap import plot_heatmap as plot_rf_open_heatmap
+
 DATASET      = 'rf_open'
 SIGNAL_TYPES = ['burst', 'chirp', 'dsss']
 NOISE_LEVELS = ['m10db', 'm20db', 'm30db']
@@ -99,3 +101,5 @@ if __name__ == '__main__':
 
     if not args.dry_run:
         print_summary_table(args.root_dir, args.k_shot, args.seed)
+        out_path = os.path.join(args.root_dir, 'rf_open_heatmap.png')
+        plot_rf_open_heatmap(args.root_dir, args.k_shot, args.seed, out_path)
