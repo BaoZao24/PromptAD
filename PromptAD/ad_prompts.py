@@ -10,7 +10,17 @@ class_mapping = {
     "pcb4": "printed circuit board",
     "pipe_fryum": "pipe fryum",
     "chewinggum": "chewing gum",
-    "metal_nut": "metal nut"
+    "metal_nut": "metal nut",
+    # rf_open: {signal_type}_{jsr} -> 统一映射为 "radio frequency spectrum"
+    "burst_m10db": "radio frequency spectrum",
+    "burst_m20db": "radio frequency spectrum",
+    "burst_m30db": "radio frequency spectrum",
+    "chirp_m10db": "radio frequency spectrum",
+    "chirp_m20db": "radio frequency spectrum",
+    "chirp_m30db": "radio frequency spectrum",
+    "dsss_m10db":  "radio frequency spectrum",
+    "dsss_m20db":  "radio frequency spectrum",
+    "dsss_m30db":  "radio frequency spectrum",
 }
 
 
@@ -143,3 +153,9 @@ class_state_abnormal = {
         '{} with incomplete frequency range burst',
     ],
     }
+
+# rf_open 数据集：将 '{signal}_{jsr}' 格式的类名映射到对应信号类型的 prompt 列表
+for _jsr in ('m10db', 'm20db', 'm30db'):
+    class_state_abnormal[f'burst_{_jsr}'] = class_state_abnormal['burst']
+    class_state_abnormal[f'chirp_{_jsr}'] = class_state_abnormal['chirp']
+    class_state_abnormal[f'dsss_{_jsr}']  = class_state_abnormal['dsss']

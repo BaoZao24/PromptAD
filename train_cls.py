@@ -281,7 +281,7 @@ def str2bool(v):
 
 def get_args():
     parser = argparse.ArgumentParser(description='Anomaly detection')
-    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa', 'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal'])
+    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa', 'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal', 'rf_open'])
     parser.add_argument('--class_name', type=str, default='carpet')
     parser.add_argument('--train-site', type=str, default=None, help='训练站点（跨站点测试时指定，默认与 class_name 相同）')
 

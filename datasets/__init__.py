@@ -11,6 +11,7 @@ from .deceptive_signal import load_deceptive_signal, deceptive_signal_classes
 from .burst_signal import load_burst_signal, burst_signal_classes
 from .dsss_signal import load_dsss_signal, dsss_classes
 from .chirp_signal import load_chirp_signal, chirp_signal_classes
+from .rf_open_dataset import load_rf_open, rf_open_classes
 
 
 mean_train = [0.48145466, 0.4578275, 0.40821073]
@@ -25,6 +26,7 @@ load_function_dict = {
     'burst_signal': load_burst_signal,
     'dsss_signal': load_dsss_signal,
     'chirp_signal': load_chirp_signal,
+    'rf_open': load_rf_open,
 }
 
 dataset_classes = {
@@ -36,6 +38,7 @@ dataset_classes = {
     'burst_signal': burst_signal_classes,
     'dsss_signal': dsss_classes,
     'chirp_signal': chirp_signal_classes,
+    'rf_open': rf_open_classes,
 }
 
 def denormalization(x):
@@ -58,6 +61,8 @@ def get_dataloader_from_args(phase, **kwargs):
         extra_kwargs['noise_level'] = kwargs.get('noise_level', 'm10db')
         if kwargs.get('train_site'):
             extra_kwargs['train_category'] = kwargs.get('train_site')
+    elif kwargs.get('dataset') == 'rf_open':
+        pass  # category 已编码 signal_type + noise_level，无需额外 kwargs
     elif kwargs.get('dataset') == 'deceptive_signal':
         extra_kwargs['freq'] = kwargs.get('freq', None)
         if kwargs.get('train_site'):
