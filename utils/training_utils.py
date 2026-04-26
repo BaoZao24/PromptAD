@@ -42,6 +42,9 @@ def get_dir_from_args(TASK, root_dir, **kwargs):
     noise_level = kwargs.get('noise_level', None)
     if dataset == 'deceptive_signal':
         base_dir = os.path.join(root_dir, f'{dataset}', f'{dir_class_name}', '0db', f'k_{k_shot}')
+    elif dataset == 'rf_open':
+        # category already encodes signal_type + jsr (e.g. burst_m10db); no extra subdir
+        base_dir = os.path.join(root_dir, f'{dataset}', f'{dir_class_name}', f'k_{k_shot}')
     elif noise_level:
         base_dir = os.path.join(root_dir, f'{dataset}', f'{dir_class_name}', f'{noise_level}', f'k_{k_shot}')
     else:

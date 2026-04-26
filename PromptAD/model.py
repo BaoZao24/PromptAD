@@ -347,6 +347,24 @@ class PromptAD(torch.nn.Module):
 
         return score.reshape((N, self.grid_size[0], self.grid_size[1])).unsqueeze(1)
 
+    def score_cached(self, visual_features, task='cls'):
+        """Run anomaly scoring on pre-computed visual_features (from encode_image).
+        Skips the expensive image encoding step; use when image features are cached."""
+        if task != 'cls':
+            raise ValueError(f"score_cached only supports 'cls', got {task!r}")
+
+        textual_anomaly = self.calculate_textual_anomaly_score(visual_features, 'cls')
+
+        visual_anomaly_map = self.calculate_visual_anomaly_score(visual_features)
+        anomaly_map = F.interpolate(visual_anomaly_map, size=(self.out_size_h, self.out_size_w),
+                                    mode='bilinear', align_corners=False)
+
+        am_pix = anomaly_map.squeeze(1).numpy()
+        am_pix_list = [am_pix[i] for i in range(am_pix.shape[0])]
+        am_img_list = [textual_anomaly[i] for i in range(textual_anomaly.shape[0])]
+
+        return am_img_list, am_pix_list
+
     def forward(self, images, task):
 
         visual_features = self.encode_image(images)

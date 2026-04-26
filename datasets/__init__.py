@@ -81,7 +81,7 @@ def get_dataloader_from_args(phase, **kwargs):
                                   num_workers=0)
     else:
         data_loader = DataLoader(dataset_inst, batch_size=kwargs['batch_size'], shuffle=False,
-                                 num_workers=0)
+                                 num_workers=4, pin_memory=True)
 
 
     # debug_str = f"===> datasets: {kwargs['dataset']}, class name/len: {kwargs['class_name']}/{len(dataset_inst)}, batch size: {kwargs['batch_size']}"

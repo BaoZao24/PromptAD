@@ -52,8 +52,8 @@ class CLIPDataset(Dataset):
             mask = cv2.inRange(gt_color, lower_yellow, upper_yellow)
             gt = mask
 
-        # Use original resolution if image is small (<512), otherwise use 1024
-        target_size = max(orig_h, orig_w) if max(orig_h, orig_w) < 512 else 1024
+        # Cap large images at 1024; never upscale small images
+        target_size = min(max(orig_h, orig_w), 1024)
         img = cv2.resize(img, (target_size, target_size))
         gt = cv2.resize(gt, (target_size, target_size), interpolation=cv2.INTER_NEAREST)
 

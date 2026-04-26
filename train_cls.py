@@ -108,6 +108,23 @@ def fit(model,
     features2 = torch.cat(features2, dim=0)
     model.build_image_feature_gallery(features1, features2)
 
+    # ── Cache test image features once (image encoder is frozen during training) ──
+    # Each epoch only text-prompt changes; re-encoding test images is wasteful.
+    print('Caching test image features (one-time)...')
+    cached_test_batches = []
+    for (raw_data, mask, label, name, img_type) in tqdm(dataloader, desc='Cache test feats', leave=False):
+        data_t = [model.transform(Image.fromarray(f.numpy())) for f in raw_data]
+        data_t = torch.stack(data_t, dim=0)
+        vf = model.encode_image(data_t.to(device))
+        cached_test_batches.append({
+            'vf':    [v.cpu() for v in vf],         # keep on CPU to save GPU memory
+            'mask':  mask,
+            'label': label,
+            'name':  name,
+            'denorm': [denormalization(d.cpu().numpy()) for d in data_t],
+        })
+    # ─────────────────────────────────────────────────────────────────────────────
+
     optimizer = torch.optim.SGD(model.prompt_learner.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.Epoch, eta_min=1e-5)
     criterion = nn.CrossEntropyLoss().to(device)
@@ -184,23 +201,16 @@ def fit(model,
         gt_mask_list = []
         names = []
 
-        for (data, mask, label, name, img_type) in tqdm(dataloader, desc=f'Eval {epoch + 1}/{args.Epoch}', leave=False):
+        for batch in tqdm(cached_test_batches, desc=f'Eval {epoch + 1}/{args.Epoch}', leave=False):
+            vf_gpu = [v.to(device) for v in batch['vf']]
+            score_img, score_map = model.score_cached(vf_gpu, 'cls')
 
-            data = [model.transform(Image.fromarray(f.numpy())) for f in data]
-            data = torch.stack(data, dim=0)
-
-            for d, n, l, m in zip(data, name, label, mask):
-                test_imgs += [denormalization(d.cpu().numpy())]
-                l = l.numpy()
-                m = m.numpy()
+            test_imgs  += batch['denorm']
+            names      += list(batch['name'])
+            gt_list    += batch['label'].numpy().tolist()
+            for m in batch['mask'].numpy():
                 m[m > 0] = 1
-
-                names += [n]
-                gt_list += [l]
-                gt_mask_list += [m]
-
-            data = data.to(device)
-            score_img, score_map = model(data, 'cls')
+                gt_mask_list.append(m)
             score_maps += score_map
             scores_img += score_img
 
