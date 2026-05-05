@@ -70,7 +70,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--k-shot',  type=int,  default=K_SHOT)
     parser.add_argument('--gpu-id',  type=int,  default=0)
-    parser.add_argument('--epochs',  type=int,  default=50)
+    parser.add_argument('--epochs',  type=int,  default=25)
     parser.add_argument('--vis',     type=bool, default=False)
     parser.add_argument('--seed',    type=int,  default=111)
     parser.add_argument('--root-dir', type=str, default='./result')

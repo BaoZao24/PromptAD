@@ -90,10 +90,42 @@ def print_table(mat: np.ndarray):
     print()
 
 
+def save_csv(mat: np.ndarray, csv_path: str):
+    rows = []
+    for i, sig in enumerate(SIGNAL_TYPES):
+        row = {'signal': ROW_LABELS[i]}
+        row_vals = []
+        for j, nl in enumerate(NOISE_LEVELS):
+            v = mat[i, j]
+            row[nl] = round(float(v), 4) if not np.isnan(v) else None
+            if not np.isnan(v):
+                row_vals.append(v)
+        row['mean'] = round(float(np.mean(row_vals)), 4) if row_vals else None
+        rows.append(row)
+
+    # mean row
+    mean_row = {'signal': 'Mean'}
+    all_vals = []
+    for j, nl in enumerate(NOISE_LEVELS):
+        col_vals = [mat[i, j] for i in range(len(SIGNAL_TYPES)) if not np.isnan(mat[i, j])]
+        mean_row[nl] = round(float(np.mean(col_vals)), 4) if col_vals else None
+        all_vals.extend(col_vals)
+    mean_row['mean'] = round(float(np.mean(all_vals)), 4) if all_vals else None
+    rows.append(mean_row)
+
+    df = pd.DataFrame(rows).set_index('signal')
+    os.makedirs(os.path.dirname(os.path.abspath(csv_path)), exist_ok=True)
+    df.to_csv(csv_path)
+    print(f'Saved summary CSV → {csv_path}')
+
+
 def plot_heatmap(root_dir: str, k_shot: int, seed: int, out_path: str):
     mat = build_matrix(root_dir, k_shot, seed)
 
     print_table(mat)
+
+    csv_path = out_path.replace('.png', '.csv')
+    save_csv(mat, csv_path)
 
     fig, ax = plt.subplots(figsize=(6, 3.6))
 

@@ -1,119 +1,853 @@
-# PromptAD 在频谱异常检测场景下的改进分析
+# PromptAD 改进方案（聚焦改进1和改进3）
 
-结合仓库中现有实现（`@/mnt/data/wangbei/PromptAD/PromptAD/model.py:28-156`、`@/mnt/data/wangbei/PromptAD/PromptAD/ad_prompts.py:1-146`、`@/mnt/data/wangbei/PromptAD/datasets/dataset.py:1-63`、`@/mnt/data/wangbei/PromptAD/train_cls.py:83-234`），PromptAD 是一个在工业自然图像上训练的 CLIP + Prompt Tuning 框架。频谱图虽然表面上也是二维图像，但本质是 time–frequency 结构化信号，与 CLIP 的预训练分布差异极大。以下从 **域差、提示、视觉特征、训练、融合、架构** 六个角度给出改进建议。
-
----
-
-## 1. 根本问题：CLIP 预训练域 vs. 频谱图域
-
-- **背景**：`@/mnt/data/wangbei/PromptAD/PromptAD/model.py:198-208` 使用 `ViT-B-16-plus-240` + `laion400m_e32`，训练分布是自然图像。
-- **归一化常数** `mean_train/std_train`（`@/mnt/data/wangbei/PromptAD/PromptAD/model.py:20-21`）是 ImageNet/CLIP 的 RGB 分布，频谱图（伪彩/灰度/dB 值映射）与之分布完全错位。
-
-**改进建议**
-
-- **更换或再对齐 backbone**：
-  - 用频谱/时频图上自监督预训练的 ViT（MAE/DINOv2 在 spectrogram 上继续预训练）替换 CLIP 视觉塔；
-  - 若要保留文本分支，使用 **SigLIP/EVA-CLIP** + 在频谱图 + 文本 caption 上做一段 LoRA/Adapter 对齐（冻结大部分，只训 adapter）。
-- **替换归一化统计量**：对所选数据集估计 spectrogram 的 `mean/std`，而不是直接用 CLIP 统计量。
-- **保留数值语义**：频谱中"强度 dB 值"本身承载信息，不要做 `BGR → RGB` 的三通道拷贝，推荐三通道分别承载：`[dB 归一化, time-gradient, frequency-gradient]`，让模型显式感知时/频方向。
+> 目标：只保留两类最适合当前项目的改进方向：
+> - **改进1：特征提取**
+> - **改进3：提示词（Prompt）**
+>
+> 这份文档尽量写得直白，并且对每篇参考文献都说明：
+> - **用于什么模块**
+> - **作用是什么**
+> - **为什么适合我们这个频谱跨场景任务**
 
 ---
 
-## 2. 输入分辨率与 Patch 破坏频谱结构
+## 一、先说结论：这两个方向为什么值得先做
 
-- `@/mnt/data/wangbei/PromptAD/PromptAD/model.py:186-191` 会把频谱图 Resize 到 `240×240`，`@/mnt/data/wangbei/PromptAD/datasets/dataset.py:55-58` 又先 resize 到 1024 再交给模型。
-- 频谱异常（chirp 斜线、burst 窄条、DSSS 宽带）都是**极细的线状/条状结构**，双三次插值 + ViT 16×16 patch 化会直接抹掉斜率 / 宽度这类关键特征。
+我们现在的 PromptAD，本质上还是把频谱图当成普通图片来处理。
 
-**改进建议**
+但你的任务其实有两个很明显的特点：
 
-- **抗混叠的各向异性 resize**：时间轴和频率轴分别保持原 sampling，避免等比缩放把窄条压没。
-- **更小 patch 或窗口化推理**：改用 ViT-B/8 或使用 WinCLIP 式的滑窗 + 多尺度 patch，能更好保留窄带/短时结构。
-- **保留时/频坐标先验**：在 patch embedding 上拼接显式的 `(t, f)` 位置编码（而不是通用 2D sincos），让模型知道"纵轴是频率、横轴是时间"。
+1. **频谱图不是自然图像**
+   - CLIP 原本看的是猫、狗、风景图。
+   - 我们现在给它看的是时频图。
+   - 所以第一件事就是：**让特征提取模块更懂频谱图。**
 
----
+2. **异常类型和场景都有明显语义**
+   - 异常类型有：`burst`、`chirp`、`dsss`
+   - 场景有：`WeaponMuseum_spectrum`、`Playground_spectrum`、`TimeSquare_spectrum`、`Gymnasium_spectrum`
+   - 所以第二件事就是：**把提示词写得更像这个任务本身，而不是泛泛地写“abnormal spectrum”。**
 
-## 3. 文本 Prompt 的重构
+因此，最值得优先做的就是：
 
-目前 `@/mnt/data/wangbei/PromptAD/PromptAD/ad_prompts.py:64-144` 已经为 chirp/burst/dsss/deceptive 写了视觉化描述，但还存在几个问题：
-
-1. **classname 无语义**：场景名 `BinBo / CaoChang / ShiJianGuangChang / TiYuGuan`（拼音）进入 CLIP 文本编码器等价于随机 token，`abnormal_prompt_prefix + classname` 的语义一半作废（`@/mnt/data/wangbei/PromptAD/PromptAD/model.py:39-63`）。
-2. **提示多样性差**：不同场景全用同一套 "interference/injected" 描述，失去类间区分。
-3. **缺物理量描述**：没有"斜率 (chirp rate)""带宽""持续时间""信噪比"等 domain 术语。
-
-**改进建议**
-
-- **把 classname 替换为可理解的语义锚点**，例如：
-  - `BinBo → "wideband urban RF scene"`
-  - `CaoChang → "open field low-noise RF scene"`
-  - 在 `class_mapping` 里加英文描述，而不是直接丢拼音。
-- **按信号类型分层 prompt**：
-  - 结构级：`"spectrogram with a narrow vertical streak"`、`"spectrogram with a diagonal slope from low to high frequency"`；
-  - 物理级：`"RF signal with chirp rate"`、`"short-duration burst in narrow band"`；
-  - 对比级（triplet 用）：把正常 prompt 也写丰富，例如 `"clean background noise floor"`、`"no man-made signal in band"`，而不是只靠可学习 `N ... N`。
-- **引入 learnable scene-conditioned prompt**：当前 `n_ctx=4`, `n_pro=3`（`@/mnt/data/wangbei/PromptAD/train_cls.py:312-315`），可把 `normal_ctx` 拆为"全局共享 ctx + 每场景独立 ctx"，避免 4 个场景强行共享同一组上下文。
+- **改进1：让视觉特征更适合频谱图**
+- **改进3：让文本提示更适合“异常类型 + 场景”**
 
 ---
 
-## 4. Visual Feature Gallery 的调整
+# 改进1：特征提取模块怎么改
 
-`@/mnt/data/wangbei/PromptAD/PromptAD/model.py:290-348` 用两层 patch token 的最近邻距离做 visual score（PatchCore 思想）。在频谱场景下：
+## 1.1 当前问题
 
-- **问题 1**：正常样本里也包含随机的背景噪声斑点，patch 级最近邻对"新出现的斑点"非常敏感 → 大量假阳性。
-- **问题 2**：K-shot=1 时 gallery 只有一个时间片段，覆盖率低，正常 burst/间歇信号容易被误判。
+你现在的特征提取模块主要在：
+- `@/mnt/data/wangbei/PromptAD/PromptAD/model.py:186-191`
+- `@/mnt/data/wangbei/PromptAD/PromptAD/model.py:203-208`
 
-**改进建议**
+也就是：
+- 用 CLIP 的视觉编码器提特征；
+- 输入前先 resize；
+- 再用 CLIP 默认的 `mean/std` 做归一化。
 
-- **Row-wise / Column-wise gallery**：频谱中同一行（固定频率）和同一列（固定时刻）本来就具有时/频对称性，把 gallery 拆成 per-row / per-column 统计（均值+方差），对异常的判定更贴近物理意义。
-- **Patch coreset + 频率 bin 条件化**：将 patch 特征按所属频率 bin 分组，比较时只与同频率 bin 的正常 patch 做最近邻，避免把"不同频段正常 patch"当成候选。
-- **使用 rank/percentile 距离** 代替 `min`（`@/mnt/data/wangbei/PromptAD/PromptAD/model.py:340-344`），对 outlier patch 更鲁棒。
+问题主要有 3 个：
 
----
+### 问题 A：CLIP 不懂频谱图
 
-## 5. 训练损失与融合策略
+CLIP 预训练时见的是自然图片，不是无线电频谱图。
+所以它提到的特征，很多更偏向“图片纹理”，不一定真正抓住：
+- chirp 的斜率
+- burst 的短时窄带结构
+- DSSS 的宽带铺展结构
 
-- 当前 loss（`@/mnt/data/wangbei/PromptAD/train_cls.py:162-169`）：`V2T CE + Triplet + handle/learned 一致性`，没有 **利用频谱已知的 synthetic 异常**。
-- 最终 score 用 harmonic mean：
-  ```@/mnt/data/wangbei/PromptAD/PromptAD/model.py:358
-              anomaly_map = 1. / (1. / textual_anomaly_map + 1. / visual_anomaly_map)
-  ```
-  在频谱域下 textual 分支常常不可靠（CLIP 文本先验 OOD），harmonic mean 会被较小的 textual score "拖死"。
+### 问题 B：三通道信息利用不充分
 
-**改进建议**
+现在本质上还是把一张频谱图当作普通 RGB 图输入。
+但频谱图真正有用的信息其实是：
+- 原始强度
+- 时间方向变化
+- 频率方向变化
 
-- **合成异常做自监督辅助**：频谱场景下合成异常几乎免费：
-  - 在正常样本上 **贴一条 chirp 斜线 / 窄带 burst / DSSS 宽带条** → 得到 `pseudo-abnormal` 配对；
-  - 加一个监督项 `BCE(score, 合成 mask)`，pixel-level 监督直接让 anomaly map 对齐物理位置，比纯 triplet 强得多。
-- **MixUp in spectrum domain**：随机把不同频段或不同场景的正常 patch 拼接，作为 hard negative 提升判别力。
-- **可学习的融合权重**：把 `textual`/`visual` 融合权重做成 per-class 可学习 scalar（甚至 per-pixel gate），避免 harmonic mean 被某一支主导：
-  ```
-  anomaly = sigmoid(alpha) * textual + (1-sigmoid(alpha)) * visual
-  ```
-- **用 ground-truth mask（训练时不可用，但测试时有）重新校准**：测试数据已给了 groundtruth（`@/mnt/data/wangbei/PromptAD/datasets/burst_signal.py:120-124`），可以用极少量异常 sample 做 unsupervised 阈值自适应（PRO/F1 最优点）。
+### 问题 C：跨场景时背景差异会干扰特征
 
----
+你的任务不是单场景，而是 **cross-site**：
+- 在一个场景训练
+- 去另一个场景测试
 
-## 6. 架构级增强（针对频谱）
-
-- **Axial attention / FFT-enhanced branch**：在视觉塔上并一条 frequency-axis 的 1D attention 分支，让模型显式建模"跨频率 / 跨时间"的长程相关性。
-- **Physics-guided head**：在输出前加一个小的分类头，显式预测 `{ chirp, burst, dsss, deceptive, clean }`，用 prompt-level 标签做弱监督，可与 anomaly map 共享 backbone。
-- **Cross-noise robustness**：现有设置对 `m10db/m20db/m30db` 是分别训的（`@/mnt/data/wangbei/PromptAD/train_cls.py:319`）。改为训练时随机加噪声退化作为增广，测试一个模型覆盖多 SNR，更贴近实战。
-- **Cross-scene generalization**：目前 cross-site 是换 `train_category`（`@/mnt/data/wangbei/PromptAD/datasets/burst_signal.py:59-60`），但 prompt/gallery 还都绑定在训练场景上。可以把 visual gallery 设计成"场景无关的频率统计量"，让模型对未见场景更稳。
+不同场景的背景噪声底、干扰密度、频谱纹理都不一样。
+如果特征提取模块过度记住训练场景背景，就会导致跨场景性能下降。
 
 ---
 
-## 建议的优先级（性价比排序）
+## 1.2 特征提取改进方案（按推荐顺序）
 
-- **P0（最容易显著提升）**
-  - 合成异常 + pixel-level 辅助监督（第 5 节）
-  - 可学习融合权重替换 harmonic mean（第 5 节）
-  - classname 语义化 + 场景条件 prompt（第 3 节）
-- **P1**
-  - Patch gallery 按频率 bin 条件化（第 4 节）
-  - 三通道输入包含时/频梯度（第 1 节）
-- **P2（改动较大）**
-  - 在 spectrogram 上做 CLIP LoRA/MAE 对齐（第 1 节）
-  - Axial/FFT 辅助分支（第 6 节）
+## 方案 1：重新设计输入通道，让模型看到“时域变化”和“频域变化”
+
+### 怎么做
+
+把输入的 3 个通道改成：
+- **通道 1**：原始频谱图（dB 或归一化后的能量图）
+- **通道 2**：时间方向梯度
+- **通道 3**：频率方向梯度
+
+也就是不要再简单复制 3 份灰度图，而是给模型更有信息量的 3 个视角。
+
+### 用于什么模块
+
+- **模块**：输入预处理模块
+- **代码位置**：`PromptAD/model.py` 里的 `transform` 前后，或者 `datasets/` 里读图后构造三通道
+
+### 作用是什么
+
+- 让模型更容易识别：
+  - chirp 的斜线趋势
+  - burst 的竖向突发结构
+  - dsss 的宽带能量分布
+- 比“纯灰度复制三份”更符合频谱图本身的结构
+
+### 为什么适合我们任务
+
+因为你的异常不是靠颜色分辨，而是靠**结构变化**分辨。
+其中：
+- chirp 更依赖斜率
+- burst 更依赖短时突发边缘
+- dsss 更依赖频带内部的能量分布
+
+所以加入梯度通道，能直接加强这些信息。
+
+### 参考文献
+
+- **Salamon & Bello, 2017, arXiv:1608.04363**
+
+### 这篇文献用于哪个模块
+
+- **用于模块**：输入表示 / 特征输入构造
+
+### 这篇文献的作用
+
+- 它说明在声音与频谱任务中，不同通道可以承载不同类型的谱信息，而不是照搬普通 RGB 图像的输入方式。
 
 ---
 
-如果需要，我可以先从 **P0 的合成异常辅助监督** 或 **可学习融合权重** 入手，直接在 `@/mnt/data/wangbei/PromptAD/train_cls.py` 和 `@/mnt/data/wangbei/PromptAD/PromptAD/model.py` 中给出具体的代码改动草案。你希望从哪一项开始？
+## 方案 2：先做最简单的域对齐——重算频谱图自己的 mean/std
+
+### 怎么做
+
+把 `@/mnt/data/wangbei/PromptAD/PromptAD/model.py:20-21` 里 CLIP 默认的：
+- `mean_train`
+- `std_train`
+
+换成你自己的频谱数据集统计值。
+
+### 用于什么模块
+
+- **模块**：输入归一化模块
+- **代码位置**：`PromptAD/model.py:20-21`
+
+### 作用是什么
+
+- 让模型输入分布更接近真实频谱数据；
+- 减少“自然图像统计量”和“频谱图统计量”不匹配的问题。
+
+### 为什么适合我们任务
+
+这是最便宜、最稳的一步。
+尤其你现在的数据是 RF 频谱图，不同于照片，直接用 CLIP 默认值往往不合理。
+
+### 参考文献
+
+- **He et al., MAE, CVPR 2022, arXiv:2111.06377**
+- **Huang et al., Audio-MAE, NeurIPS 2022, arXiv:2207.06405**
+
+### 这些文献用于哪个模块
+
+- **用于模块**：视觉输入分布对齐 / 频谱域建模
+
+### 这些文献的作用
+
+- 它们都说明了：当任务域和原始图像域不同的时候，继续做域内预训练或域内适配是有效的。
+- 对我们来说，最基础的一步就是先把输入统计量对齐。
+
+---
+
+## 方案 3：给 CLIP 加一个轻量 Adapter / LoRA，专门适配频谱图
+
+### 怎么做
+
+不直接把整个 CLIP 重新训练，而是在视觉编码器旁边加一个很小的可训练模块：
+- **Adapter**：小型特征修正层
+- **LoRA**：低秩微调模块
+
+让这个小模块学会把“频谱图特征”调整得更适合当前任务。
+
+### 用于什么模块
+
+- **模块**：视觉特征提取模块
+- **代码位置**：`PromptAD/model.py` 中 `self.model.visual` 相关层
+
+### 作用是什么
+
+- 不用大改原模型；
+- 参数少、训练稳定；
+- 比全量微调更适合你现在这种数据量不大的场景。
+
+### 为什么适合我们任务
+
+你的任务是少样本、跨场景。
+如果直接把 CLIP 全部训一遍：
+- 容易过拟合
+- 很吃显存
+- 不稳定
+
+而 Adapter / LoRA 适合：
+- 数据少
+- 希望尽量保留 CLIP 原能力
+- 又想让它适应频谱图
+
+### 参考文献 1
+
+- **Gao et al., CLIP-Adapter, IJCV 2024, arXiv:2110.04544**
+
+### 这篇文献用于哪个模块
+
+- **用于模块**：视觉特征适配模块
+
+### 这篇文献的作用
+
+- 提供一种在不大改 CLIP 主体的情况下，让特征更适合下游任务的方法。
+
+### 参考文献 2
+
+- **Zhang et al., Tip-Adapter, ECCV 2022, arXiv:2207.09519**
+
+### 这篇文献用于哪个模块
+
+- **用于模块**：少样本特征适配模块
+
+### 这篇文献的作用
+
+- 说明在少样本条件下，轻量适配能快速提升 CLIP 下游效果。
+
+### 参考文献 3
+
+- **Hu et al., LoRA, ICLR 2022, arXiv:2106.09685**
+
+### 这篇文献用于哪个模块
+
+- **用于模块**：参数高效微调模块
+
+### 这篇文献的作用
+
+- 说明只训练少量低秩参数，也能让大模型适应新领域。
+
+---
+
+## 方案 4：用更懂频谱图的骨架做初始化，再接 PromptAD
+
+### 怎么做
+
+把视觉编码器从普通 CLIP backbone，换成或借鉴：
+- **AST**
+- **BEATs**
+- **Audio-MAE**
+
+这些模型本来就是在声音频谱图上训练出来的。
+
+### 用于什么模块
+
+- **模块**：主干视觉编码器（backbone）
+- **代码位置**：`PromptAD/model.py` 的 `get_model()`
+
+### 作用是什么
+
+- 提取出来的特征更接近频谱图结构；
+- 对 chirp、burst、dsss 这种典型时频结构更敏感。
+
+### 为什么适合我们任务
+
+你做的是频谱异常检测，不是普通图片异常检测。
+如果 backbone 天生就见过 spectrogram，它对这个任务的起点会更高。
+
+### 参考文献 1
+
+- **Gong et al., AST, Interspeech 2021, arXiv:2104.01778**
+
+### 这篇文献用于哪个模块
+
+- **用于模块**：频谱视觉 backbone
+
+### 这篇文献的作用
+
+- 证明 Transformer 在 spectrogram 上可以直接学到有效特征。
+
+### 参考文献 2
+
+- **Chen et al., BEATs, ICML 2023, arXiv:2212.09058**
+
+### 这篇文献用于哪个模块
+
+- **用于模块**：音频/频谱预训练 backbone
+
+### 这篇文献的作用
+
+- 提供更强的频谱预训练表示，适合迁移到你的异常检测任务。
+
+### 参考文献 3
+
+- **Huang et al., Audio-MAE, NeurIPS 2022, arXiv:2207.06405**
+
+### 这篇文献用于哪个模块
+
+- **用于模块**：频谱自监督预训练 backbone
+
+### 这篇文献的作用
+
+- 说明在没有大量标注的情况下，也能先学到适合频谱的特征。
+
+---
+
+## 1.3 面向“场景”的特色特征改进
+
+这一部分是最贴合你项目的，因为你不是只做单一场景，而是要跨站点。
+
+### 场景特点
+
+根据 README，你现在的场景有：
+- `WeaponMuseum_spectrum`
+- `Playground_spectrum`
+- `TimeSquare_spectrum`
+- `Gymnasium_spectrum`
+
+这些场景本质上代表不同的：
+- 背景噪声底
+- 环境电磁复杂度
+- 正常信号稀疏度
+- 频谱纹理分布
+
+### 可以做的场景化改进
+
+## 场景化改进 A：做“场景无关特征 + 场景相关补偿”
+
+### 思路
+
+把视觉特征拆成两部分：
+- **共享特征**：所有场景都通用，比如 burst / chirp / dsss 的基本结构
+- **场景补偿特征**：只负责适应某个场景的背景差异
+
+### 用于什么模块
+
+- **模块**：视觉特征提取模块的后半段
+- **实现方式**：共享 backbone + 小型 scene adapter
+
+### 作用是什么
+
+- 减少模型只记住训练场景背景；
+- 提高 cross-site 泛化能力。
+
+### 对应参考文献
+
+- **Cha et al., MIRO, ECCV 2022, arXiv:2203.10789**
+
+### 这篇文献用于哪个模块
+
+- **用于模块**：跨域泛化 / 场景泛化模块
+
+### 这篇文献的作用
+
+- 目标是让模型不要过度依赖某一个训练域的特征，对你这种跨场景测试特别有参考价值。
+
+---
+
+## 场景化改进 B：训练时让不同场景风格混合，逼模型学“异常本身”
+
+### 思路
+
+在训练时做更强的数据扰动：
+- 加不同强度噪声
+- 改变背景纹理
+- 做不同场景风格的混合
+
+这样模型就更难只记住某个固定背景。
+
+### 用于什么模块
+
+- **模块**：数据增强模块 + 特征学习模块
+
+### 作用是什么
+
+- 强迫模型关注异常结构，而不是背景场景。
+
+### 对应参考文献
+
+- **Cha et al., SWAD, NeurIPS 2021, arXiv:2102.08604**
+
+### 这篇文献用于哪个模块
+
+- **用于模块**：跨域泛化训练策略
+
+### 这篇文献的作用
+
+- 它的核心思想是提升模型在域外数据上的稳定性，对 cross-site 很有借鉴意义。
+
+---
+
+## 1.4 改进1的推荐落地顺序
+
+建议按下面顺序做：
+
+1. **先重算 mean/std**
+2. **再改成三通道输入：原图 + 时间梯度 + 频率梯度**
+3. **然后加 LoRA / Adapter**
+4. **最后再考虑换 AST / BEATs backbone**
+
+因为：
+- 前两步最便宜；
+- 第三步性价比最高；
+- 第四步改动最大。
+
+---
+
+# 改进3：提示词模块怎么改
+
+## 3.1 当前问题
+
+当前提示词相关代码主要在：
+- `@/mnt/data/wangbei/PromptAD/PromptAD/ad_prompts.py`
+- `@/mnt/data/wangbei/PromptAD/PromptAD/model.py:37-63`
+
+现在已经比原始 PromptAD 更适合频谱了，因为你已经给：
+- `chirp`
+- `burst`
+- `dsss`
+
+写了一些专门描述。
+
+但还存在 3 个问题：
+
+### 问题 A：场景名字没有进 prompt 语义
+
+现在 `class_mapping` 主要把：
+- `burst_m10db`
+- `chirp_m10db`
+- `dsss_m10db`
+
+统一映射成 `radio frequency spectrum`。
+
+这意味着模型知道“这是个频谱图”，但**不知道这是哪种场景下的频谱图**。
+
+### 问题 B：提示词更像“异常的英文翻译”，还不够“任务化”
+
+比如：
+- `with interference`
+- `with anomalous signal`
+
+这类词虽然没错，但还是偏泛。
+对 burst / chirp / dsss 来说，更关键的是：
+- 形状
+- 位置
+- 持续时间
+- 带宽
+- 是否跨频段
+
+### 问题 C：还没有“场景特色 prompt”
+
+你的任务不是只区分异常类型，还要跨场景泛化。
+所以 prompt 最好能显式描述：
+- 背景更空旷还是更复杂
+- 噪声底高还是低
+- 正常频谱通常更稀疏还是更密集
+
+---
+
+## 3.2 提示词改进方案（按推荐顺序）
+
+## 方案 1：把 prompt 从“泛异常”改成“结构异常”
+
+### 怎么做
+
+不要只写：
+- `abnormal radio frequency spectrum`
+- `radio frequency spectrum with interference`
+
+而是写得更结构化：
+
+### chirp 建议写法
+- `a spectrogram with a diagonal rising trace`
+- `a spectrogram with a slanted narrowband interference line`
+- `a spectrogram with an abnormal chirp-like slope`
+
+### burst 建议写法
+- `a spectrogram with a short-duration narrowband burst`
+- `a spectrogram with a transient vertical streak`
+- `a spectrogram with a weak short pulse in a narrow frequency band`
+
+### dsss 建议写法
+- `a spectrogram with a wideband spread-spectrum-like band`
+- `a spectrogram with abnormal wideband energy spread`
+- `a spectrogram with uneven power distribution across a wide frequency band`
+
+### 用于什么模块
+
+- **模块**：手工异常 prompt 模块
+- **代码位置**：`PromptAD/ad_prompts.py` 的 `class_state_abnormal`
+
+### 作用是什么
+
+- 让文本编码器更容易对齐到真正的视觉结构；
+- 减少“只会泛泛说 abnormal、interference”的问题。
+
+### 参考文献
+
+- **Jeong et al., WinCLIP, CVPR 2023, arXiv:2303.14814**
+
+### 这篇文献用于哪个模块
+
+- **用于模块**：prompt 模板设计模块
+
+### 这篇文献的作用
+
+- 它说明一个任务不应该只靠单条 prompt，而应该用多个结构化模板做组合，提升稳定性。
+
+---
+
+## 方案 2：引入 object-agnostic prompt，让模型少依赖类别名，多依赖“正常/异常”概念
+
+### 怎么做
+
+参考 AnomalyCLIP，不要把 prompt 强绑定在某个具体类名上，而是写成：
+- `a normal radio frequency spectrogram`
+- `an anomalous radio frequency spectrogram`
+- `a normal spectrogram pattern in this scene`
+- `an anomalous signal pattern in this scene`
+
+再配合可学习 token，让模型自己学细节。
+
+### 用于什么模块
+
+- **模块**：可学习 prompt 模块
+- **代码位置**：`PromptAD/model.py` 里 `PromptLearner`
+
+### 作用是什么
+
+- 减少类别名写得不好带来的影响；
+- 更适合跨场景、跨异常类型泛化。
+
+### 为什么适合我们任务
+
+因为你这个任务的关键不是识别“物体类别”，而是识别：
+- 这个频谱结构是不是正常
+- 这个干扰形状是不是异常
+
+所以 object-agnostic prompt 非常适合。
+
+### 参考文献
+
+- **Zhou et al., AnomalyCLIP, ICLR 2024, arXiv:2310.18961**
+
+### 这篇文献用于哪个模块
+
+- **用于模块**：正常/异常 prompt 学习模块
+
+### 这篇文献的作用
+
+- 它证明了：在异常检测里，不一定非要依赖强类别语义，直接学习“正常”和“异常”的通用表达，效果反而更稳。
+
+---
+
+## 方案 3：做“场景感知 prompt”——把不同场景写进提示词
+
+这是最值得你强调的“特色改进”。
+
+### 怎么做
+
+把场景从简单的名字，改成更有语义的英文描述。
+
+例如：
+
+- `WeaponMuseum_spectrum`
+  - `an indoor radio scene with relatively stable background spectrum`
+- `Playground_spectrum`
+  - `an open outdoor radio scene with sparse background activity`
+- `TimeSquare_spectrum`
+  - `a crowded urban radio scene with complex background interference`
+- `Gymnasium_spectrum`
+  - `a semi-enclosed activity area with moderate spectrum occupancy`
+
+然后把 prompt 写成两层：
+
+### 正常 prompt
+- `a normal radio frequency spectrogram in an open outdoor radio scene with sparse background activity`
+- `a clean spectrum pattern in a crowded urban radio scene with complex background interference`
+
+### 异常 prompt
+- `a spectrogram with a burst anomaly in a crowded urban radio scene with complex background interference`
+- `a spectrogram with a chirp-like interference in an open outdoor radio scene with sparse background activity`
+
+### 用于什么模块
+
+- **模块**：场景条件 prompt 模块
+- **代码位置**：
+  - `PromptAD/ad_prompts.py` 增加 `scene_mapping`
+  - `PromptAD/model.py` 的 `PromptLearner` 拼接 scene text
+
+### 作用是什么
+
+- 让模型知道“同样的异常，在不同场景里长得会不太一样”；
+- 降低跨场景时文本分支失效的问题；
+- 让 prompt 更像“任务说明”，不是孤立的标签。
+
+### 为什么适合我们任务
+
+因为你的数据天然就是按场景组织的。
+如果 prompt 里完全没有场景信息，那模型只能从图像特征里硬猜背景差异。
+加入场景描述后，文本分支就能成为一个“场景先验”。
+
+### 参考文献 1
+
+- **Zhou et al., CoCoOp, CVPR 2022, arXiv:2203.05557**
+
+### 这篇文献用于哪个模块
+
+- **用于模块**：条件化 prompt 模块
+
+### 这篇文献的作用
+
+- CoCoOp 的核心思想就是：prompt 不一定固定，可以根据输入条件动态变化。
+- 在你的任务里，这个“条件”就可以是场景。
+
+### 参考文献 2
+
+- **Zhou et al., CoOp, IJCV 2022, arXiv:2109.01134**
+
+### 这篇文献用于哪个模块
+
+- **用于模块**：可学习上下文 token 模块
+
+### 这篇文献的作用
+
+- 说明 prompt 的上下文部分可以学习，不必手工写死。
+- 你可以保留现在的 `n_ctx` 机制，但让它和场景描述一起工作。
+
+---
+
+## 方案 4：让每种异常类型都有“专属词库”
+
+### 怎么做
+
+针对每种异常类型，分别准备多组 prompt：
+
+### chirp 词库
+重点词：
+- diagonal
+- slanted
+- rising
+- falling
+- sweep
+- chirp-like
+
+### burst 词库
+重点词：
+- short-duration
+- transient
+- pulse-like
+- narrowband
+- vertical streak
+
+### dsss 词库
+重点词：
+- wideband
+- spread-spectrum-like
+- diffuse energy
+- uniform band
+- broad occupancy
+
+然后每次训练或测试时：
+- 不是只用一句 prompt；
+- 而是从词库里组合多句，再做平均。
+
+### 用于什么模块
+
+- **模块**：异常类型 prompt 库
+- **代码位置**：`PromptAD/ad_prompts.py`
+
+### 作用是什么
+
+- 增强 prompt 多样性；
+- 防止某一句写法刚好不适合当前数据；
+- 提升文本分支稳定性。
+
+### 参考文献
+
+- **Jeong et al., WinCLIP, CVPR 2023, arXiv:2303.14814**
+
+### 这篇文献用于哪个模块
+
+- **用于模块**：prompt ensemble 模块
+
+### 这篇文献的作用
+
+- 支持“多模板组合比单模板更稳”这个思路。
+
+---
+
+## 3.3 面向“场景”的特色提示词改进
+
+这一部分最适合写进你的实验计划里，因为它最像你自己的创新点。
+
+## 场景化改进 A：每个场景用“背景描述 + 异常描述”两层 prompt
+
+### 例子
+
+对于 `TimeSquare_spectrum`：
+
+- 正常：
+  - `a normal spectrogram in a crowded urban radio scene with dense background activity`
+- Burst 异常：
+  - `a crowded urban spectrogram with a short narrow burst signal`
+- Chirp 异常：
+  - `a crowded urban spectrogram with a slanted chirp-like interference trace`
+
+对于 `Playground_spectrum`：
+
+- 正常：
+  - `a clean spectrogram in an open outdoor radio scene with sparse activity`
+- Burst 异常：
+  - `a sparse outdoor spectrogram with a weak short burst signal`
+
+### 用于什么模块
+
+- **模块**：场景 + 异常联合 prompt 模块
+
+### 作用是什么
+
+- 让“异常类型”和“场景背景”同时进入文本分支。
+
+---
+
+## 场景化改进 B：区分“场景本底词”和“异常结构词”
+
+### 思路
+
+把 prompt 拆成两部分：
+
+- **场景本底词**：
+  - urban
+  - open outdoor
+  - indoor stable background
+  - moderate occupancy
+
+- **异常结构词**：
+  - diagonal chirp
+  - transient burst
+  - wideband spread
+
+最后做组合。
+
+### 用于什么模块
+
+- **模块**：prompt 组合模块
+
+### 作用是什么
+
+- 结构更清楚；
+- 方便做消融实验；
+- 更容易看出到底是“场景词”有效，还是“异常词”有效。
+
+### 参考文献
+
+- **Jeong et al., WinCLIP, CVPR 2023, arXiv:2303.14814**
+- **Zhou et al., CoCoOp, CVPR 2022, arXiv:2203.05557**
+
+### 这些文献用于哪个模块
+
+- **WinCLIP**：用于 prompt 组合与多模板设计
+- **CoCoOp**：用于条件化 prompt 设计
+
+### 这些文献的作用
+
+- 一个强调“多模板组合”，一个强调“根据条件动态调整 prompt”，两者结合后很适合你的场景化 prompt。
+
+---
+
+## 3.4 改进3的推荐落地顺序
+
+建议按下面顺序做：
+
+1. **先把 burst / chirp / dsss 的 prompt 改成更结构化的描述**
+2. **再给 4 个场景补上英文语义描述**
+3. **然后把 prompt 改成“场景词 + 异常词”的组合形式**
+4. **最后再尝试 AnomalyCLIP / CoCoOp 风格的可学习场景条件 prompt**
+
+---
+
+# 最后给出一个最适合当前项目的实施建议
+
+如果你现在只想选 **一个特征提取改进 + 一个提示词改进** 来做，我建议这样搭配：
+
+## 推荐组合 A（最稳）
+
+### 特征提取
+- **三通道输入：原图 + 时间梯度 + 频率梯度**
+
+### 提示词
+- **场景化结构 prompt：场景词 + 异常结构词**
+
+### 为什么推荐这个组合
+
+- 都不需要大改 backbone；
+- 改动集中在数据预处理和 prompt 构造；
+- 很符合你当前数据的特点；
+- 也最容易写成你自己的“针对场景的特色改进”。
+
+---
+
+## 推荐组合 B（效果潜力更高）
+
+### 特征提取
+- **CLIP + LoRA / Adapter 做频谱域适配**
+
+### 提示词
+- **AnomalyCLIP 风格的 object-agnostic + scene-conditioned prompt**
+
+### 为什么推荐这个组合
+
+- 这是更像论文路线的方案；
+- 对 cross-site 泛化更有希望；
+- 但实现难度比组合 A 高一档。
+
+---
+
+# 可以直接写进论文/汇报里的简化表述
+
+## 改进1（特征提取）
+
+我们计划针对频谱图的时频结构特点，重构输入表示与视觉特征适配模块。具体而言，输入通道由原始灰度复制改为“原始频谱 + 时间梯度 + 频率梯度”，以增强模型对 chirp 斜线、burst 窄带脉冲和 DSSS 宽带结构的感知能力；同时结合 LoRA/Adapter 等参数高效微调方法，对 CLIP 视觉编码器进行频谱域适配，从而缓解自然图像预训练与频谱图域之间的不匹配问题。
+
+## 改进3（提示词）
+
+我们计划将现有提示词从泛化的“异常频谱”描述，升级为“场景语义 + 异常结构”的联合 prompt 设计。具体而言，一方面针对 burst、chirp、dsss 分别构造结构化描述模板；另一方面为不同测试场景补充场景语义描述，使文本分支能够显式建模不同场景下的背景频谱差异，从而提升跨场景异常检测性能。
+
+---
+
+# 参考文献与对应模块汇总
+
+| 参考文献 | 用于哪个模块 | 作用是什么 |
+|---|---|---|
+| Salamon & Bello, 2017 | 输入表示模块 | 支持频谱输入通道不必照搬 RGB，可引入更有物理意义的谱信息 |
+| He et al., MAE, 2022 | 视觉输入域对齐模块 | 说明跨域任务需要做域内适配，支持重算 mean/std 与域对齐思路 |
+| Huang et al., Audio-MAE, 2022 | 频谱域特征学习模块 | 说明频谱图可以先做自监督建模，再迁移到下游任务 |
+| Gao et al., CLIP-Adapter, 2024 | 视觉特征适配模块 | 给 CLIP 增加轻量适配层，使其更适应当前任务 |
+| Zhang et al., Tip-Adapter, 2022 | 少样本特征适配模块 | 说明在少样本条件下，轻量适配是有效的 |
+| Hu et al., LoRA, 2022 | 参数高效微调模块 | 用少量参数适配大模型，适合你当前数据规模 |
+| Gong et al., AST, 2021 | 频谱 backbone 模块 | 证明 Transformer 能直接处理 spectrogram |
+| Chen et al., BEATs, 2023 | 频谱预训练 backbone 模块 | 提供更懂频谱图的初始化特征 |
+| Cha et al., MIRO, 2022 | 场景泛化模块 | 减少模型过度依赖单场景特征 |
+| Cha et al., SWAD, 2021 | 跨场景训练策略模块 | 提升 cross-site 条件下的稳定性 |
+| Jeong et al., WinCLIP, 2023 | Prompt 模板组合模块 | 支持多模板、多描述的 prompt ensemble |
+| Zhou et al., AnomalyCLIP, 2024 | 正常/异常 prompt 模块 | 支持 object-agnostic 的异常 prompt 设计 |
+| Zhou et al., CoOp, 2022 | 可学习 prompt 模块 | 支持学习式上下文 token |
+| Zhou et al., CoCoOp, 2022 | 场景条件 prompt 模块 | 支持根据场景动态调整 prompt |
+
+---
+
+如果你愿意，我下一步可以继续帮你做两件很具体的事：
+
+1. **把这份文档再压缩成“老师汇报版”一页纸**
+2. **直接按照这份方案去改 `ad_prompts.py`，先把“场景化 prompt”写出来**
