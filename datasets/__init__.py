@@ -53,14 +53,20 @@ def get_dataloader_from_args(phase, **kwargs):
         extra_kwargs['noise_level'] = kwargs.get('noise_level', 'm10db')
         if kwargs.get('train_site'):
             extra_kwargs['train_category'] = kwargs.get('train_site')
+        extra_kwargs['split_mode'] = kwargs.get('split_mode', 'legacy')
+        extra_kwargs['normal_train_ratio'] = kwargs.get('normal_train_ratio', 0.75)
     elif kwargs.get('dataset') == 'dsss_signal':
         extra_kwargs['noise_level'] = kwargs.get('noise_level', 'm10db')
         if kwargs.get('train_site'):
             extra_kwargs['train_category'] = kwargs.get('train_site')
+        extra_kwargs['split_mode'] = kwargs.get('split_mode', 'legacy')
+        extra_kwargs['normal_train_ratio'] = kwargs.get('normal_train_ratio', 0.75)
     elif kwargs.get('dataset') == 'chirp_signal':
         extra_kwargs['noise_level'] = kwargs.get('noise_level', 'm10db')
         if kwargs.get('train_site'):
             extra_kwargs['train_category'] = kwargs.get('train_site')
+        extra_kwargs['split_mode'] = kwargs.get('split_mode', 'legacy')
+        extra_kwargs['normal_train_ratio'] = kwargs.get('normal_train_ratio', 0.75)
     elif kwargs.get('dataset') == 'rf_open':
         pass  # category 已编码 signal_type + noise_level，无需额外 kwargs
     elif kwargs.get('dataset') == 'deceptive_signal':

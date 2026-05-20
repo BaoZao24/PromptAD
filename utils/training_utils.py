@@ -40,11 +40,14 @@ def get_dir_from_args(TASK, root_dir, **kwargs):
     # 对于 burst/dsss 等有 noise_level 的数据集，按 noise_level 区分目录
     # deceptive_signal 没有 noise_level 参数但目录结构中固定为 0db
     noise_level = kwargs.get('noise_level', None)
+    split_mode = kwargs.get('split_mode', 'legacy')
     if dataset == 'deceptive_signal':
         base_dir = os.path.join(root_dir, f'{dataset}', f'{dir_class_name}', '0db', f'k_{k_shot}')
     elif dataset == 'rf_open':
         # category already encodes signal_type + jsr (e.g. burst_m10db); no extra subdir
         base_dir = os.path.join(root_dir, f'{dataset}', f'{dir_class_name}', f'k_{k_shot}')
+    elif dataset in {'burst_signal', 'dsss_signal', 'chirp_signal'} and split_mode != 'legacy':
+        base_dir = os.path.join(root_dir, f'{dataset}', f'{dir_class_name}', f'{noise_level}', split_mode, f'k_{k_shot}')
     elif noise_level:
         base_dir = os.path.join(root_dir, f'{dataset}', f'{dir_class_name}', f'{noise_level}', f'k_{k_shot}')
     else:
