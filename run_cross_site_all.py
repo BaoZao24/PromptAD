@@ -82,7 +82,7 @@ def safe_print(*args, **kwargs):
         print(*args, **kwargs, flush=True)
 
 
-def gpu_worker(gpu_id, job_queue, epochs, seed, vis, dry_run):
+def gpu_worker(gpu_id, job_queue, epochs, seed, vis, dry_run, prompt_mode, input_mode):
     """每个 GPU 独占一个 worker 线程，顺序消费 job_queue 里的任务"""
     while True:
         try:
@@ -96,7 +96,8 @@ def gpu_worker(gpu_id, job_queue, epochs, seed, vis, dry_run):
             f'--dataset {dataset} --class_name {scene} '
             f'--train-site {TRAIN_SITE} '
             f'--k-shot {K_SHOT} --Epoch {epochs} --gpu-id {gpu_id} '
-            f'--noise-level {noise_level} --vis {vis_str} --seed {seed}'
+            f'--noise-level {noise_level} --vis {vis_str} --seed {seed} '
+            f'--prompt-mode {prompt_mode} --input-mode {input_mode}'
         )
         safe_print(f'[GPU {gpu_id}] START  {dataset} | {TRAIN_SITE}->{scene} | {noise_level}')
         if not dry_run:
@@ -134,6 +135,10 @@ if __name__ == '__main__':
                         help='保存 scoremap 可视化图像')
     parser.add_argument('--force', action='store_true', default=False,
                         help='强制重跑已完成的 job')
+    parser.add_argument('--prompt-mode', type=str, default='rf',
+                        choices=['rf', 'legacy', 'rf_object_agnostic', 'rf_scene_conditioned'])
+    parser.add_argument('--input-mode', type=str, default='auto',
+                        choices=['auto', 'rgb', 'spectral_gradient', 'signal_adaptive'])
     parser.add_argument('--dry-run', action='store_true')
     args = parser.parse_args()
 
@@ -174,7 +179,7 @@ if __name__ == '__main__':
     for gid in args.gpus:
         t = threading.Thread(
             target=gpu_worker,
-            args=(gid, job_q, args.epochs, args.seed, args.vis, args.dry_run),
+            args=(gid, job_q, args.epochs, args.seed, args.vis, args.dry_run, args.prompt_mode, args.input_mode),
             daemon=True,
         )
         t.start()

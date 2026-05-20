@@ -74,6 +74,10 @@ if __name__ == '__main__':
     parser.add_argument('--vis',     type=bool, default=False)
     parser.add_argument('--seed',    type=int,  default=111)
     parser.add_argument('--root-dir', type=str, default='./result')
+    parser.add_argument('--prompt-mode', type=str, default='rf',
+                        choices=['rf', 'legacy', 'rf_object_agnostic', 'rf_scene_conditioned'])
+    parser.add_argument('--input-mode', type=str, default='auto',
+                        choices=['auto', 'rgb', 'spectral_gradient', 'signal_adaptive'])
     parser.add_argument('--dry-run', action='store_true', help='只显示命令不执行')
     args = parser.parse_args()
 
@@ -88,7 +92,8 @@ if __name__ == '__main__':
                 f'--dataset {DATASET} --class_name {class_name} '
                 f'--k-shot {args.k_shot} --Epoch {args.epochs} '
                 f'--gpu-id {args.gpu_id} --vis {vis_str} --seed {args.seed} '
-                f'--root-dir {args.root_dir}'
+                f'--root-dir {args.root_dir} '
+                f'--prompt-mode {args.prompt_mode} --input-mode {args.input_mode}'
             )
             print(f'\n{"="*60}')
             print(f'>>> {sig.upper()} | JSR: {nl}')

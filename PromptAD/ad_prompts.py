@@ -23,6 +23,160 @@ class_mapping = {
     "dsss_m30db":  "radio frequency spectrum",
 }
 
+rf_signal_dataset_mapping = {
+    "burst_signal": "burst",
+    "chirp_signal": "chirp",
+    "dsss_signal": "dsss",
+    "deceptive_signal": "deceptive",
+}
+
+rf_state_anomaly = [
+    "abnormal {}",
+    "{} with anomalous signal energy",
+    "{} with unexpected interference",
+    "{} with injected radio-frequency interference",
+    "{} with abnormal time-frequency structure",
+    "{} with signal energy inconsistent with the normal background",
+]
+
+generic_state_anomaly = [
+    "abnormal {}",
+    "damaged {}",
+    "flawed {}",
+    "defective {}",
+    "{} with anomaly",
+    "{} with defect",
+]
+
+rf_domain_state_anomaly = [
+    "abnormal {}",
+    "anomalous {}",
+    "{} with anomaly",
+    "{} with abnormal pattern",
+    "{} with unusual visual pattern",
+    "{} with unexpected structure",
+]
+
+rf_signal_structured_classname = {
+    "burst": "burst signal radio frequency spectrogram",
+    "chirp": "chirp signal radio frequency spectrogram",
+    "dsss": "DSSS spread-spectrum radio frequency spectrogram",
+    "deceptive": "deceptive signal radio frequency spectrogram",
+}
+
+rf_signal_structured_state_anomaly = {
+    "burst": [
+        "{} with abnormal short-duration burst energy",
+        "{} with unexpected transient narrowband pulse",
+        "{} with hidden low-power burst trace",
+        "{} with vertically truncated burst structure",
+        "{} with burst energy inconsistent with normal background",
+        "{} with anomalous time-localized RF emission",
+    ],
+    "chirp": [
+        "{} with broken diagonal chirp trace",
+        "{} with distorted frequency-sweeping slope",
+        "{} with interrupted slanted time-frequency streak",
+        "{} with abnormal chirp slope angle",
+        "{} with faint low-power chirp interference",
+        "{} with spurious diagonal RF artifact",
+    ],
+    "dsss": [
+        "{} with abnormal diffuse wideband texture",
+        "{} with uneven spread-spectrum power distribution",
+        "{} with disrupted noise-like spectral pattern",
+        "{} with missing segment in the wideband spread spectrum",
+        "{} with anomalous broadband spectral flatness",
+        "{} with weak DSSS-like interference embedded in background",
+    ],
+    "deceptive": [
+        "{} with spoofed signal structure",
+        "{} with signal pattern in an unauthorized frequency band",
+        "{} with deceptive RF emission mimicking normal activity",
+        "{} with counterfeit spectrum occupancy",
+    ],
+}
+
+rf_scene_background_mapping = {
+    "WeaponMuseum_spectrum": "an indoor spectrum scene with relatively stable background activity",
+    "Playground_spectrum": "an open outdoor spectrum scene with sparse background activity",
+    "TimeSquare_spectrum": "a crowded urban spectrum scene with complex background occupancy",
+    "Gymnasium_spectrum": "a semi-enclosed spectrum scene with moderate background activity",
+}
+
+
+def get_rf_signal_key(classname, dataset_name=None):
+    if dataset_name in rf_signal_dataset_mapping:
+        return rf_signal_dataset_mapping[dataset_name]
+
+    name = classname.lower()
+    for signal_key in ("burst", "chirp", "dsss", "deceptive"):
+        if signal_key in name:
+            return signal_key
+
+    return None
+
+
+def is_rf_prompt_class(classname, dataset_name=None):
+    return get_rf_signal_key(classname, dataset_name) is not None
+
+
+def get_rf_scene_background(classname=None, train_site=None):
+    scene_key = train_site or classname
+    return rf_scene_background_mapping.get(scene_key)
+
+
+def get_prompt_classname(classname, dataset_name=None, prompt_mode="rf", train_site=None):
+    if prompt_mode == "legacy":
+        return class_mapping.get(classname, classname)
+
+    signal_key = get_rf_signal_key(classname, dataset_name)
+    if signal_key is not None:
+        if prompt_mode == "generic":
+            return "image"
+        prompt_classname = "radio frequency spectrogram"
+        if prompt_mode == "rf_signal_structured":
+            prompt_classname = rf_signal_structured_classname.get(signal_key, prompt_classname)
+        if prompt_mode == "rf_scene_conditioned":
+            scene_background = get_rf_scene_background(classname=classname, train_site=train_site)
+            if scene_background is not None:
+                prompt_classname = f"{prompt_classname} in {scene_background}"
+        return prompt_classname
+
+    return class_mapping.get(classname, classname)
+
+
+def get_abnormal_prompt_states(classname, dataset_name=None, prompt_mode="rf", train_site=None):
+    if prompt_mode == "legacy":
+        return state_anomaly + class_state_abnormal.get(classname, [])
+
+    signal_key = get_rf_signal_key(classname, dataset_name)
+    if is_rf_prompt_class(classname, dataset_name):
+        if prompt_mode == "generic":
+            return generic_state_anomaly
+        if prompt_mode == "rf_domain":
+            return rf_domain_state_anomaly
+        states = []
+        if prompt_mode == "rf_signal_structured" and signal_key is not None:
+            for state in rf_signal_structured_state_anomaly.get(signal_key, []):
+                if state not in states:
+                    states.append(state)
+            return states
+        for state in rf_state_anomaly:
+            if state not in states:
+                states.append(state)
+        if prompt_mode not in {"rf_object_agnostic"} and signal_key is not None:
+            for state in class_state_abnormal.get(signal_key, []):
+                if state not in states:
+                    states.append(state)
+        if prompt_mode not in {"rf_object_agnostic"}:
+            for state in class_state_abnormal.get(classname, []):
+                if state not in states:
+                    states.append(state)
+        return states
+
+    return state_anomaly + class_state_abnormal.get(classname, [])
+
 
 # 所有类别都会共用的通用异常描述模板。
 state_anomaly = ["damaged {}",

@@ -324,6 +324,31 @@ def get_args():
     parser.add_argument("--n_pro", type=int, default=3)
     parser.add_argument("--n_pro_ab", type=int, default=4)
     parser.add_argument("--Epoch", type=int, default=50)
+    parser.add_argument("--prompt-mode", type=str, default="rf",
+                        choices=["generic", "rf_domain", "rf", "legacy", "rf_object_agnostic",
+                                 "rf_scene_conditioned", "rf_signal_structured"],
+                        help="generic 使用无频谱语义的通用异常 prompt；rf_domain 只加入 RF/spectrogram 任务域词；rf_signal_structured 使用信号类型结构词")
+    parser.add_argument("--input-mode", type=str, default="auto",
+                        choices=["auto", "rgb", "spectral_gradient", "signal_adaptive", "log_power",
+                                 "dsss_statistical", "dsss_energy_smooth", "dsss_lowfreq_band", "dsss_energy_profile"],
+                        help="signal_adaptive 对 burst/chirp 使用频谱梯度，对 dsss 使用 RGB；log_power 使用灰度 log-power 压缩；dsss_* 使用 DSSS 专用通道")
+    parser.add_argument("--cls-score-mode", type=str, default="text_only",
+                        choices=["text_only", "visual_topk", "visual_topk_max", "visual_topk_freq"],
+                        help="图像级分数融合方式")
+    parser.add_argument("--visual-topk-ratio", type=float, default=0.05,
+                        help="visual patch score 聚合时使用的 top-k 比例")
+    parser.add_argument("--visual-score-alpha", type=float, default=1.0,
+                        help="textual score 融合权重")
+    parser.add_argument("--visual-score-beta", type=float, default=1.0,
+                        help="visual top-k score 融合权重")
+    parser.add_argument("--visual-score-gamma", type=float, default=0.0,
+                        help="visual max score 融合权重")
+    parser.add_argument("--visual-freq-position-weight", type=float, default=0.0,
+                        help="频率位置约束强度，用于强调远离中心或特定频带的异常")
+    parser.add_argument("--split-mode", type=str, default="legacy", choices=["legacy", "normal_75_25"],
+                        help="legacy 使用原始 few-shot 切分；normal_75_25 使用 3/4 normal 训练、1/4 normal 测试")
+    parser.add_argument("--normal-train-ratio", type=float, default=0.75,
+                        help="normal_75_25 模式下正常样本训练比例")
 
     # burst_signal related
     parser.add_argument("--noise-level", type=str, default='m10db', choices=['m10db', 'm20db', 'm30db'])

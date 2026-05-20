@@ -69,6 +69,10 @@ if __name__ == '__main__':
     parser.add_argument('--vis', type=bool, default=True)
     parser.add_argument('--seed', type=int, default=111)
     parser.add_argument('--root-dir', type=str, default='./result')
+    parser.add_argument('--prompt-mode', type=str, default='rf',
+                        choices=['rf', 'legacy', 'rf_object_agnostic', 'rf_scene_conditioned'])
+    parser.add_argument('--input-mode', type=str, default='auto',
+                        choices=['auto', 'rgb', 'spectral_gradient', 'signal_adaptive'])
     parser.add_argument('--dry-run', action='store_true', help='只显示命令不执行')
     args = parser.parse_args()
 
@@ -84,7 +88,8 @@ if __name__ == '__main__':
                 f'MKL_THREADING_LAYER=GNU python train_cls.py --dataset {DATASET} --class_name {scene} '
                 f'--train-site {TRAIN_SITE} '
                 f'--k-shot {K_SHOT} --Epoch {args.epochs} --gpu-id {args.gpu_id} '
-                f'--noise-level {noise_level} --vis {vis_str} --seed {args.seed}'
+                f'--noise-level {noise_level} --vis {vis_str} --seed {args.seed} '
+                f'--prompt-mode {args.prompt_mode} --input-mode {args.input_mode}'
             )
             print(f'\n--- {TRAIN_SITE} -> {scene} ({noise_level}) ---')
             print(f'运行: {cmd}')
