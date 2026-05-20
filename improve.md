@@ -582,7 +582,7 @@ CLIP 预训练时见的是自然图片，不是无线电频谱图。
 
 ### 用于什么模块
 
-- **模块**：场景条件 prompt 模块
+- **模块**：频谱任务域条件 prompt 模块
 - **代码位置**：
   - `PromptAD/ad_prompts.py` 增加 `scene_mapping`
   - `PromptAD/model.py` 的 `PromptLearner` 拼接 scene text
@@ -748,7 +748,7 @@ CLIP 预训练时见的是自然图片，不是无线电频谱图。
 
 - 结构更清楚；
 - 方便做消融实验；
-- 更容易看出到底是“场景词”有效，还是“异常词”有效。
+- 更容易看出到底是“频谱任务域词”有效，还是“异常结构词”有效。
 
 ### 参考文献
 
@@ -771,9 +771,9 @@ CLIP 预训练时见的是自然图片，不是无线电频谱图。
 建议按下面顺序做：
 
 1. **先把 burst / chirp / dsss 的 prompt 改成更结构化的描述**
-2. **再给 4 个场景补上英文语义描述**
-3. **然后把 prompt 改成“场景词 + 异常词”的组合形式**
-4. **最后再尝试 AnomalyCLIP / CoCoOp 风格的可学习场景条件 prompt**
+2. **再补上 RF spectrogram / time-frequency / interference 等频谱任务域描述**
+3. **然后把 prompt 改成“频谱任务域词 + 异常结构词”的组合形式**
+4. **最后再尝试 AnomalyCLIP / CoCoOp 风格的可学习任务条件 prompt**
 
 ---
 
@@ -787,7 +787,7 @@ CLIP 预训练时见的是自然图片，不是无线电频谱图。
 - **三通道输入：原图 + 时间梯度 + 频率梯度**
 
 ### 提示词
-- **场景化结构 prompt：场景词 + 异常结构词**
+- **频谱任务域结构 prompt：频谱词 + 异常结构词**
 
 ### 为什么推荐这个组合
 
@@ -822,7 +822,7 @@ CLIP 预训练时见的是自然图片，不是无线电频谱图。
 
 ## 改进3（提示词）
 
-我们计划将现有提示词从泛化的“异常频谱”描述，升级为“场景语义 + 异常结构”的联合 prompt 设计。具体而言，一方面针对 burst、chirp、dsss 分别构造结构化描述模板；另一方面为不同测试场景补充场景语义描述，使文本分支能够显式建模不同场景下的背景频谱差异，从而提升跨场景异常检测性能。
+我们计划将现有提示词从泛化的“异常频谱”描述，升级为“频谱任务域语义 + 异常结构”的联合 prompt 设计。具体而言，一方面针对 burst、chirp、dsss 分别构造结构化描述模板；另一方面补充 RF spectrogram、time-frequency pattern、interference、noise floor 等任务域描述，使文本分支显式关注频谱异常检测中的结构差异，从而提升跨场景异常检测性能。
 
 ---
 
@@ -843,11 +843,689 @@ CLIP 预训练时见的是自然图片，不是无线电频谱图。
 | Jeong et al., WinCLIP, 2023 | Prompt 模板组合模块 | 支持多模板、多描述的 prompt ensemble |
 | Zhou et al., AnomalyCLIP, 2024 | 正常/异常 prompt 模块 | 支持 object-agnostic 的异常 prompt 设计 |
 | Zhou et al., CoOp, 2022 | 可学习 prompt 模块 | 支持学习式上下文 token |
-| Zhou et al., CoCoOp, 2022 | 场景条件 prompt 模块 | 支持根据场景动态调整 prompt |
+| Zhou et al., CoCoOp, 2022 | 任务条件 prompt 模块 | 支持根据输入条件动态调整 prompt |
 
 ---
 
-如果你愿意，我下一步可以继续帮你做两件很具体的事：
+# 本轮已落地的小改进与初步实验
 
-1. **把这份文档再压缩成“老师汇报版”一页纸**
-2. **直接按照这份方案去改 `ad_prompts.py`，先把“场景化 prompt”写出来**
+> 这里的“场景特色”按当前理解指 **频谱异常检测这个任务域** 的特色，而不是 `WeaponMuseum_spectrum`、`Playground_spectrum` 这类具体采集地点。
+
+## 已落地 1：频谱任务域 Prompt
+
+已加入：
+- `--prompt-mode rf`
+- `--prompt-mode legacy`
+
+`rf` 模式会把跨站点类别统一描述为：
+- `radio frequency spectrogram`
+
+并根据数据集类型自动加入结构异常描述：
+- chirp：diagonal / slanted / slope trace
+- burst：short-duration / transient / narrowband pulse
+- dsss：wideband / spread spectrum / spectral density
+
+这样做的目的是让 prompt 关注频谱异常检测的视觉结构，而不是关注具体采集地点。
+
+## 已落地 2：频谱梯度三通道输入
+
+已加入：
+- `--input-mode auto`
+- `--input-mode rgb`
+- `--input-mode spectral_gradient`
+- `--input-mode signal_adaptive`
+
+`spectral_gradient` 模式把输入从普通 RGB 改成：
+- 通道 1：原始灰度频谱强度
+- 通道 2：时间方向梯度
+- 通道 3：频率方向梯度
+
+`auto` 模式下：
+- 频谱类数据集自动使用 `spectral_gradient`
+- MVTec / VisA 等普通视觉数据集仍使用 `rgb`
+
+`signal_adaptive` 模式下：
+- burst / chirp 使用 `spectral_gradient`
+- dsss 使用 `rgb`
+
+这个策略来自 36 组小批量消融实验：burst / chirp 更依赖时频边缘结构，梯度通道收益更明显；dsss 的宽带扩频纹理在当前 CLIP 特征下保留 RGB 更稳。
+
+## 早期 sanity 实验结果
+
+实验设置：
+- 数据集：`chirp_signal`
+- 训练站点：`WeaponMuseum_spectrum`
+- 测试站点：`Playground_spectrum`
+- JSR：`m30db`
+- k-shot：4
+- epoch：1
+- seed：111
+
+| Prompt | Input | Image-AUROC |
+|---|---|---:|
+| legacy | rgb | 84.88 |
+| rf | rgb | 84.96 |
+| legacy | spectral_gradient | 85.59 |
+| rf | spectral_gradient | 85.49 |
+
+初步结论：
+- 在这个很小的 sanity 实验里，主要收益来自 `spectral_gradient` 输入表示。
+- `rf` prompt 相比旧 prompt 有轻微变化，但 1 epoch 下不是主要收益来源。
+- 后续正式实验建议优先比较 `rgb` vs `spectral_gradient`，再看 `rf` prompt 是否在 burst / dsss 或更多 epoch 下更稳定。
+
+## 新的 36 组小批量实验协议
+
+为了减少单次实验时间，现在采用“少量数据切分”而不是缩短训练 epoch：
+
+- 异常类型：`burst` / `chirp` / `dsss`
+- 场景：`WeaponMuseum_spectrum` / `Playground_spectrum` / `TimeSquare_spectrum` / `Gymnasium_spectrum`
+- ISR：`m10db` / `m20db` / `m30db`
+- 总实验数：`3 x 4 x 3 = 36`
+
+数据切分规则：
+- 训练集：`normal/{ISR}` 中前 3/4 的正常图片
+- 测试集：剩余 1/4 的正常图片 + `abnormal/{ISR}` 的全部异常图片
+
+对应脚本：
+- `run_rf_split_all.py`
+
+这个协议保持了原来的训练轮数不变，只是缩小了训练和测试图像数量，更适合快速比较不同方法是否有增益。
+
+## 36 组小批量消融结果
+
+实验设置：
+- split：`normal_75_25`
+- epoch：50
+- seed：111
+- 实验数：36
+
+整体 Image-AUROC 均值：
+
+| 方案 | Mean Image-AUROC |
+|---|---:|
+| legacy prompt + rgb | 85.0733 |
+| legacy prompt + spectral_gradient | 85.8528 |
+| rf prompt + rgb | 84.8683 |
+| rf prompt + spectral_gradient | 85.8861 |
+| rf prompt + signal_adaptive | 86.7336 |
+
+按异常类型均值：
+
+| 方案 | burst | chirp | dsss |
+|---|---:|---:|---:|
+| legacy prompt + rgb | 86.8367 | 78.9425 | 89.4408 |
+| legacy prompt + spectral_gradient | 87.6533 | 82.8317 | 87.0733 |
+| rf prompt + rgb | 86.3117 | 78.7308 | 89.5625 |
+| rf prompt + spectral_gradient | 87.9800 | 82.6583 | 87.0200 |
+| rf prompt + signal_adaptive | 87.9800 | 82.6583 | 89.5625 |
+
+相对 `legacy prompt + rgb`：
+- `rf prompt + signal_adaptive` 平均提升 `+1.6603`
+- 36 个实验中：21 个提升、12 个下降、3 个持平
+- burst 平均提升 `+1.1433`
+- chirp 平均提升 `+3.7158`
+- dsss 平均提升 `+0.1217`
+
+当前推荐方案：
+- prompt：`rf`
+- input：`signal_adaptive`
+
+运行命令：
+
+```bash
+python run_rf_split_all.py --gpus 0 1 2 3 --epochs 50 --prompt-mode rf --input-mode signal_adaptive --root-dir ./result_split_ablation/rf_signal_adaptive
+```
+
+## Visual fusion 小实验
+
+根据综述中的建议，还测试了把 visual anomaly map 的 patch 分数聚合进图像级分数。
+
+新增图像级打分模式：
+- `text_only`
+- `visual_topk`
+- `visual_topk_max`
+- `visual_topk_freq`
+
+实验设置：
+- 数据集：`chirp_signal`
+- scene：`Gymnasium_spectrum`
+- ISR：`m30db`
+- prompt：`rf`
+- input：`signal_adaptive`
+- split：`normal_75_25`
+- epoch：50
+
+结果：
+
+| cls score mode | Image-AUROC |
+|---|---:|
+| text_only | 45.52 |
+| visual_topk | 41.83 |
+| visual_topk_max | 41.69 |
+| visual_topk_freq | 40.96 |
+
+结论：
+- 在当前设置下，直接把 visual top-k patch score 融合进 image score 没有带来提升。
+- 频率约束版 `visual_topk_freq` 反而更差。
+- 说明当前 visual gallery 的 patch score 更适合作为定位图，而不是直接用于图像级 AUROC 融合。
+- 因此当前主推方案仍然是 `rf prompt + signal_adaptive input`，不建议把这个 visual fusion 作为默认设置。
+
+为了排除 `Gymnasium_spectrum` 单场景偶然性，又换了一个非 Gym 场景复测：
+
+实验设置：
+- 数据集：`chirp_signal`
+- scene：`WeaponMuseum_spectrum`
+- ISR：`m30db`
+- prompt：`rf`
+- input：`signal_adaptive`
+- split：`normal_75_25`
+- epoch：50
+
+结果：
+
+| cls score mode | Image-AUROC |
+|---|---:|
+| text_only | 59.78 |
+| visual_topk | 59.22 |
+| visual_topk_max | 59.44 |
+| visual_topk_freq | 59.26 |
+
+补充结论：
+- 换到 `WeaponMuseum_spectrum` 后，`text_only` 仍然最好。
+- 三种 visual fusion 都接近 baseline，但都没有超过 baseline。
+- 这说明当前这套 visual top-k 融合策略的问题不是只出现在 Gym 场景，而更像是图像级打分融合方式本身还不够合适。
+
+## 结构化 object-agnostic RF prompt 小实验
+
+说明：下面这部分是之前按 cross-site 协议做的探索性实验记录。当前实验主协议已经调整为“分场景训练、分场景测试（同场景 normal_75_25）”，因此这一节不再作为当前主结论依据，只保留作历史参考。
+
+根据综述中的第二优先级，又做了一组 prompt 结构小实验，验证“跨站点任务中是否应该弱化站点类别名语义”。
+
+新增 prompt mode：
+- `legacy`
+- `rf`
+- `rf_object_agnostic`
+- `rf_scene_conditioned`
+
+其中：
+- `rf`：当前已经在用的 RF prompt，包含频谱域词和信号结构异常词；
+- `rf_object_agnostic`：去掉信号/站点特异异常词，只保留 RF 正常/异常公共语义；
+- `rf_scene_conditioned`：在 RF prompt 基础上加入训练场景背景描述。
+
+实验设置：
+- 数据集：`chirp_signal`
+- 训练站点：`WeaponMuseum_spectrum`
+- 测试站点：`Gymnasium_spectrum`
+- ISR：`m30db`
+- k-shot：24
+- input：`signal_adaptive`
+- epoch：50
+
+结果：
+
+| prompt mode | Image-AUROC |
+|---|---:|
+| legacy | 49.81 |
+| rf | 51.35 |
+| rf_object_agnostic | 52.01 |
+| rf_scene_conditioned | 49.49 |
+
+结论：
+- `rf_object_agnostic` 是这一组里最好的，较 `rf` 提升 `+0.66`，较 `legacy` 提升 `+2.20`。
+- 说明在跨站点频谱异常检测中，弱化地点/对象语义、强调通用 RF 正常/异常语义是有效的。
+- `rf_scene_conditioned` 反而下降，说明把场景背景描述重新放回 prompt，并没有在这个点上带来收益。
+- 因此“优先级二”有初步正结果，但更值得继续的是 `rf_object_agnostic`，而不是 `rf_scene_conditioned`。
+
+为了验证 `rf_object_agnostic` 的提升是否稳定，又补测了另外两个 cross-site 测试站点，保持相同设置：
+
+- 数据集：`chirp_signal`
+- 训练站点：`WeaponMuseum_spectrum`
+- 测试站点：`Playground_spectrum` / `TimeSquare_spectrum`
+- ISR：`m30db`
+- k-shot：24
+- input：`signal_adaptive`
+- epoch：50
+
+结果：
+
+| test scene | rf | rf_object_agnostic | delta |
+|---|---:|---:|---:|
+| Gymnasium_spectrum | 51.35 | 52.01 | +0.66 |
+| Playground_spectrum | 87.24 | 87.20 | -0.04 |
+| TimeSquare_spectrum | 84.06 | 84.04 | -0.02 |
+
+补充结论：
+- `rf_object_agnostic` 在 `Gymnasium_spectrum` 上确实有提升；
+- 但在 `Playground_spectrum` 和 `TimeSquare_spectrum` 上基本持平，并没有继续提升；
+- 因此目前只能说 `rf_object_agnostic` 有一定潜力，但提升还不稳定；
+- 在现阶段，它更适合作为后续继续扩展验证的候选方案，而不建议直接替代当前 `rf` 作为统一默认设置。
+
+如果把两个改动合并起来，直接和最开始的 baseline 对比：
+
+- baseline：`legacy + rgb`
+- improved：`rf_object_agnostic + signal_adaptive`
+
+实验设置：
+- 数据集：`chirp_signal`
+- 训练站点：`WeaponMuseum_spectrum`
+- 测试站点：`Gymnasium_spectrum` / `Playground_spectrum` / `TimeSquare_spectrum`
+- ISR：`m30db`
+- k-shot：24
+- epoch：50
+
+结果：
+
+| test scene | legacy + rgb | rf_object_agnostic + signal_adaptive | delta |
+|---|---:|---:|---:|
+| Gymnasium_spectrum | 52.34 | 52.01 | -0.33 |
+| Playground_spectrum | 87.24 | 87.20 | -0.04 |
+| TimeSquare_spectrum | 84.68 | 84.04 | -0.64 |
+| mean | 74.75 | 74.42 | -0.34 |
+
+结论：
+- 如果按“完整方案 vs 最初 baseline”的口径看，`rf_object_agnostic + signal_adaptive` 在这 3 个 `chirp_signal` cross-site 点上没有超过 `legacy + rgb`；
+- 三个站点里没有一个点真正优于 baseline；
+- 因此当前还不能说“把 rf_object_agnostic 和 signal_adaptive 一起加进去”会稳定优于最开始的 baseline。
+
+更新说明：上面这一段是旧的 cross-site 口径结果。当前主实验协议已经改成“分场景训练、分场景测试（normal_75_25）”，因此真正应参考的是下面这组同场景结果。
+
+## 同场景协议下重新实验：`rf_object_agnostic + signal_adaptive` vs `legacy + rgb`
+
+实验设置：
+- 数据集：`chirp_signal`
+- 场景：`WeaponMuseum_spectrum` / `Playground_spectrum` / `TimeSquare_spectrum` / `Gymnasium_spectrum`
+- ISR：`m30db`
+- split：`normal_75_25`
+- k-shot：1
+- epoch：50
+- seed：111
+
+对比方案：
+- baseline：`legacy + rgb`
+- improved：`rf_object_agnostic + signal_adaptive`
+
+结果：
+
+| scene | legacy + rgb | rf_object_agnostic + signal_adaptive | delta |
+|---|---:|---:|---:|
+| WeaponMuseum_spectrum | 46.19 | 59.65 | +13.46 |
+| Playground_spectrum | 82.73 | 85.81 | +3.08 |
+| TimeSquare_spectrum | 81.66 | 83.64 | +1.98 |
+| Gymnasium_spectrum | 26.25 | 46.22 | +19.97 |
+| mean | 59.21 | 68.83 | +9.62 |
+
+结论：
+- 在当前已经确认的新协议下，`rf_object_agnostic + signal_adaptive` 明显优于 `legacy + rgb`；
+- 4 个 scene 全部提升，没有出现回落；
+- 提升最大的两个场景是 `WeaponMuseum_spectrum` 和 `Gymnasium_spectrum`，说明该组合对较难场景更有帮助；
+- 因此如果后续继续沿“分场景训练、分场景测试”的协议推进，这个组合作为候选改进方案是成立的。
+
+## `dsss_signal` 同场景协议复现实验
+
+实验设置：
+- 数据集：`dsss_signal`
+- 场景：`WeaponMuseum_spectrum` / `Playground_spectrum` / `TimeSquare_spectrum` / `Gymnasium_spectrum`
+- ISR：`m30db`
+- split：`normal_75_25`
+- k-shot：1
+- epoch：50
+- seed：111
+
+对比方案：
+- baseline：`legacy + rgb`
+- improved：`rf_object_agnostic + signal_adaptive`
+
+结果：
+
+| scene | legacy + rgb | rf_object_agnostic + signal_adaptive | delta |
+|---|---:|---:|---:|
+| WeaponMuseum_spectrum | 80.97 | 80.46 | -0.51 |
+| Playground_spectrum | 79.26 | 79.13 | -0.13 |
+| TimeSquare_spectrum | 83.88 | 83.96 | +0.08 |
+| Gymnasium_spectrum | 83.28 | 83.28 | +0.00 |
+| mean | 81.85 | 81.71 | -0.14 |
+
+结论：
+- 对 `dsss_signal` 而言，`rf_object_agnostic + signal_adaptive` 没有像 `chirp_signal` 那样带来明显提升；
+- 4 个 scene 中只有 `TimeSquare_spectrum` 有极小幅正增益，`Gymnasium_spectrum` 持平，其余两个 scene 轻微下降；
+- 因此这个组合的收益是明显依赖异常类型的：对 `chirp_signal` 有效，但对 `dsss_signal` 基本无效；
+- 如果后续做统一默认方案，不能直接把 `chirp_signal` 的结论外推到 `dsss_signal`。
+
+## 36 组完整实验：`rf_object_agnostic + signal_adaptive`
+
+这组实验补齐了完整同场景协议：
+
+- 数据集：`burst_signal` / `chirp_signal` / `dsss_signal`
+- 场景：`WeaponMuseum_spectrum` / `Playground_spectrum` / `TimeSquare_spectrum` / `Gymnasium_spectrum`
+- ISR：`m10db` / `m20db` / `m30db`
+- split：`normal_75_25`
+- k-shot：1
+- epoch：50
+- seed：111
+- prompt：`rf_object_agnostic`
+- input：`signal_adaptive`
+- 结果目录：`./result_split_ablation/rf_object_agnostic_signal_adaptive`
+
+共 `3 * 4 * 3 = 36` 个实验，已全部完成并生成 `36` 个结果 CSV。
+
+### `burst_signal`
+
+| scene | m10db | m20db | m30db |
+|---|---:|---:|---:|
+| WeaponMuseum_spectrum | 97.1100 | 93.6100 | 82.1700 |
+| Playground_spectrum | 97.3700 | 96.5900 | 91.1900 |
+| TimeSquare_spectrum | 99.2500 | 99.0400 | 98.8200 |
+| Gymnasium_spectrum | 90.7500 | 53.6700 | 53.6700 |
+| mean | 96.1200 | 85.7275 | 81.4625 |
+
+`burst_signal` 总均值：`87.7700`。
+
+### `chirp_signal`
+
+| scene | m10db | m20db | m30db |
+|---|---:|---:|---:|
+| WeaponMuseum_spectrum | 95.3800 | 86.5200 | 59.6500 |
+| Playground_spectrum | 96.6500 | 93.7100 | 85.8100 |
+| TimeSquare_spectrum | 97.3500 | 93.3400 | 83.6400 |
+| Gymnasium_spectrum | 76.0000 | 77.5600 | 46.2200 |
+| mean | 91.3450 | 87.7825 | 68.8300 |
+
+`chirp_signal` 总均值：`82.6525`。
+
+### `dsss_signal`
+
+| scene | m10db | m20db | m30db |
+|---|---:|---:|---:|
+| WeaponMuseum_spectrum | 97.6800 | 92.8300 | 80.4600 |
+| Playground_spectrum | 96.6100 | 92.0500 | 79.1300 |
+| TimeSquare_spectrum | 98.8000 | 93.5800 | 83.9600 |
+| Gymnasium_spectrum | 92.4300 | 83.2800 | 83.2800 |
+| mean | 96.3800 | 90.4350 | 81.7075 |
+
+`dsss_signal` 总均值：`89.5075`。
+
+### 总结
+
+| dataset | mean |
+|---|---:|
+| burst_signal | 87.7700 |
+| chirp_signal | 82.6525 |
+| dsss_signal | 89.5075 |
+| overall | 86.6433 |
+
+和之前完整 36 组的 `rf + signal_adaptive` 结果相比：
+
+| method | overall mean |
+|---|---:|
+| rf + signal_adaptive | 86.7336 |
+| rf_object_agnostic + signal_adaptive | 86.6433 |
+
+结论：
+- `rf_object_agnostic + signal_adaptive` 的 36 组完整平均值为 `86.6433`；
+- 它和 `rf + signal_adaptive` 非常接近，但整体略低 `0.0903`；
+- 因此从完整 36 组平均值看，当前默认主方案仍建议保留 `rf + signal_adaptive`；
+- `rf_object_agnostic` 可以作为 `chirp_signal` 局部候选，尤其在 `m30db` 的同场景单独对比中更明显，但不建议直接替代完整默认方案。
+
+## DSSS 上验证 `spectral_gradient` 是否有效
+
+为了确认 DSSS 是否适合梯度输入，单独比较：
+
+- baseline：`rf + rgb/none`
+- test：`rf + spectral_gradient`
+- 数据集：`dsss_signal`
+- 场景：4 个 scene
+- ISR：`m10db` / `m20db` / `m30db`
+- split：`normal_75_25`
+- k-shot：1
+- epoch：50
+- seed：111
+
+结果：
+
+| scene | ISR | rf + rgb/none | rf + spectral_gradient | delta |
+|---|---|---:|---:|---:|
+| WeaponMuseum_spectrum | m10db | 97.6800 | 94.7200 | -2.9600 |
+| WeaponMuseum_spectrum | m20db | 92.8700 | 88.2300 | -4.6400 |
+| WeaponMuseum_spectrum | m30db | 80.9700 | 73.9700 | -7.0000 |
+| Playground_spectrum | m10db | 96.5800 | 91.4200 | -5.1600 |
+| Playground_spectrum | m20db | 92.0500 | 85.9300 | -6.1200 |
+| Playground_spectrum | m30db | 79.1000 | 74.0400 | -5.0600 |
+| TimeSquare_spectrum | m10db | 98.8300 | 97.4300 | -1.4000 |
+| TimeSquare_spectrum | m20db | 93.6100 | 94.5400 | +0.9300 |
+| TimeSquare_spectrum | m30db | 84.0400 | 90.5500 | +6.5100 |
+| Gymnasium_spectrum | m10db | 92.4600 | 89.9700 | -2.4900 |
+| Gymnasium_spectrum | m20db | 83.2800 | 81.7200 | -1.5600 |
+| Gymnasium_spectrum | m30db | 83.2800 | 81.7200 | -1.5600 |
+
+汇总：
+
+| grouping | rf + rgb/none | rf + spectral_gradient | delta |
+|---|---:|---:|---:|
+| m10db mean | 96.3875 | 93.3850 | -3.0025 |
+| m20db mean | 90.4525 | 87.6050 | -2.8475 |
+| m30db mean | 81.8475 | 80.0700 | -1.7775 |
+| overall | 89.5625 | 87.0200 | -2.5425 |
+
+胜负统计：`2` 胜 / `10` 负 / `0` 平。
+
+结论：
+- `spectral_gradient` 对 `dsss_signal` 整体无效，平均下降 `-2.5425`；
+- 只有 `TimeSquare_spectrum` 的 m20db/m30db 有提升，但不能抵消其他 10 个点的下降；
+- 这进一步支持当前 `signal_adaptive` 的设计：DSSS 不走梯度输入，继续保持 RGB；
+- 后续 DSSS 的改进方向不应继续强化边缘/梯度，而应尝试宽带统计纹理、谱平坦度、局部方差、循环平稳特征等更适合弥散弱结构信号的输入。
+
+可视化：
+- `rf + spectral_gradient` vs `rf + rgb/none` heatmap：`analysis_outputs/rf_grad_vs_rf_rgb/delta_heatmap.png`
+- 原始 AUROC 对比 heatmap：`analysis_outputs/rf_grad_vs_rf_rgb/score_heatmaps.png`
+
+## 当前最终主协议与四组核心对比
+
+当前主实验协议已经从 cross-site 调整为同场景训练 / 同场景测试：
+
+- split：`normal_75_25`
+- 训练：`normal/{ISR}` 前 3/4 图片
+- 测试：剩余 1/4 normal + 全部 abnormal
+- k-shot：1
+- epoch：50
+- seed：111
+
+完整四组对比文件：
+- `analysis_outputs/rf_four_way_compare/four_way_compare.csv`
+
+四组核心方案的整体 Image-AUROC 均值：
+
+| method | overall |
+|---|---:|
+| `rf + rgb/none` | 84.8683 |
+| `rf + signal_adaptive` | 86.7336 |
+| `rf_signal_structured + rgb` | 84.8289 |
+| `rf_signal_structured + signal_adaptive` | 86.7625 |
+
+结论：
+- 主要收益来自特征输入侧，而不是 prompt 侧；
+- `rf_signal_structured + rgb` 相比 `rf + rgb/none` 基本没有提升；
+- `rf_signal_structured + signal_adaptive` 是四组里最高的，为 `86.7625`；
+- 但它只比 `rf + signal_adaptive` 高 `0.0289`，可以认为基本持平；
+- 因此当前默认主方案仍建议写为 `rf + signal_adaptive`，论文里可以把 `rf_signal_structured + signal_adaptive` 作为“prompt 结构化后轻微进一步提升但边际收益很小”的补充结果。
+
+对应图：
+- 特征输入增益 heatmap：`analysis_outputs/rf_four_way_compare/delta_feature_heatmap.png`
+- prompt 增益 heatmap：`analysis_outputs/rf_four_way_compare/delta_prompt_heatmap.png`
+- 两者叠加增益 heatmap：`analysis_outputs/rf_four_way_compare/delta_both_heatmap.png`
+
+## DSSS statistical 输入专项实验
+
+在确认 `spectral_gradient` 对 DSSS 平均下降 `-2.5425` 后，DSSS 的改进方向改为宽带统计纹理，而不是边缘/梯度增强。
+
+新增输入：
+- `dsss_statistical = gray + frequency-background residual + local variance`
+
+完整结果文件：
+- `analysis_outputs/dsss_statistical_vs_baseline/dsss_statistical_vs_baseline.csv`
+
+可视化：
+- `analysis_outputs/dsss_statistical_vs_baseline/dsss_statistical_vs_baseline.png`
+
+整体结果：
+
+| method | overall |
+|---|---:|
+| `rf + rgb/none` | 89.5625 |
+| `rf + dsss_statistical` | 90.8775 |
+| delta | +1.3150 |
+
+逐场景结果：
+
+| scene | ISR | baseline | dsss_statistical | delta |
+|---|---|---:|---:|---:|
+| WeaponMuseum_spectrum | m10db | 97.68 | 95.19 | -2.49 |
+| WeaponMuseum_spectrum | m20db | 92.87 | 90.55 | -2.32 |
+| WeaponMuseum_spectrum | m30db | 80.97 | 73.15 | -7.82 |
+| Playground_spectrum | m10db | 96.58 | 97.81 | +1.23 |
+| Playground_spectrum | m20db | 92.05 | 94.89 | +2.84 |
+| Playground_spectrum | m30db | 79.10 | 88.11 | +9.01 |
+| TimeSquare_spectrum | m10db | 98.83 | 97.38 | -1.45 |
+| TimeSquare_spectrum | m20db | 93.61 | 96.17 | +2.56 |
+| TimeSquare_spectrum | m30db | 84.04 | 94.70 | +10.66 |
+| Gymnasium_spectrum | m10db | 92.46 | 93.50 | +1.04 |
+| Gymnasium_spectrum | m20db | 83.28 | 84.54 | +1.26 |
+| Gymnasium_spectrum | m30db | 83.28 | 84.54 | +1.26 |
+
+结论：
+- `dsss_statistical` 对 DSSS 全组平均提升 `+1.3150`；
+- 最大收益来自低 ISR 的 `Playground_spectrum` 和 `TimeSquare_spectrum`；
+- `Playground_spectrum m30db` 从 `79.10` 提升到 `88.11`，提升 `+9.01`；
+- `TimeSquare_spectrum m30db` 从 `84.04` 提升到 `94.70`，提升 `+10.66`；
+- 但 `WeaponMuseum_spectrum` 三个 ISR 全部下降，尤其 `m30db` 下降 `-7.82`；
+- 因此 DSSS 不适合统一替换为 `dsss_statistical`，更适合写成 scene-adaptive input selection。
+
+## WeaponMuseum DSSS 输入专项分析
+
+针对 `WeaponMuseum_spectrum` 的 DSSS 负收益，又测试了三个更保能量的输入方案：
+
+- `dsss_energy_smooth`
+- `dsss_lowfreq_band`
+- `dsss_energy_profile`
+
+结果：
+
+| method | m10db | m20db | m30db | mean | vs baseline |
+|---|---:|---:|---:|---:|---:|
+| `baseline rgb` | 97.68 | 92.87 | 80.97 | 90.51 | +0.00 |
+| `dsss_energy_smooth` | 81.62 | 76.63 | 64.82 | 74.36 | -16.15 |
+| `dsss_lowfreq_band` | 92.40 | 86.13 | 72.98 | 83.84 | -6.67 |
+| `dsss_energy_profile` | 97.72 | 92.01 | 79.64 | 89.79 | -0.72 |
+
+结论：
+- `WeaponMuseum_spectrum` 的 DSSS 仍建议保持 RGB；
+- `dsss_energy_profile` 最接近 baseline，但平均仍低 `-0.72`；
+- `dsss_energy_smooth` 和 `dsss_lowfreq_band` 明显破坏有效信息；
+- 不建议继续强行为 `WeaponMuseum_spectrum` DSSS 设计新输入，当前更合理的做法是 scene-adaptive selection。
+
+## 当前推荐的 scene-adaptive DSSS selection
+
+基于以上结果，DSSS 的推荐输入选择是：
+
+| scene | recommended DSSS input |
+|---|---|
+| WeaponMuseum_spectrum | `rgb` |
+| Playground_spectrum | `dsss_statistical` |
+| TimeSquare_spectrum | `dsss_statistical` |
+| Gymnasium_spectrum | `dsss_statistical` |
+
+这个策略的论文表述可以是：
+- DSSS 是宽带、弥散、弱结构信号，不适合统一使用边缘/梯度输入；
+- 统计纹理输入能增强低 ISR 下的宽带能量扰动；
+- 但统计纹理对部分场景背景敏感，`WeaponMuseum_spectrum` 是典型负例；
+- 因此最终采用 scene-adaptive input selection，而不是对所有场景强制使用同一 DSSS 前端。
+
+如果继续补实验，优先跑这 12 组 scene-adaptive DSSS selection：
+- `WeaponMuseum_spectrum` 使用 `rgb`
+- `Playground_spectrum` / `TimeSquare_spectrum` / `Gymnasium_spectrum` 使用 `dsss_statistical`
+
+然后和 `rf + rgb/none` 的 DSSS baseline 对比。按现有结果静态估计，这个选择会避免 `WeaponMuseum_spectrum` 的明显下降，同时保留另外三个场景的大部分收益。
+
+## 方法解释图
+
+当前已经生成方法解释图：
+
+- `analysis_outputs/feature_extraction_improvement/feature_extraction_improvement_overview.png`
+
+图中表达的主线是：
+- 输入 RF spectrogram；
+- 使用 signal-adaptive front-end；
+- burst / chirp 走 `spectral_gradient`，强化突发边缘和斜线结构；
+- DSSS 不走梯度，而走 statistical texture；
+- 对 `WeaponMuseum_spectrum` 等统计纹理不稳定的场景保留 RGB。
+
+## 当前论文写法建议
+
+可以按以下逻辑组织方法与实验结论：
+
+1. RF 异常类型具有不同视觉形态：burst 是短时突发，chirp 是斜线扫频，DSSS 是宽带弥散弱结构。
+2. 对 burst / chirp，`spectral_gradient` 能强化边缘、短时变化和斜线结构，因此带来主要提升。
+3. 对 DSSS，`spectral_gradient` 平均下降 `-2.5425`，说明边缘型输入不适合宽带弥散信号。
+4. 因此进一步设计 `dsss_statistical`，用频率背景残差和局部方差描述宽带统计纹理。
+5. `dsss_statistical` 在 DSSS 全组平均提升 `+1.3150`，尤其改善低 ISR 的 `Playground_spectrum` 和 `TimeSquare_spectrum`。
+6. `WeaponMuseum_spectrum` 的负收益说明 DSSS 统计纹理具有场景依赖性，因此最终采用 scene-adaptive input selection。
+7. 四组完整对比表明，特征提取优化贡献最大；prompt 结构化单独收益很小；两者叠加最高但与 `rf + signal_adaptive` 基本持平。
+
+当前主结论：
+
+| conclusion | result |
+|---|---|
+| 默认主方案 | `rf + signal_adaptive` |
+| 四组最高均值 | `rf_signal_structured + signal_adaptive = 86.7625` |
+| 与默认主方案差距 | `+0.0289` |
+| DSSS 梯度输入 | 不推荐，整体 `-2.5425` |
+| DSSS statistical | 推荐作为 scene-adaptive 候选，整体 `+1.3150` |
+| WeaponMuseum DSSS | 保持 RGB |
+
+## Prompt-only 三方案全组对比
+
+为了单独验证 prompt 语义是否有效，本轮固定输入为 `rgb`，只改变 prompt：
+
+- baseline：`generic + rgb`
+- RF domain：`rf_domain + rgb`
+- signal-structured：`rf_signal_structured + rgb`
+
+其中：
+- `generic` 是无频谱场景优化的通用视觉异常 prompt，把 RF 类统一写成 `image`；
+- `rf_domain` 只加入 `radio frequency spectrogram`，不加入 burst / chirp / DSSS 结构词；
+- `rf_signal_structured` 加入 burst / chirp / DSSS 的信号结构描述。
+
+实验设置：
+- 数据集：`burst_signal` / `chirp_signal` / `dsss_signal`
+- 场景：`WeaponMuseum_spectrum` / `Playground_spectrum` / `TimeSquare_spectrum` / `Gymnasium_spectrum`
+- ISR：`m10db` / `m20db` / `m30db`
+- split：`normal_75_25`
+- k-shot：1
+- epoch：50
+- seed：111
+- input：`rgb`
+
+结果文件：
+- `analysis_outputs/prompt_three_way_compare/prompt_three_way_compare.csv`
+
+整体与分类型均值：
+
+| method | burst | chirp | dsss | overall |
+|---|---:|---:|---:|---:|
+| `generic + rgb` | 86.7100 | 79.5800 | 90.1050 | 85.4650 |
+| `rf_domain + rgb` | 86.0292 | 78.8783 | 89.7125 | 84.8733 |
+| `rf_signal_structured + rgb` | 86.2125 | 78.6492 | 89.6250 | 84.8289 |
+
+相对 `generic + rgb`：
+
+| method | wins | losses | ties | mean delta |
+|---|---:|---:|---:|---:|
+| `rf_domain + rgb` | 11 | 24 | 1 | -0.5917 |
+| `rf_signal_structured + rgb` | 8 | 24 | 4 | -0.6361 |
+
+结论：
+- 在固定 `rgb` 输入时，通用 prompt baseline 反而最好；
+- 只加入 RF / spectrogram 任务域词没有带来提升，整体下降 `-0.5917`；
+- 加入 burst / chirp / DSSS 结构词也没有带来提升，整体下降 `-0.6361`；
+- 因此当前实验不能支持“prompt 语义优化单独有效”；
+- 和前面的四组核心对比一致，当前主要收益应归因于输入特征提取优化，而不是自然语言 prompt；
+- 论文中更稳妥的写法是：prompt 结构化作为任务先验尝试，单独收益有限；最终性能提升主要来自 signal-adaptive front-end。
