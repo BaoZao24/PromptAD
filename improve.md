@@ -890,6 +890,84 @@ CLIP 预训练时见的是自然图片，不是无线电频谱图。
 
 这个策略来自 36 组小批量消融实验：burst / chirp 更依赖时频边缘结构，梯度通道收益更明显；dsss 的宽带扩频纹理在当前 CLIP 特征下保留 RGB 更稳。
 
+## 为什么 `spectral_gradient` 是针对频谱特征选择的特征提取方法
+
+### 1. 频谱图和普通 RGB 图像的差异
+
+在原始 PromptAD 中，输入图像会被当成普通 RGB 图片送入 CLIP 视觉编码器。这个做法对自然图像是合理的，因为自然图像中的 RGB 三个通道分别对应颜色信息，颜色、纹理和物体轮廓都可能是重要语义。
+
+但无线电频谱图不是自然图像。频谱图的横轴通常对应时间，纵轴对应频率，像素强度对应某个时间-频率位置上的能量。也就是说，频谱图真正有意义的不是颜色本身，而是：
+
+- 能量在时间方向是否突然出现或消失；
+- 能量在频率方向是否集中、扩散或发生边界变化；
+- 能量轨迹是否形成竖直突发、斜线扫频或宽带弥散结构。
+
+因此，如果只是把灰度频谱复制成 RGB 三通道，三个通道携带的是高度重复的信息，CLIP 看到的仍然主要是普通纹理和颜色分布，而不是频谱异常最关键的时频结构。`spectral_gradient` 的出发点就是：不再把三个通道当作颜色通道，而是把它们改造成更符合频谱物理含义的结构通道。
+
+### 2. `spectral_gradient` 的通道设计
+
+`spectral_gradient` 将输入构造成三个通道：
+
+| 通道 | 含义 | 主要保留的信息 |
+|---|---|---|
+| Channel 1 | 原始灰度频谱强度 | 保留原始能量分布、背景噪声底和异常能量强弱 |
+| Channel 2 | 时间方向梯度 | 强调信号随时间的突变、短时出现和短时消失 |
+| Channel 3 | 频率方向梯度 | 强调信号在频率维度上的边界、窄带结构和频率变化 |
+
+具体来说，时间方向梯度计算相邻时间列之间的强度变化，频率方向梯度计算相邻频率行之间的强度变化。这样做以后，模型输入不再是三份重复的灰度图，而是同时包含：
+
+- 原始能量图；
+- 时间变化图；
+- 频率变化图。
+
+这相当于把频谱图中的时频结构显式暴露给视觉编码器，使 CLIP 不必完全依靠预训练特征自己从 RGB 纹理中推断这些结构。
+
+### 3. 为什么 burst 和 chirp 适合 `spectral_gradient`
+
+`burst_signal` 和 `chirp_signal` 的异常形态都具有明显的边缘和方向结构，因此更适合用梯度增强。
+
+对于 `burst_signal`，异常通常表现为短时间内突然出现的能量块或窄带脉冲。它的关键特征是：
+
+- 持续时间短；
+- 起止边界明显；
+- 在时间方向上有突变；
+- 常表现为局部竖向或块状高能结构。
+
+因此，时间方向梯度能够突出 burst 的开始和结束位置，频率方向梯度能够突出窄带脉冲的频率边界。这比单纯 RGB 输入更容易让模型关注“短时突发”这个异常结构。
+
+对于 `chirp_signal`，异常通常表现为随时间变化的频率扫掠轨迹，也就是频谱图中的斜线结构。它的关键特征是：
+
+- 频率随时间连续变化；
+- 在时频图上形成 diagonal / slanted trace；
+- 轨迹边缘比颜色语义更重要；
+- 低 ISR 下斜线可能很弱，需要增强局部变化。
+
+`spectral_gradient` 同时保留时间方向变化和频率方向变化，因此更容易突出 chirp 的斜率、边界和扫频轨迹。这也是为什么在完整实验中，chirp 从 `legacy + rgb` 到 `rf + signal_adaptive` 的平均提升最明显，达到 `+3.7158`。
+
+### 4. 为什么 DSSS 不适合统一使用 `spectral_gradient`
+
+DSSS 和 burst / chirp 不一样。DSSS 的典型形态不是清晰边缘或斜线，而是宽带、弥散、接近噪声纹理的能量铺展。它的异常信息更可能体现在：
+
+- 宽频带范围内的能量分布变化；
+- 频谱平坦度变化；
+- 局部方差变化；
+- 背景残差和统计纹理变化。
+
+这类信号没有特别清晰的边缘或方向轨迹。如果强行使用时间/频率梯度，可能会把 DSSS 的宽带连续能量结构打碎成局部边缘，反而破坏原本有用的统计纹理信息。
+
+这个判断也被后续实验验证：在 `dsss_signal` 上单独比较 `rf + rgb/none` 和 `rf + spectral_gradient`，`spectral_gradient` 整体下降 `-2.5425`，12 个测试点中只有 2 个提升、10 个下降。因此，DSSS 不应该继续使用边缘/梯度型输入，而应该转向宽带统计纹理特征，例如 `dsss_statistical = gray + frequency-background residual + local variance`。
+
+### 5. 这个方法是怎么分析出来的
+
+`spectral_gradient` 不是单纯凭经验添加的，而是按下面的分析路径确定的：
+
+1. **先从频谱图物理含义出发。** 频谱图的两个空间维度分别对应时间和频率，因此相邻像素变化具有实际含义，不同于普通自然图像中的颜色纹理变化。
+2. **再按异常类型分析视觉形态。** burst 的核心是短时突发，chirp 的核心是斜线扫频，二者都依赖时频边缘和局部变化；DSSS 的核心是宽带弥散纹理，不主要依赖边缘。
+3. **然后设计三通道输入。** 用原始灰度保留能量分布，用时间梯度增强短时变化，用频率梯度增强频带边界和扫频结构。
+4. **最后用消融实验验证。** 36 组小批量消融显示，`spectral_gradient` 对 burst / chirp 更有效，但对 dsss 会破坏宽带纹理；因此最终不是所有信号统一使用 `spectral_gradient`，而是采用 `signal_adaptive`：burst / chirp 使用 `spectral_gradient`，dsss 保持 `rgb` 或进一步使用统计纹理输入。
+
+所以，`spectral_gradient` 的作用不是简单换一种图像预处理方式，而是把无线电频谱异常检测中的时频结构先验显式注入到 CLIP 的视觉输入中。它适合具有清晰局部变化、边界和轨迹的异常类型，但不适合所有频谱异常统一使用。
+
 ## 早期 sanity 实验结果
 
 实验设置：
@@ -1529,3 +1607,752 @@ python run_rf_split_all.py --gpus 0 1 2 3 --epochs 50 --prompt-mode rf --input-m
 - 因此当前实验不能支持“prompt 语义优化单独有效”；
 - 和前面的四组核心对比一致，当前主要收益应归因于输入特征提取优化，而不是自然语言 prompt；
 - 论文中更稳妥的写法是：prompt 结构化作为任务先验尝试，单独收益有限；最终性能提升主要来自 signal-adaptive front-end。
+
+## 下一步：轻量 Visual Adapter
+
+由于 prompt-only 实验没有带来稳定收益，后续改进不再继续堆自然语言模板，而是转向视觉特征提取侧。当前新增一个轻量残差 Visual Adapter，用来在冻结 CLIP 视觉主干的前提下，对 RF 频谱特征做小幅域适配。
+
+### 方法设计
+
+Adapter 接在 CLIP 图像编码器输出之后：
+
+```text
+RF input -> frozen CLIP visual encoder -> visual feature -> residual adapter -> adapted visual feature
+```
+
+残差形式为：
+
+```text
+adapted_feature = feature + alpha * MLP(feature)
+```
+
+其中：
+- CLIP visual backbone 冻结，不参与训练；
+- PromptLearner 继续训练；
+- Visual Adapter 参与训练；
+- MLP 使用 bottleneck 结构，默认 `adapter_bottleneck_ratio=0.25`；
+- 残差权重默认 `adapter_alpha=0.2`；
+- 最后一层线性层零初始化，使 Adapter 初始时接近 identity mapping，避免一开始破坏 CLIP 原特征。
+
+由于当前 CLIP 输出包含不同维度的视觉特征：
+- 全局图文对齐特征：`640` 维；
+- patch/gallery 特征：`896` 维；
+
+因此实现中按特征维度分别建立 Adapter，避免全局特征和 patch 特征共用错误维度的投影层。
+
+### 为什么这样设计
+
+这个 Adapter 的目标不是重新训练 CLIP，而是做参数量很小的频谱域适配：
+
+1. `signal_adaptive` 已经说明主要瓶颈在视觉输入/视觉特征侧，而不是 prompt 文案侧。
+2. RF 频谱图和自然图像差异明显，CLIP 原始视觉特征可能不能充分表达时频结构。
+3. 直接全量微调 CLIP 容易过拟合，且少样本设置下不稳定。
+4. 残差 Adapter 可以在保留 CLIP 原始能力的同时，学习一个小的特征修正方向。
+
+### 已实现参数
+
+`train_cls.py` 新增：
+
+```bash
+--visual-adapter True
+--adapter-bottleneck-ratio 0.25
+--adapter-alpha 0.2
+```
+
+`run_rf_split_all.py` 新增：
+
+```bash
+--visual-adapter
+--adapter-bottleneck-ratio 0.25
+--adapter-alpha 0.2
+```
+
+注意：启用 Visual Adapter 后，测试图像特征不能再在训练前一次性缓存，因为 Adapter 每个 epoch 都会更新。因此当前实现会在每个 epoch 重新编码测试特征，并在 Adapter 更新后重建正常样本 feature gallery。
+
+### Smoke test
+
+已完成一个 1 epoch 单点运行测试：
+
+```bash
+python train_cls.py \
+  --dataset chirp_signal \
+  --class_name WeaponMuseum_spectrum \
+  --k-shot 1 \
+  --Epoch 1 \
+  --gpu-id 0 \
+  --noise-level m30db \
+  --vis False \
+  --seed 111 \
+  --root-dir ./tmp_visual_adapter_smoke \
+  --prompt-mode rf \
+  --input-mode signal_adaptive \
+  --visual-adapter True \
+  --split-mode normal_75_25 \
+  --normal-train-ratio 0.75
+```
+
+运行结果：
+- 训练、重建 gallery、评估流程均正常完成；
+- 1 epoch smoke test 的 Image-AUROC 为 `59.75`；
+- 这个数值只用于确认代码路径正确，不作为正式结论。
+
+### 建议下一组正式实验
+
+先不要直接跑全部 seed。建议先跑 `chirp_signal` 的 12 组，因为 chirp 是当前最受益于视觉结构特征的异常类型：
+
+```bash
+python run_rf_split_all.py \
+  --gpus 0 1 2 3 \
+  --epochs 50 \
+  --datasets chirp_signal \
+  --prompt-mode rf \
+  --input-mode signal_adaptive \
+  --visual-adapter \
+  --root-dir ./result_visual_adapter/chirp_rf_signal_adaptive_adapter
+```
+
+对比对象：
+- `rf + signal_adaptive`
+- `rf + signal_adaptive + visual_adapter`
+
+如果 chirp 有稳定收益，再扩展到 burst 和 dsss；如果 chirp 都没有收益，就不建议继续扩大 Adapter 实验。
+
+### Chirp baseline 对比实验结果
+
+先按最小成本验证 Visual Adapter 是否能在最可能受益的 `chirp_signal` 上超过 baseline。
+
+实验设置：
+- dataset：`chirp_signal`
+- scene：`WeaponMuseum_spectrum` / `Playground_spectrum` / `TimeSquare_spectrum` / `Gymnasium_spectrum`
+- ISR：`m10db` / `m20db` / `m30db`
+- split：`normal_75_25`
+- k-shot：1
+- epoch：50
+- seed：111
+- baseline：`rf + signal_adaptive`
+- adapter：`rf + signal_adaptive + visual_adapter`
+
+结果文件：
+- `analysis_outputs/visual_adapter_compare/chirp_rf_signal_adaptive_adapter_vs_baseline.csv`
+
+逐项结果：
+
+| scene | ISR | baseline | adapter | delta |
+|---|---|---:|---:|---:|
+| WeaponMuseum_spectrum | m10db | 95.3600 | 95.3600 | +0.0000 |
+| WeaponMuseum_spectrum | m20db | 86.5400 | 86.4900 | -0.0500 |
+| WeaponMuseum_spectrum | m30db | 59.7800 | 59.7500 | -0.0300 |
+| Playground_spectrum | m10db | 96.6800 | 96.6800 | +0.0000 |
+| Playground_spectrum | m20db | 93.7900 | 93.7900 | +0.0000 |
+| Playground_spectrum | m30db | 85.8100 | 85.8200 | +0.0100 |
+| TimeSquare_spectrum | m10db | 97.2700 | 97.2400 | -0.0300 |
+| TimeSquare_spectrum | m20db | 93.4000 | 93.4300 | +0.0300 |
+| TimeSquare_spectrum | m30db | 83.6400 | 83.6400 | +0.0000 |
+| Gymnasium_spectrum | m10db | 76.2200 | 76.2600 | +0.0400 |
+| Gymnasium_spectrum | m20db | 77.8900 | 77.9100 | +0.0200 |
+| Gymnasium_spectrum | m30db | 45.5200 | 45.4500 | -0.0700 |
+
+整体结果：
+
+| method | mean Image-AUROC |
+|---|---:|
+| `rf + signal_adaptive` | 82.6583 |
+| `rf + signal_adaptive + visual_adapter` | 82.6517 |
+| delta | -0.0067 |
+
+按 ISR 汇总：
+
+| ISR | baseline | adapter | delta |
+|---|---:|---:|---:|
+| m10db | 91.3825 | 91.3850 | +0.0025 |
+| m20db | 87.9050 | 87.9050 | -0.0000 |
+| m30db | 68.6875 | 68.6650 | -0.0225 |
+
+胜负统计：
+- 4 胜 / 4 负 / 4 持平；
+- overall delta 为 `-0.0067`，可以认为和 baseline 完全持平；
+- 当前这版残差 Visual Adapter 没有带来可观收益。
+
+结论：
+- 在 `chirp_signal` 这组最可能受益的实验上，Visual Adapter 没有超过 `rf + signal_adaptive` baseline；
+- 说明简单地在 CLIP 输出特征后接一个 residual MLP，不足以进一步改善当前频谱特征；
+- 不建议直接扩展到 burst / dsss 全量 36 组，除非先调整 Adapter 训练策略或结构。
+
+后续如果继续尝试视觉适配，更合理的方向是：
+1. 只适配全局图文对齐特征，不适配 patch/gallery 特征；
+2. 降低 adapter 学习率，和 prompt learner 分开设置 optimizer；
+3. 尝试只在 burst / chirp 的低 ISR 难样本上训练；
+4. 或者改为 LoRA 插入视觉 transformer block，而不是输出后 MLP adapter。
+
+## Visual LoRA 对比实验
+
+在 residual Visual Adapter 没有收益后，进一步尝试更深入的视觉侧参数高效适配：Visual LoRA。
+
+### LoRA 插入位置
+
+当前实现把 LoRA 插入到 CLIP visual transformer 的 attention 投影层中。由于本项目的 V2VTransformer 会在第一次 forward 时把原始 `nn.MultiheadAttention` 替换成自定义 `Attention(qkv, proj)`，因此 LoRA 实际加在：
+
+- `Attention.qkv`
+- `Attention.proj`
+
+也就是：
+
+```text
+qkv(x)  = W_qkv x  + (alpha / r) B_qkv A_qkv x
+proj(x) = W_proj x + (alpha / r) B_proj A_proj x
+```
+
+训练时：
+- 冻结原始 CLIP 权重；
+- 训练 PromptLearner；
+- 训练 visual LoRA 参数；
+- 不使用之前的输出后 residual Visual Adapter。
+
+默认参数：
+- `visual_lora_rank = 4`
+- `visual_lora_alpha = 8`
+- `visual_lora_dropout = 0`
+- `batch_size = 16`
+
+说明：LoRA 需要对视觉 Transformer 反向传播，显存开销明显高于只训练 PromptLearner，因此不能继续使用默认 `batch_size=400`。
+
+### 实验设置
+
+本轮不再强调 `k-shot=1`，因为主协议使用的是 `normal_75_25`，实际训练样本由 75/25 切分决定：
+
+- dataset：`chirp_signal`
+- prompt：`rf`
+- input：`signal_adaptive`
+- split：`normal_75_25`
+- train：每个 scene/ISR 下前 75% normal samples
+- test：剩余 25% normal samples + 全部 abnormal samples
+- epoch：50
+- seed：111
+- baseline：`rf + signal_adaptive`
+- test：`rf + signal_adaptive + visual_lora`
+
+结果文件：
+- `analysis_outputs/visual_lora_compare/chirp_rf_signal_adaptive_lora_r4_vs_baseline.csv`
+
+### 逐项结果
+
+| scene | ISR | baseline | LoRA | delta |
+|---|---|---:|---:|---:|
+| WeaponMuseum_spectrum | m10db | 95.3600 | 95.1700 | -0.1900 |
+| WeaponMuseum_spectrum | m20db | 86.5400 | 86.3200 | -0.2200 |
+| WeaponMuseum_spectrum | m30db | 59.7800 | 59.8100 | +0.0300 |
+| Playground_spectrum | m10db | 96.6800 | 96.6000 | -0.0800 |
+| Playground_spectrum | m20db | 93.7900 | 93.5300 | -0.2600 |
+| Playground_spectrum | m30db | 85.8100 | 85.6700 | -0.1400 |
+| TimeSquare_spectrum | m10db | 97.2700 | 96.8600 | -0.4100 |
+| TimeSquare_spectrum | m20db | 93.4000 | 93.2000 | -0.2000 |
+| TimeSquare_spectrum | m30db | 83.6400 | 83.5400 | -0.1000 |
+| Gymnasium_spectrum | m10db | 76.2200 | 76.2300 | +0.0100 |
+| Gymnasium_spectrum | m20db | 77.8900 | 77.7100 | -0.1800 |
+| Gymnasium_spectrum | m30db | 45.5200 | 52.0000 | +6.4800 |
+
+### 汇总结果
+
+| method | mean Image-AUROC |
+|---|---:|
+| `rf + signal_adaptive` | 82.6583 |
+| `rf + signal_adaptive + visual_lora` | 83.0533 |
+| delta | +0.3950 |
+
+按 ISR 汇总：
+
+| ISR | baseline | LoRA | delta |
+|---|---:|---:|---:|
+| m10db | 91.3825 | 91.2150 | -0.1675 |
+| m20db | 87.9050 | 87.6900 | -0.2150 |
+| m30db | 68.6875 | 70.2550 | +1.5675 |
+
+按 scene 汇总：
+
+| scene | baseline | LoRA | delta |
+|---|---:|---:|---:|
+| WeaponMuseum_spectrum | 80.5600 | 80.4333 | -0.1267 |
+| Playground_spectrum | 92.0933 | 91.9333 | -0.1600 |
+| TimeSquare_spectrum | 91.4367 | 91.2000 | -0.2367 |
+| Gymnasium_spectrum | 66.5433 | 68.6467 | +2.1033 |
+
+胜负统计：
+- 3 胜 / 9 负 / 0 持平；
+- overall 提升 `+0.3950`；
+- 主要收益来自 `Gymnasium_spectrum m30db` 的 `+6.4800`；
+- m10db 和 m20db 平均下降，m30db 平均提升。
+
+### 结论
+
+Visual LoRA 和输出后 Adapter 不一样：它在 overall 上有小幅正增益，但增益并不稳定。
+
+更准确的结论是：
+- LoRA 对 `chirp_signal` 的低 ISR 困难场景有潜力；
+- 尤其 `Gymnasium_spectrum m30db` 从 `45.52` 提升到 `52.00`；
+- 但 12 个点里有 9 个点下降，说明当前 LoRA 设置还不能作为统一默认方案；
+- 不能直接宣称 LoRA 稳定优于 baseline。
+
+下一步更合理的实验不是立刻跑全量 36 组，而是围绕 LoRA 的稳定性做小范围消融：
+1. 只在后 3 或后 6 个 visual transformer blocks 上加 LoRA，而不是 12 个 block 全部加；
+2. 降低 LoRA 学习率，和 PromptLearner 分开 optimizer；
+3. 对 `m30db` 低 ISR 单独验证，看 LoRA 是否专门改善困难低信噪比场景；
+4. 跑 `seed=222/333` 验证 `Gymnasium m30db` 的大幅提升是否稳定。
+
+## 传统频谱统计特征融合实验
+
+在 prompt、Adapter 和 LoRA 都没有形成稳定收益后，进一步尝试不训练 backbone 的传统频谱统计特征融合。
+
+### 方法设计
+
+本实验不使用 z-score，也不使用训练正常样本分布校准，而是直接从原始频谱图计算一个传统统计图像级分数，再和 PromptAD 图像级分数相加：
+
+```text
+final_score = PromptAD_score + beta * raw_stat_score
+```
+
+其中 `raw_stat_score` 来自：
+- frequency-background residual：每个频率行减去该行的中位背景，取绝对残差；
+- local variance：局部窗口内能量方差；
+- top-k pooling：取统计图中 top 5% 像素均值作为图像级统计分数。
+
+本轮参数：
+- `stat_topk_ratio = 0.05`
+- `stat_fusion_beta = 0.5`
+- 不做 z-score / percentile / normal-score normalization
+
+### 实验设置
+
+- dataset：`dsss_signal`
+- prompt：`rf`
+- input：`signal_adaptive`
+- split：`normal_75_25`
+- train：每个 scene/ISR 下前 75% normal samples
+- test：剩余 25% normal samples + 全部 abnormal samples
+- epoch：50
+- seed：111
+- baseline：`rf + signal_adaptive`
+- test：`rf + signal_adaptive + raw spectral-stat fusion`
+
+结果文件：
+- `analysis_outputs/stat_fusion_compare/dsss_rf_signal_adaptive_stat_beta05_vs_baseline.csv`
+
+### 逐项结果
+
+| scene | ISR | baseline | stat fusion | delta |
+|---|---|---:|---:|---:|
+| WeaponMuseum_spectrum | m10db | 97.6800 | 96.7400 | -0.9400 |
+| WeaponMuseum_spectrum | m20db | 92.8700 | 91.8400 | -1.0300 |
+| WeaponMuseum_spectrum | m30db | 80.9700 | 79.7300 | -1.2400 |
+| Playground_spectrum | m10db | 96.5800 | 96.7200 | +0.1400 |
+| Playground_spectrum | m20db | 92.0500 | 92.4900 | +0.4400 |
+| Playground_spectrum | m30db | 79.1000 | 79.7300 | +0.6300 |
+| TimeSquare_spectrum | m10db | 98.8300 | 98.8000 | -0.0300 |
+| TimeSquare_spectrum | m20db | 93.6100 | 93.4400 | -0.1700 |
+| TimeSquare_spectrum | m30db | 84.0400 | 83.7400 | -0.3000 |
+| Gymnasium_spectrum | m10db | 92.4600 | 92.5100 | +0.0500 |
+| Gymnasium_spectrum | m20db | 83.2800 | 83.3600 | +0.0800 |
+| Gymnasium_spectrum | m30db | 83.2800 | 83.3600 | +0.0800 |
+
+### 汇总结果
+
+| method | mean Image-AUROC |
+|---|---:|
+| `rf + signal_adaptive` | 89.5625 |
+| `rf + signal_adaptive + raw spectral-stat fusion` | 89.3717 |
+| delta | -0.1908 |
+
+按 ISR 汇总：
+
+| ISR | baseline | stat fusion | delta |
+|---|---:|---:|---:|
+| m10db | 96.3875 | 96.1925 | -0.1950 |
+| m20db | 90.4525 | 90.2825 | -0.1700 |
+| m30db | 81.8475 | 81.6400 | -0.2075 |
+
+按 scene 汇总：
+
+| scene | baseline | stat fusion | delta |
+|---|---:|---:|---:|
+| WeaponMuseum_spectrum | 90.5067 | 89.4367 | -1.0700 |
+| Playground_spectrum | 89.2433 | 89.6467 | +0.4033 |
+| TimeSquare_spectrum | 92.1600 | 91.9933 | -0.1667 |
+| Gymnasium_spectrum | 86.3400 | 86.4100 | +0.0700 |
+
+胜负统计：
+- 6 胜 / 6 负 / 0 持平；
+- overall 下降 `-0.1908`。
+
+### 结论
+
+直接把传统频谱统计分数加到 PromptAD 图像分数上没有带来稳定收益。
+
+具体来看：
+- `Playground_spectrum` 有小幅提升，平均 `+0.4033`；
+- `Gymnasium_spectrum` 基本持平，平均 `+0.0700`；
+- `WeaponMuseum_spectrum` 明显下降，平均 `-1.0700`；
+- 所有 ISR 分组平均都下降。
+
+因此，传统统计特征本身不是完全无效，但不能用简单 raw-score 加权融合直接作为统一方案。更合理的后续方向是：
+1. 不直接融合 image score，而是把统计特征作为 scene/type-adaptive input，例如前面的 `dsss_statistical`；
+2. 或者只对 `Playground_spectrum` 这类确实受益的场景启用；
+3. 如果继续做分数融合，需要先解决不同分数尺度问题，但本轮按要求没有使用 z-score。
+
+## WeaponMuseum DSSS 专用输入候选实验
+
+前面的实验说明，DSSS 不适合继续沿用 `spectral_gradient` 这类边缘增强输入；但直接统计分数融合又会伤害 `WeaponMuseum_spectrum`。因此这一轮只针对 `dsss_signal / WeaponMuseum_spectrum` 做更小范围的输入通道候选实验，目标是找出是否存在比 baseline RGB 更适合 WeaponMuseum DSSS 的特征提取方式。
+
+### 选择依据
+
+WeaponMuseum DSSS 的异常形态更接近宽带、弱纹理、低对比度扩频能量变化。它不像 chirp 有明显斜线轨迹，也不像 burst 有清晰突发边界，所以不能把重点放在强梯度边缘上。
+
+本轮选择的依据是：
+- 保留原始灰度能量图，避免破坏 CLIP 已经能使用的整体纹理；
+- 引入频率背景残差，用每个频率行的中位数作为背景，突出相对背景的异常能量变化；
+- 控制残差强度，避免纯残差通道把宽带连续结构打碎；
+- 额外验证 CLAHE 这种局部对比度增强是否有帮助。
+
+因此设计三个候选：
+
+| input mode | 通道设计 | 目的 |
+|---|---|---|
+| `dsss_rgb_residual` | `gray, gray, abs(gray - freq_median)` | 强化频率背景残差 |
+| `dsss_weak_residual` | `gray, gray, gray + 0.2 * residual` | 弱残差增强，在保留原图的同时加入背景差异 |
+| `dsss_clahe` | `gray, gray, CLAHE(gray)` | 增强局部对比度 |
+
+这里没有使用 z-score，也没有使用 normal-score normalization；只是改变输入三通道的构造方式。
+
+### 实验设置
+
+- dataset：`dsss_signal`
+- scene：`WeaponMuseum_spectrum`
+- ISR：`m10db` / `m20db` / `m30db`
+- prompt：`rf`
+- split：`normal_75_25`
+- train：前 75% normal samples
+- test：剩余 25% normal samples + 全部 abnormal samples
+- epoch：50
+- seed：111
+- baseline：`rf + rgb/none`
+
+结果文件：
+- `analysis_outputs/weapon_dsss_input_candidates/weapon_dsss_input_candidates_vs_rgb.csv`
+
+### 结果
+
+| ISR | baseline RGB | `dsss_rgb_residual` | delta | `dsss_weak_residual` | delta | `dsss_clahe` | delta |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| m10db | 97.6800 | 98.7500 | +1.0700 | 98.8400 | +1.1600 | 93.8100 | -3.8700 |
+| m20db | 92.8700 | 94.2900 | +1.4200 | 95.1500 | +2.2800 | 82.8600 | -10.0100 |
+| m30db | 80.9700 | 79.6800 | -1.2900 | 83.1200 | +2.1500 | 62.6300 | -18.3400 |
+| mean | 90.5067 | 90.9067 | +0.4000 | 92.3700 | +1.8633 | 79.7667 | -10.7400 |
+
+### 结论
+
+这一轮真正有效的是 `dsss_weak_residual`。
+
+原因是它满足两个条件：
+1. 保留两路原始灰度输入，没有破坏 DSSS 的宽带纹理和整体能量分布；
+2. 第三通道只加入弱残差信息，让模型看到相对频率背景的异常变化，但不过度放大局部边缘。
+
+`dsss_rgb_residual` 虽然平均提升 `+0.4000`，但在最困难的 `m30db` 下降 `-1.2900`，说明纯残差通道对低 ISR 不稳定。`dsss_clahe` 明显失败，尤其 `m30db` 下降 `-18.3400`，说明局部对比度增强会放大噪声纹理，破坏 DSSS 的弱扩频结构。
+
+因此，当前对 WeaponMuseum DSSS 的推荐是：
+
+```text
+rf + dsss_weak_residual
+```
+
+但这个结论目前只覆盖 `WeaponMuseum_spectrum`、`seed=111`。如果要作为论文或最终方案，需要继续做两步验证：
+1. 在 `seed=222/333` 上复验 `dsss_weak_residual`，确认不是单 seed 偶然收益；
+2. 在另外三个 DSSS scene 上跑同一输入，判断它是 WeaponMuseum 专用，还是可以作为 DSSS 默认输入。
+
+## 特征提取方法整理与 selection 设计
+
+当前已经尝试过的输入特征包括：
+- `rgb`：原始频谱图按普通 RGB 输入；
+- `spectral_gradient`：`gray + time-gradient + frequency-gradient`；
+- `dsss_statistical`：`gray + frequency-background residual + local variance`；
+- `dsss_weak_residual`：`gray + gray + weak residual`；
+- `dsss_rgb_residual`、`dsss_clahe` 等 DSSS 候选。
+
+这一节的目标不是简单堆实验结果，而是整理出一套可以解释的 feature selection 规则。
+
+### 1. 按信号类型的最佳结果
+
+先看主线实验：`rf + signal_adaptive` 相对 `rf + rgb/none` 的结果。
+
+| signal type | baseline input | selected input | baseline mean | selected mean | delta | 结论 |
+|---|---|---|---:|---:|---:|---|
+| `burst_signal` | `rgb` | `spectral_gradient` | 86.3117 | 87.9800 | +1.6683 | 整体有效 |
+| `chirp_signal` | `rgb` | `spectral_gradient` | 78.7308 | 82.6583 | +3.9275 | 明显有效 |
+| `dsss_signal` | `rgb` | `rgb` | 89.5625 | 89.5625 | +0.0000 | 不使用梯度 |
+
+这个结果说明：
+- `burst_signal` 和 `chirp_signal` 更适合边缘/方向结构输入；
+- `dsss_signal` 不适合统一使用 `spectral_gradient`，因为 DSSS 的主要信息不是清晰边缘，而是宽带统计纹理。
+
+因此第一层 selection 是按 signal type：
+
+| signal type | 推荐特征提取 |
+|---|---|
+| `burst_signal` | `spectral_gradient` |
+| `chirp_signal` | `spectral_gradient` |
+| `dsss_signal` | 进入 DSSS 专用选择 |
+
+### 2. Burst / Chirp 为什么选 `spectral_gradient`
+
+`spectral_gradient` 适合 burst 和 chirp 的依据是频谱形态：
+
+| signal type | 频谱形态 | `spectral_gradient` 的作用 |
+|---|---|---|
+| `burst_signal` | 短时突发、起止边界明显、局部能量块 | 时间梯度突出出现/消失边界，频率梯度突出窄带边界 |
+| `chirp_signal` | 频率随时间扫掠，形成斜线轨迹 | 时间/频率梯度共同突出斜率、轨迹和边缘 |
+
+从实验上看，`chirp_signal` 的收益最稳定，平均提升 `+3.9275`；`burst_signal` 平均提升 `+1.6683`，但存在场景差异：
+
+| signal type | scene | `spectral_gradient` mean delta |
+|---|---|---:|
+| `burst_signal` | `WeaponMuseum_spectrum` | +4.2000 |
+| `burst_signal` | `TimeSquare_spectrum` | +4.5500 |
+| `burst_signal` | `Playground_spectrum` | -0.2167 |
+| `burst_signal` | `Gymnasium_spectrum` | -1.8600 |
+| `chirp_signal` | `WeaponMuseum_spectrum` | +4.4900 |
+| `chirp_signal` | `Playground_spectrum` | +1.5233 |
+| `chirp_signal` | `TimeSquare_spectrum` | +1.5567 |
+| `chirp_signal` | `Gymnasium_spectrum` | +8.1400 |
+
+所以如果只做 signal-type-level selection，burst / chirp 都选 `spectral_gradient`；如果进一步做 scene-adaptive selection，burst 的 `Playground_spectrum` 和 `Gymnasium_spectrum` 可以保留 `rgb`，因为它们在当前 seed 下对梯度输入不稳定。
+
+### 3. DSSS 内部的最佳结果
+
+DSSS 不能直接套用 `spectral_gradient`。单独实验已经验证：
+
+```text
+rf + spectral_gradient vs rf + rgb/none on dsss_signal: mean delta = -2.5425
+```
+
+因此 DSSS 的候选重点转向宽带统计纹理。当前 DSSS 的主要结果如下：
+
+| scene | baseline RGB | `dsss_statistical` | delta | 当前推荐 |
+|---|---:|---:|---:|---|
+| `WeaponMuseum_spectrum` | 90.5067 | 86.2967 | -4.2100 | 不用 `dsss_statistical` |
+| `Playground_spectrum` | 89.2433 | 93.6033 | +4.3600 | `dsss_statistical` |
+| `TimeSquare_spectrum` | 92.1600 | 96.0833 | +3.9233 | `dsss_statistical` |
+| `Gymnasium_spectrum` | 86.3400 | 87.5267 | +1.1867 | `dsss_statistical` |
+
+对 `WeaponMuseum_spectrum`，继续尝试了更弱的残差输入：
+
+| input | mean Image-AUROC | delta vs RGB |
+|---|---:|---:|
+| `rgb` | 90.5067 | +0.0000 |
+| `dsss_rgb_residual` | 90.9067 | +0.4000 |
+| `dsss_weak_residual` | 92.3700 | +1.8633 |
+| `dsss_clahe` | 79.7667 | -10.7400 |
+
+因此当前 DSSS 内部推荐为：
+
+| scene | 推荐特征提取 | 依据 |
+|---|---|---|
+| `WeaponMuseum_spectrum` | `dsss_weak_residual` | 保留原始宽带纹理，同时弱注入频率背景残差 |
+| `Playground_spectrum` | `dsss_statistical` | 统计纹理提升明显，平均 `+4.3600` |
+| `TimeSquare_spectrum` | `dsss_statistical` | 统计纹理提升明显，平均 `+3.9233` |
+| `Gymnasium_spectrum` | `dsss_statistical` | 小幅提升，平均 `+1.1867` |
+
+注意：`WeaponMuseum_spectrum -> dsss_weak_residual` 目前只在 `seed=111` 验证过，后续需要 `seed=222/333` 复验。
+
+### 4. 推荐的 selection 方法
+
+基于当时只完成 WeaponMuseum 补充实验的结果，可以先把方法设计成两级选择：
+
+```text
+Input spectrogram
+    |
+    |-- if signal type is burst:
+    |       use spectral_gradient
+    |
+    |-- if signal type is chirp:
+    |       use spectral_gradient
+    |
+    |-- if signal type is dsss:
+            |
+            |-- if scene is WeaponMuseum:
+            |       use dsss_weak_residual
+            |
+            |-- else:
+                    use dsss_statistical
+```
+
+这个中间方案是：
+
+| signal type | scene condition | selected feature |
+|---|---|---|
+| `burst_signal` | default | `spectral_gradient` |
+| `chirp_signal` | default | `spectral_gradient` |
+| `dsss_signal` | `WeaponMuseum_spectrum` | `dsss_weak_residual` |
+| `dsss_signal` | other scenes | `dsss_statistical` |
+
+但这个中间方案有一个问题：它依赖 scene condition，不适合生产中未知场景的情况。因此后续又补充了 `dsss_weak_residual` 在 DSSS 四个场景上的完整验证。新的结果显示，DSSS 可以统一使用 `dsss_weak_residual`，不再需要按 scene 手工选择。
+
+如果不采用后续四场景验证结果，保守版本可以写成：
+
+| signal type | selected feature |
+|---|---|
+| `burst_signal` | `spectral_gradient` |
+| `chirp_signal` | `spectral_gradient` |
+| `dsss_signal` | `rgb` 或 `dsss_statistical`，按开发集选择 |
+
+但从后续完整验证结果看，DSSS 更适合统一选择 `dsss_weak_residual`，这比 scene-adaptive selection 更适合生产部署。
+
+### 5. 论文里 selection 的严谨写法
+
+不能写成“我们在最终测试集上看哪个最高就选哪个”。更严谨的写法应该是：
+
+1. **先验分析。** 根据 RF 频谱形态，把信号分为 edge/trajectory-dominant 和 texture/statistics-dominant 两类。
+2. **候选设计。** 对 edge/trajectory-dominant 的 burst/chirp 设计 `spectral_gradient`；对 texture/statistics-dominant 的 DSSS 设计 residual/statistical 输入。
+3. **开发集选择。** 在固定的 validation/development split 上选择每类信号的输入 front-end。
+4. **最终测试。** 选定规则后，在 test split 上只评估一次，不再根据 test 结果调整规则。
+
+可以写成英文方法描述：
+
+```text
+We adopt a signal-adaptive front-end selection strategy. For burst and chirp signals, whose anomalies are dominated by temporal edges and time-frequency trajectories, we use the spectral-gradient representation. For DSSS signals, whose anomalies are characterized by broadband weak texture variations, we avoid gradient-based inputs and instead use residual/statistical channels. The selection rule is determined on the development split and then fixed for final evaluation.
+```
+
+这套写法的重点是：selection 的依据来自频谱形态和开发集消融，而不是最终测试集调参。
+
+## DSSS `dsss_weak_residual` 四场景完整验证
+
+前面 `dsss_weak_residual` 只在 `WeaponMuseum_spectrum` 上验证过，因此还不能说明它能作为 DSSS 的统一输入特征。为了解决“生产中未知场景时如何选择”的问题，进一步在 DSSS 另外三个场景上补充实验。
+
+### 实验设置
+
+- dataset：`dsss_signal`
+- scene：`WeaponMuseum_spectrum` / `Playground_spectrum` / `TimeSquare_spectrum` / `Gymnasium_spectrum`
+- ISR：`m10db` / `m20db` / `m30db`
+- prompt：`rf`
+- split：`normal_75_25`
+- epoch：50
+- seed：111
+- baseline：`rf + rgb/none`
+- comparison：`rf + dsss_statistical`、`rf + dsss_weak_residual`
+
+结果文件：
+- `analysis_outputs/dsss_weak_residual_all_scenes/dsss_weak_residual_vs_rgb_and_statistical.csv`
+
+### 逐项结果
+
+| scene | ISR | RGB baseline | `dsss_statistical` | `dsss_weak_residual` | weak delta |
+|---|---|---:|---:|---:|---:|
+| WeaponMuseum_spectrum | m10db | 97.6800 | 95.1900 | 98.8400 | +1.1600 |
+| WeaponMuseum_spectrum | m20db | 92.8700 | 90.5500 | 95.1500 | +2.2800 |
+| WeaponMuseum_spectrum | m30db | 80.9700 | 73.1500 | 83.1200 | +2.1500 |
+| Playground_spectrum | m10db | 96.5800 | 97.8100 | 100.0000 | +3.4200 |
+| Playground_spectrum | m20db | 92.0500 | 94.8900 | 98.5800 | +6.5300 |
+| Playground_spectrum | m30db | 79.1000 | 88.1100 | 95.4100 | +16.3100 |
+| TimeSquare_spectrum | m10db | 98.8300 | 97.3800 | 99.8900 | +1.0600 |
+| TimeSquare_spectrum | m20db | 93.6100 | 96.1700 | 96.9100 | +3.3000 |
+| TimeSquare_spectrum | m30db | 84.0400 | 94.7000 | 95.0800 | +11.0400 |
+| Gymnasium_spectrum | m10db | 92.4600 | 93.5000 | 96.7800 | +4.3200 |
+| Gymnasium_spectrum | m20db | 83.2800 | 84.5400 | 87.6200 | +4.3400 |
+| Gymnasium_spectrum | m30db | 83.2800 | 84.5400 | 87.6200 | +4.3400 |
+
+### 按场景汇总
+
+| scene | RGB baseline | `dsss_statistical` | `dsss_weak_residual` | weak delta |
+|---|---:|---:|---:|---:|
+| WeaponMuseum_spectrum | 90.5067 | 86.2967 | 92.3700 | +1.8633 |
+| Playground_spectrum | 89.2433 | 93.6033 | 97.9967 | +8.7533 |
+| TimeSquare_spectrum | 92.1600 | 96.0833 | 97.2933 | +5.1333 |
+| Gymnasium_spectrum | 86.3400 | 87.5267 | 90.6733 | +4.3333 |
+| ALL | 89.5625 | 90.8775 | 94.5833 | +5.0208 |
+
+### 结论
+
+`dsss_weak_residual` 在当前 `seed=111` 的 DSSS 12 个测试点上全部超过 RGB baseline，整体提升 `+5.0208`，也比 `dsss_statistical` 高 `+3.7058`。
+
+这说明前面担心的“DSSS 不同场景要选择不同特征”的问题可以先简化：当前不需要按 scene 手工选择，DSSS 可以统一使用 `dsss_weak_residual`。
+
+更新后的 selection 规则为：
+
+| signal type | selected feature |
+|---|---|
+| `burst_signal` | `spectral_gradient` |
+| `chirp_signal` | `spectral_gradient` |
+| `dsss_signal` | `dsss_weak_residual` |
+
+这个规则比前一版更适合生产部署，因为它只依赖 signal type，不依赖具体场景名称。对于未知场景，只要知道信号类型是 DSSS，就使用同一个 `dsss_weak_residual` front-end。
+
+但需要注意：当前结论仍然只基于 `seed=111`。如果要作为最终论文结果，需要继续跑 `seed=222/333`，报告 `mean ± std`，确认 `dsss_weak_residual` 的提升不是单 seed 偶然结果。
+
+## Wideband pulse baseline 对比实验
+
+新增数据集 `wideband_pulse` 后，先按频谱形态假设它可能接近 burst/chirp，因此优先比较：
+
+```text
+rf + rgb
+rf + spectral_gradient
+```
+
+注意：`wideband_pulse` 的噪声档位是 `m20db / m30db / m40db`，不是 `m10db / m20db / m30db`。
+
+### 实验设置
+
+- dataset：`wideband_pulse`
+- scene：`WeaponMuseum_spectrum` / `Playground_spectrum` / `TimeSquare_spectrum` / `Gymnasium_spectrum`
+- noise：`m20db` / `m30db` / `m40db`
+- prompt：`rf`
+- split：`normal_75_25`
+- epoch：50
+- seed：111
+- baseline：`rf + rgb`
+- comparison：`rf + spectral_gradient`
+
+结果文件：
+- `analysis_outputs/wideband_pulse_feature_compare/rf_spectral_gradient_vs_rgb.csv`
+
+### 逐项结果
+
+| scene | noise | RGB baseline | `spectral_gradient` | delta |
+|---|---|---:|---:|---:|
+| WeaponMuseum_spectrum | m20db | 100.0000 | 100.0000 | +0.0000 |
+| WeaponMuseum_spectrum | m30db | 100.0000 | 100.0000 | +0.0000 |
+| WeaponMuseum_spectrum | m40db | 83.4200 | 60.0000 | -23.4200 |
+| Playground_spectrum | m20db | 97.3100 | 98.7100 | +1.4000 |
+| Playground_spectrum | m30db | 92.9600 | 97.2200 | +4.2600 |
+| Playground_spectrum | m40db | 92.2800 | 78.1300 | -14.1500 |
+| TimeSquare_spectrum | m20db | 100.0000 | 95.5600 | -4.4400 |
+| TimeSquare_spectrum | m30db | 100.0000 | 100.0000 | +0.0000 |
+| TimeSquare_spectrum | m40db | 100.0000 | 100.0000 | +0.0000 |
+| Gymnasium_spectrum | m20db | 99.1800 | 94.8500 | -4.3300 |
+| Gymnasium_spectrum | m30db | 100.0000 | 100.0000 | +0.0000 |
+| Gymnasium_spectrum | m40db | 88.4500 | 56.5500 | -31.9000 |
+
+### 汇总结果
+
+| group | RGB baseline | `spectral_gradient` | delta |
+|---|---:|---:|---:|
+| m20db mean | 99.1225 | 97.2800 | -1.8425 |
+| m30db mean | 98.2400 | 99.3050 | +1.0650 |
+| m40db mean | 91.0375 | 73.6700 | -17.3675 |
+| overall | 96.1333 | 90.0850 | -6.0483 |
+
+### 结论
+
+这个结果推翻了最初“wideband pulse 应该像 burst/chirp 一样使用 `spectral_gradient`”的假设。
+
+更准确的结论是：
+- `spectral_gradient` 在 `m30db` 有小幅平均提升；
+- 但在 `m20db` 平均下降；
+- 在最困难的 `m40db` 明显下降，平均 `-17.3675`；
+- overall 下降 `-6.0483`。
+
+因此当前 `wideband_pulse` 不应该使用 `spectral_gradient` 作为默认特征。更稳妥的 selection 规则应更新为：
+
+| signal type | selected feature |
+|---|---|
+| `burst_signal` | `spectral_gradient` |
+| `chirp_signal` | `spectral_gradient` |
+| `dsss_signal` | `dsss_weak_residual` |
+| `wideband_pulse` | `rgb` |
+
+从现象上看，`wideband_pulse` 虽然有 pulse 边界，但在低信噪比 `m40db` 下，强梯度增强可能会放大噪声边缘、削弱原始宽带能量结构。因此它不能简单归入 burst/chirp 的边缘主导类。

@@ -14,6 +14,8 @@ import argparse
 
 import torch.optim.lr_scheduler
 import torch
+import cv2
+import numpy as np
 
 torch.set_num_threads(1)
 torch.set_num_interop_threads(1)
@@ -31,6 +33,45 @@ import random
 from tqdm import tqdm
 
 TASK = 'CLS'
+
+
+def _to_gray01(raw_img):
+    arr = raw_img.numpy() if hasattr(raw_img, 'numpy') else raw_img
+    arr = np.asarray(arr)
+    if arr.ndim == 3 and arr.shape[2] == 3:
+        gray = cv2.cvtColor(arr.astype(np.uint8), cv2.COLOR_BGR2GRAY)
+    else:
+        gray = arr
+    gray = gray.astype(np.float32)
+    if gray.max() > 1.5:
+        gray /= 255.0
+    return gray
+
+
+def calculate_spectral_stat_score(raw_img, topk_ratio=0.05):
+    gray = _to_gray01(raw_img)
+
+    freq_background = np.median(gray, axis=1, keepdims=True)
+    residual = np.abs(gray - freq_background)
+
+    local_mean = cv2.blur(gray, (9, 9))
+    local_sq_mean = cv2.blur(gray * gray, (9, 9))
+    local_std = np.sqrt(np.maximum(local_sq_mean - local_mean * local_mean, 0.0))
+
+    stat_map = 0.5 * residual + 0.5 * local_std
+    flat = stat_map.reshape(-1)
+    topk = max(1, int(flat.size * topk_ratio))
+    return float(np.partition(flat, -topk)[-topk:].mean())
+
+
+def calculate_batch_stat_scores(raw_data, topk_ratio=0.05):
+    return [calculate_spectral_stat_score(img, topk_ratio=topk_ratio) for img in raw_data]
+
+
+def fuse_with_stat_scores(image_scores, stat_scores, beta):
+    return (np.asarray(image_scores, dtype=np.float32) + beta * np.asarray(stat_scores, dtype=np.float32)).tolist()
+
+
 def select_balanced_visualization_indices(gt_list, normal_count=10, abnormal_count=10):
     normal_indices = [idx for idx, label in enumerate(gt_list) if int(label) == 0]
     abnormal_indices = [idx for idx, label in enumerate(gt_list) if int(label) == 1]
@@ -48,7 +89,10 @@ def save_check_point(model, path):
         'text_features',
     ]
     state_dict = model.state_dict()
-    selected_state_dict = {k: v for k, v in state_dict.items() if k in selected_keys}
+    selected_state_dict = {
+        k: v for k, v in state_dict.items()
+        if k in selected_keys or k.startswith('visual_adapters.') or '.lora_' in k
+    }
 
     torch.save(selected_state_dict, path)
 
@@ -108,24 +152,29 @@ def fit(model,
     features2 = torch.cat(features2, dim=0)
     model.build_image_feature_gallery(features1, features2)
 
-    # ── Cache test image features once (image encoder is frozen during training) ──
-    # Each epoch only text-prompt changes; re-encoding test images is wasteful.
-    print('Caching test image features (one-time)...')
     cached_test_batches = []
-    for (raw_data, mask, label, name, img_type) in tqdm(dataloader, desc='Cache test feats', leave=False):
-        data_t = [model.transform(Image.fromarray(f.numpy())) for f in raw_data]
-        data_t = torch.stack(data_t, dim=0)
-        vf = model.encode_image(data_t.to(device))
-        cached_test_batches.append({
-            'vf':    [v.cpu() for v in vf],         # keep on CPU to save GPU memory
-            'mask':  mask,
-            'label': label,
-            'name':  name,
-            'denorm': [denormalization(d.cpu().numpy()) for d in data_t],
-        })
-    # ─────────────────────────────────────────────────────────────────────────────
+    if not model.use_visual_adapter and not model.use_visual_lora:
+        # ── Cache test image features once (image encoder is frozen during training) ──
+        # Each epoch only text-prompt changes; re-encoding test images is wasteful.
+        print('Caching test image features (one-time)...')
+        for (raw_data, mask, label, name, img_type) in tqdm(dataloader, desc='Cache test feats', leave=False):
+            data_t = [model.transform(Image.fromarray(f.numpy())) for f in raw_data]
+            data_t = torch.stack(data_t, dim=0)
+            vf = model.encode_image(data_t.to(device))
+            stat_scores = None
+            if args.stat_fusion:
+                stat_scores = calculate_batch_stat_scores(raw_data, topk_ratio=args.stat_topk_ratio)
+            cached_test_batches.append({
+                'vf':    [v.cpu() for v in vf],         # keep on CPU to save GPU memory
+                'mask':  mask,
+                'label': label,
+                'name':  name,
+                'denorm': [denormalization(d.cpu().numpy()) for d in data_t],
+                'stat_scores': stat_scores,
+            })
+        # ─────────────────────────────────────────────────────────────────────────────
 
-    optimizer = torch.optim.SGD(model.prompt_learner.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+    optimizer = torch.optim.SGD(model.trainable_parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.Epoch, eta_min=1e-5)
     criterion = nn.CrossEntropyLoss().to(device)
     criterion_tip = TripletLoss(margin=0.0)
@@ -192,6 +241,20 @@ def fit(model,
             optimizer.step()
         scheduler.step()
         model.build_text_feature_gallery()
+        if model.use_visual_adapter or model.use_visual_lora:
+            features1 = []
+            features2 = []
+            print('Rebuilding image feature gallery with adapted features...')
+            with torch.no_grad():
+                for (data, mask, label, name, img_type) in tqdm(train_data, desc='Adapted gallery', leave=False):
+                    data = [model.transform(Image.fromarray(cv2.cvtColor(f.numpy(), cv2.COLOR_BGR2RGB))) for f in data]
+                    data = torch.stack(data, dim=0).to(device)
+                    _, _, feature_map1, feature_map2 = model.encode_image(data)
+                    features1.append(feature_map1)
+                    features2.append(feature_map2)
+            features1 = torch.cat(features1, dim=0)
+            features2 = torch.cat(features2, dim=0)
+            model.build_image_feature_gallery(features1, features2)
 
         print(f'Epoch [{epoch + 1}/{args.Epoch}] evaluating...')
         scores_img = []
@@ -201,18 +264,40 @@ def fit(model,
         gt_mask_list = []
         names = []
 
-        for batch in tqdm(cached_test_batches, desc=f'Eval {epoch + 1}/{args.Epoch}', leave=False):
-            vf_gpu = [v.to(device) for v in batch['vf']]
-            score_img, score_map = model.score_cached(vf_gpu, 'cls')
+        if model.use_visual_adapter or model.use_visual_lora:
+            with torch.no_grad():
+                for (raw_data, mask, label, name, img_type) in tqdm(dataloader, desc=f'Eval {epoch + 1}/{args.Epoch}', leave=False):
+                    data_t = [model.transform(Image.fromarray(f.numpy())) for f in raw_data]
+                    data_t = torch.stack(data_t, dim=0).to(device)
+                    vf_gpu = model.encode_image(data_t)
+                    score_img, score_map = model.score_cached(vf_gpu, 'cls')
+                    if args.stat_fusion:
+                        stat_scores = calculate_batch_stat_scores(raw_data, topk_ratio=args.stat_topk_ratio)
+                        score_img = fuse_with_stat_scores(score_img, stat_scores, args.stat_fusion_beta)
 
-            test_imgs  += batch['denorm']
-            names      += list(batch['name'])
-            gt_list    += batch['label'].numpy().tolist()
-            for m in batch['mask'].numpy():
-                m[m > 0] = 1
-                gt_mask_list.append(m)
-            score_maps += score_map
-            scores_img += score_img
+                    test_imgs += [denormalization(d.cpu().numpy()) for d in data_t]
+                    names += list(name)
+                    gt_list += label.numpy().tolist()
+                    for m in mask.numpy():
+                        m[m > 0] = 1
+                        gt_mask_list.append(m)
+                    score_maps += score_map
+                    scores_img += score_img
+        else:
+            for batch in tqdm(cached_test_batches, desc=f'Eval {epoch + 1}/{args.Epoch}', leave=False):
+                vf_gpu = [v.to(device) for v in batch['vf']]
+                score_img, score_map = model.score_cached(vf_gpu, 'cls')
+                if args.stat_fusion:
+                    score_img = fuse_with_stat_scores(score_img, batch['stat_scores'], args.stat_fusion_beta)
+
+                test_imgs  += batch['denorm']
+                names      += list(batch['name'])
+                gt_list    += batch['label'].numpy().tolist()
+                for m in batch['mask'].numpy():
+                    m[m > 0] = 1
+                    gt_mask_list.append(m)
+                score_maps += score_map
+                scores_img += score_img
 
         test_imgs, score_maps, gt_mask_list = specify_resolution(test_imgs, score_maps, gt_mask_list, resolution=(args.resolution, args.resolution))
 
@@ -291,7 +376,7 @@ def str2bool(v):
 
 def get_args():
     parser = argparse.ArgumentParser(description='Anomaly detection')
-    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa', 'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal', 'rf_open'])
+    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa', 'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal', 'wideband_pulse', 'rf_open'])
     parser.add_argument('--class_name', type=str, default='carpet')
     parser.add_argument('--train-site', type=str, default=None, help='训练站点（跨站点测试时指定，默认与 class_name 相同）')
 
@@ -330,7 +415,8 @@ def get_args():
                         help="generic 使用无频谱语义的通用异常 prompt；rf_domain 只加入 RF/spectrogram 任务域词；rf_signal_structured 使用信号类型结构词")
     parser.add_argument("--input-mode", type=str, default="auto",
                         choices=["auto", "rgb", "spectral_gradient", "signal_adaptive", "log_power",
-                                 "dsss_statistical", "dsss_energy_smooth", "dsss_lowfreq_band", "dsss_energy_profile"],
+                                 "dsss_statistical", "dsss_energy_smooth", "dsss_lowfreq_band", "dsss_energy_profile",
+                                 "dsss_rgb_residual", "dsss_weak_residual", "dsss_clahe"],
                         help="signal_adaptive 对 burst/chirp 使用频谱梯度，对 dsss 使用 RGB；log_power 使用灰度 log-power 压缩；dsss_* 使用 DSSS 专用通道")
     parser.add_argument("--cls-score-mode", type=str, default="text_only",
                         choices=["text_only", "visual_topk", "visual_topk_max", "visual_topk_freq"],
@@ -345,13 +431,33 @@ def get_args():
                         help="visual max score 融合权重")
     parser.add_argument("--visual-freq-position-weight", type=float, default=0.0,
                         help="频率位置约束强度，用于强调远离中心或特定频带的异常")
+    parser.add_argument("--stat-fusion", type=str2bool, choices=[True, False], default=False,
+                        help="是否把传统频谱统计图像级分数直接融合到模型分数中，不做 z-score")
+    parser.add_argument("--stat-topk-ratio", type=float, default=0.05,
+                        help="统计纹理分数聚合时使用的 top-k 比例")
+    parser.add_argument("--stat-fusion-beta", type=float, default=0.5,
+                        help="传统频谱统计分数融合权重")
+    parser.add_argument("--visual-adapter", type=str2bool, choices=[True, False], default=False,
+                        help="是否在冻结 CLIP 视觉特征后训练轻量残差 visual adapter")
+    parser.add_argument("--adapter-bottleneck-ratio", type=float, default=0.25,
+                        help="visual adapter 的瓶颈维度比例")
+    parser.add_argument("--adapter-alpha", type=float, default=0.2,
+                        help="visual adapter 残差分支权重")
+    parser.add_argument("--visual-lora", type=str2bool, choices=[True, False], default=False,
+                        help="是否在 CLIP visual transformer attention 中训练 LoRA")
+    parser.add_argument("--visual-lora-rank", type=int, default=4,
+                        help="visual LoRA 的低秩维度")
+    parser.add_argument("--visual-lora-alpha", type=float, default=8.0,
+                        help="visual LoRA 的缩放系数")
+    parser.add_argument("--visual-lora-dropout", type=float, default=0.0,
+                        help="visual LoRA 的 dropout")
     parser.add_argument("--split-mode", type=str, default="legacy", choices=["legacy", "normal_75_25"],
                         help="legacy 使用原始 few-shot 切分；normal_75_25 使用 3/4 normal 训练、1/4 normal 测试")
     parser.add_argument("--normal-train-ratio", type=float, default=0.75,
                         help="normal_75_25 模式下正常样本训练比例")
 
     # burst_signal related
-    parser.add_argument("--noise-level", type=str, default='m10db', choices=['m10db', 'm20db', 'm30db'])
+    parser.add_argument("--noise-level", type=str, default='m10db', choices=['m10db', 'm20db', 'm30db', 'm40db'])
 
     # optimizer
     parser.add_argument("--lr", type=float, default=0.002)

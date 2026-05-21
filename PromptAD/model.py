@@ -1,6 +1,8 @@
 import torch
 import random
 import torch.nn as nn
+import cv2
+import numpy as np
 from . import CLIPAD
 from torch.nn import functional as F
 from .ad_prompts import *
@@ -157,6 +159,77 @@ class DSSSEnergyProfileChannels:
             self._minmax(time_profile),
             self._minmax(freq_profile),
         ], dim=0)
+
+
+class DSSSRGBResidualChannels:
+    def __init__(self):
+        self.to_tensor = transforms.ToTensor()
+
+    @staticmethod
+    def _minmax(channel):
+        c_min = channel.amin(dim=(-2, -1), keepdim=True)
+        c_max = channel.amax(dim=(-2, -1), keepdim=True)
+        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        freq_background = gray.median(dim=-1, keepdim=True).values
+        residual = (gray - freq_background).abs()
+        return torch.cat([gray, gray, self._minmax(residual)], dim=0)
+
+
+class DSSSWeakResidualChannels:
+    def __init__(self, alpha=0.2):
+        self.alpha = alpha
+        self.to_tensor = transforms.ToTensor()
+
+    @staticmethod
+    def _minmax(channel):
+        c_min = channel.amin(dim=(-2, -1), keepdim=True)
+        c_max = channel.amax(dim=(-2, -1), keepdim=True)
+        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        freq_background = gray.median(dim=-1, keepdim=True).values
+        residual = (gray - freq_background).abs()
+        weak_residual = self._minmax(gray + self.alpha * residual)
+        return torch.cat([gray, gray, weak_residual], dim=0)
+
+
+class DSSSCLAHEChannels:
+    def __init__(self, clip_limit=2.0, tile_grid_size=(8, 8)):
+        self.clip_limit = clip_limit
+        self.tile_grid_size = tile_grid_size
+        self.to_tensor = transforms.ToTensor()
+
+    def __call__(self, image):
+        gray_pil = image.convert('L')
+        gray = self.to_tensor(gray_pil)
+        gray_np = np.array(gray_pil)
+        clahe = cv2.createCLAHE(clipLimit=self.clip_limit, tileGridSize=self.tile_grid_size)
+        enhanced = clahe.apply(gray_np)
+        enhanced = self.to_tensor(Image.fromarray(enhanced))
+        return torch.cat([gray, gray, enhanced], dim=0)
+
+
+class ResidualVisualAdapter(nn.Module):
+    def __init__(self, dim, bottleneck_ratio=0.25, alpha=0.2):
+        super().__init__()
+        hidden_dim = max(1, int(dim * bottleneck_ratio))
+        self.alpha = alpha
+        self.net = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, dim),
+        )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, feature):
+        original_dtype = feature.dtype
+        adapted = feature.float() + self.alpha * self.net(feature.float())
+        return adapted.to(original_dtype)
 
 
 class PromptLearner(nn.Module):
@@ -398,6 +471,13 @@ class PromptAD(torch.nn.Module):
         self.visual_score_beta = kwargs.get('visual_score_beta', 1.0)
         self.visual_score_gamma = kwargs.get('visual_score_gamma', 0.0)
         self.visual_freq_position_weight = kwargs.get('visual_freq_position_weight', 0.0)
+        self.use_visual_adapter = kwargs.get('visual_adapter', False)
+        self.adapter_bottleneck_ratio = kwargs.get('adapter_bottleneck_ratio', 0.25)
+        self.adapter_alpha = kwargs.get('adapter_alpha', 0.2)
+        self.use_visual_lora = kwargs.get('visual_lora', False)
+        self.visual_lora_rank = kwargs.get('visual_lora_rank', 4)
+        self.visual_lora_alpha = kwargs.get('visual_lora_alpha', 8.0)
+        self.visual_lora_dropout = kwargs.get('visual_lora_dropout', 0.0)
         self.get_model(n_ctx, n_pro, n_ctx_ab, n_pro_ab, class_name, backbone, pretrained_dataset)
         self.phrase_form = '{}'
         self.device = device
@@ -441,6 +521,18 @@ class PromptAD(torch.nn.Module):
             self.transform = transforms.Compose(pre_resize_crop + [
                 DSSSEnergyProfileChannels(),
                 transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'dsss_rgb_residual':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                DSSSRGBResidualChannels(),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'dsss_weak_residual':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                DSSSWeakResidualChannels(alpha=0.2),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'dsss_clahe':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                DSSSCLAHEChannels(),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
         else:
             self.transform = transforms.Compose(pre_resize_crop + [
                 _convert_to_rgb,
@@ -458,7 +550,7 @@ class PromptAD(torch.nn.Module):
     def _resolve_input_mode(input_mode, dataset_name):
         if input_mode != 'auto':
             if input_mode == 'signal_adaptive':
-                if dataset_name in {'burst_signal', 'chirp_signal'}:
+                if dataset_name in {'burst_signal', 'chirp_signal', 'wideband_pulse'}:
                     return 'spectral_gradient'
                 if dataset_name == 'dsss_signal':
                     return 'rgb'
@@ -466,7 +558,7 @@ class PromptAD(torch.nn.Module):
                     return 'spectral_gradient'
                 return 'rgb'
             return input_mode
-        if dataset_name in {'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal', 'rf_open'}:
+        if dataset_name in {'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal', 'wideband_pulse', 'rf_open'}:
             return 'spectral_gradient'
         return 'rgb'
 
@@ -484,6 +576,12 @@ class PromptAD(torch.nn.Module):
         # CLIP 主体默认处于 eval 模式。
         # 当前旧分支中，主要训练 PromptLearner，不训练 CLIP 主干。
         model.eval()
+        for p in model.parameters():
+            p.requires_grad_(False)
+        if self.use_visual_lora and hasattr(model.visual, 'visual_lora_rank'):
+            model.visual.visual_lora_rank = self.visual_lora_rank
+            model.visual.visual_lora_alpha = self.visual_lora_alpha
+            model.visual.visual_lora_dropout = self.visual_lora_dropout
 
         # 创建 prompt 学习器。
         # PromptLearner 内部包含 normal_ctx 和 abnormal_ctx 两组可训练参数。
@@ -494,6 +592,21 @@ class PromptAD(torch.nn.Module):
             train_site=self.train_site,
         )
         self.model = model.to(self.device)
+        self.visual_adapters = None
+        if self.use_visual_adapter:
+            adapter_dims = {
+                'output': self.model.visual.output_dim,
+                'embed': self.model.visual.embed_dim,
+            }
+            self.visual_adapters = nn.ModuleDict()
+            for name, dim in adapter_dims.items():
+                if str(dim) not in self.visual_adapters:
+                    self.visual_adapters[str(dim)] = ResidualVisualAdapter(
+                        dim=dim,
+                        bottleneck_ratio=self.adapter_bottleneck_ratio,
+                        alpha=self.adapter_alpha,
+                    )
+            self.visual_adapters = self.visual_adapters.to(self.device)
 
         self.tokenizer = tokenizer
         self.normal_text_features = None
@@ -534,17 +647,41 @@ class PromptAD(torch.nn.Module):
         self.tokenized_abnormal_prompts_learned = self.prompt_learner.tokenized_abnormal_prompts_learned
         self.tokenized_abnormal_prompts = torch.cat([self.tokenized_abnormal_prompts_handle, self.tokenized_abnormal_prompts_learned], dim=0)
 
-    @torch.no_grad()
+    def trainable_parameters(self):
+        params = list(self.prompt_learner.parameters())
+        if self.visual_adapters is not None:
+            params.extend(self.visual_adapters.parameters())
+        if self.use_visual_lora:
+            params.extend(
+                p for name, p in self.model.visual.named_parameters()
+                if 'lora_' in name and p.requires_grad
+            )
+        return params
+
+    def _adapt_visual_features(self, image_features):
+        if self.visual_adapters is None:
+            return image_features
+        adapted_features = []
+        for feature in image_features:
+            key = str(feature.shape[-1])
+            if key not in self.visual_adapters:
+                adapted_features.append(feature)
+            else:
+                adapted_features.append(self.visual_adapters[key](feature))
+        return adapted_features
+
     def encode_image(self, image: torch.Tensor):
 
-        # 图像编码阶段不需要梯度。
-        # 当前旧分支中，CLIP 图像编码器冻结，训练只更新 prompt。
+        # CLIP 图像编码器冻结；如果启用 visual adapter，只让 adapter 接收梯度。
         if self.precision == "fp16":
             image = image.half()
 
         # 项目内的 CLIP encode_image 返回多路视觉特征，
         # 通常包括全局特征、局部 token 特征以及两路 patch feature map。
-        image_features = self.model.encode_image(image)
+        grad_enabled = self.use_visual_lora
+        with torch.set_grad_enabled(grad_enabled):
+            image_features = self.model.encode_image(image)
+        image_features = self._adapt_visual_features(image_features)
 
         # 对每一路视觉特征做 L2 归一化。
         # 归一化后，点积就近似等价于余弦相似度。

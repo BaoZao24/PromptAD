@@ -20,29 +20,45 @@ from itertools import product
 
 import pandas as pd
 
-DATASETS = ['burst_signal', 'chirp_signal', 'dsss_signal']
+DATASETS = ['burst_signal', 'chirp_signal', 'dsss_signal', 'wideband_pulse']
 SCENES = ['WeaponMuseum_spectrum', 'Playground_spectrum', 'TimeSquare_spectrum', 'Gymnasium_spectrum']
 NOISE_LEVELS = ['m10db', 'm20db', 'm30db']
+DATASET_NOISE_LEVELS = {
+    'wideband_pulse': ['m20db', 'm30db', 'm40db'],
+}
 K_SHOT = 1
 SPLIT_MODE = 'normal_75_25'
 
 
+def get_noise_levels(dataset):
+    return DATASET_NOISE_LEVELS.get(dataset, NOISE_LEVELS)
+
+
 def read_i_roc(root_dir, dataset, scene, noise_level, seed):
-    csv_path = os.path.join(
-        root_dir, dataset, scene, noise_level, SPLIT_MODE, f'k_{K_SHOT}', 'csv',
-        f'Seed_{seed}-results.csv'
-    )
-    try:
-        df = pd.read_csv(csv_path, index_col=0)
-        key = f'{dataset}-{scene}'
-        return round(float(df.loc[key, 'i_roc']), 4)
-    except Exception:
-        return None
+    candidate_paths = [
+        os.path.join(
+            root_dir, dataset, scene, noise_level, SPLIT_MODE, f'k_{K_SHOT}', 'csv',
+            f'Seed_{seed}-results.csv'
+        ),
+        os.path.join(
+            root_dir, dataset, scene, noise_level, f'k_{K_SHOT}', 'csv',
+            f'Seed_{seed}-results.csv'
+        ),
+    ]
+    key = f'{dataset}-{scene}'
+    for csv_path in candidate_paths:
+        try:
+            df = pd.read_csv(csv_path, index_col=0)
+            return round(float(df.loc[key, 'i_roc']), 4)
+        except Exception:
+            continue
+    return None
 
 
 def print_summary_table(root_dir, seed, dataset):
     col_w = max(len(s) for s in SCENES) + 2
-    header = f'{"Scene":<{col_w}}' + ''.join(f'{nl:>10}' for nl in NOISE_LEVELS)
+    noise_levels = get_noise_levels(dataset)
+    header = f'{"Scene":<{col_w}}' + ''.join(f'{nl:>10}' for nl in noise_levels)
     sep = '-' * len(header)
     print(f'\n{"="*60}')
     print(f'Split RF {dataset} Summary  (k-shot={K_SHOT}, split={SPLIT_MODE})')
@@ -50,10 +66,10 @@ def print_summary_table(root_dir, seed, dataset):
     print(header)
     print(sep)
 
-    col_means = {nl: [] for nl in NOISE_LEVELS}
+    col_means = {nl: [] for nl in noise_levels}
     for scene in SCENES:
         row = f'{scene:<{col_w}}'
-        for nl in NOISE_LEVELS:
+        for nl in noise_levels:
             val = read_i_roc(root_dir, dataset, scene, nl, seed)
             if val is not None:
                 col_means[nl].append(val)
@@ -64,7 +80,7 @@ def print_summary_table(root_dir, seed, dataset):
 
     print(sep)
     mean_row = f'{"Mean":<{col_w}}'
-    for nl in NOISE_LEVELS:
+    for nl in noise_levels:
         vals = col_means[nl]
         mean_row += f'{sum(vals)/len(vals):>10.4f}' if vals else f'{"N/A":>10}'
     print(mean_row)
@@ -78,7 +94,10 @@ def safe_print(*args, **kwargs):
         print(*args, **kwargs, flush=True)
 
 
-def gpu_worker(gpu_id, job_queue, epochs, seed, vis, dry_run, prompt_mode, input_mode, root_dir):
+def gpu_worker(gpu_id, job_queue, epochs, seed, vis, dry_run, prompt_mode, input_mode, root_dir,
+               visual_adapter, adapter_bottleneck_ratio, adapter_alpha,
+               visual_lora, visual_lora_rank, visual_lora_alpha, visual_lora_dropout,
+               batch_size, stat_fusion, stat_fusion_beta, stat_topk_ratio):
     while True:
         try:
             dataset, scene, noise_level = job_queue.get_nowait()
@@ -93,6 +112,17 @@ def gpu_worker(gpu_id, job_queue, epochs, seed, vis, dry_run, prompt_mode, input
             f'--noise-level {noise_level} --vis {vis_str} --seed {seed} '
             f'--root-dir {root_dir} '
             f'--prompt-mode {prompt_mode} --input-mode {input_mode} '
+            f'--visual-adapter {visual_adapter} '
+            f'--adapter-bottleneck-ratio {adapter_bottleneck_ratio} '
+            f'--adapter-alpha {adapter_alpha} '
+            f'--visual-lora {visual_lora} '
+            f'--visual-lora-rank {visual_lora_rank} '
+            f'--visual-lora-alpha {visual_lora_alpha} '
+            f'--visual-lora-dropout {visual_lora_dropout} '
+            f'--batch-size {batch_size} '
+            f'--stat-fusion {stat_fusion} '
+            f'--stat-fusion-beta {stat_fusion_beta} '
+            f'--stat-topk-ratio {stat_topk_ratio} '
             f'--split-mode {SPLIT_MODE} --normal-train-ratio 0.75'
         )
         safe_print(f'[GPU {gpu_id}] START  {dataset} | {scene} | {noise_level}')
@@ -127,7 +157,22 @@ if __name__ == '__main__':
                                  'rf_scene_conditioned', 'rf_signal_structured'])
     parser.add_argument('--input-mode', type=str, default='auto',
                         choices=['auto', 'rgb', 'spectral_gradient', 'signal_adaptive', 'log_power',
-                                 'dsss_statistical', 'dsss_energy_smooth', 'dsss_lowfreq_band', 'dsss_energy_profile'])
+                                 'dsss_statistical', 'dsss_energy_smooth', 'dsss_lowfreq_band', 'dsss_energy_profile',
+                                 'dsss_rgb_residual', 'dsss_weak_residual', 'dsss_clahe'])
+    parser.add_argument('--visual-adapter', action='store_true', default=False,
+                        help='启用冻结 CLIP 后的轻量残差 visual adapter')
+    parser.add_argument('--adapter-bottleneck-ratio', type=float, default=0.25)
+    parser.add_argument('--adapter-alpha', type=float, default=0.2)
+    parser.add_argument('--visual-lora', action='store_true', default=False,
+                        help='启用 CLIP visual transformer attention LoRA')
+    parser.add_argument('--visual-lora-rank', type=int, default=4)
+    parser.add_argument('--visual-lora-alpha', type=float, default=8.0)
+    parser.add_argument('--visual-lora-dropout', type=float, default=0.0)
+    parser.add_argument('--batch-size', type=int, default=400)
+    parser.add_argument('--stat-fusion', action='store_true', default=False,
+                        help='启用传统频谱统计分数直接融合，不做 z-score')
+    parser.add_argument('--stat-fusion-beta', type=float, default=0.5)
+    parser.add_argument('--stat-topk-ratio', type=float, default=0.05)
     parser.add_argument('--datasets', type=str, nargs='+', default=DATASETS, choices=DATASETS,
                         help='要运行的数据集子集，默认运行全部')
     parser.add_argument('--vis', action='store_true', default=False)
@@ -145,11 +190,16 @@ if __name__ == '__main__':
             args.gpus = [0]
 
     print(f'使用 GPU: {args.gpus}')
-    print(f'数据集: {args.datasets}  |  Scenes: {SCENES}  |  JSR: {NOISE_LEVELS}')
+    print(f'数据集: {args.datasets}  |  Scenes: {SCENES}')
     print(f'训练切分: split={SPLIT_MODE}, normal_ratio=0.75, k-shot={K_SHOT}, epochs={args.epochs}')
 
     job_q = queue.Queue()
-    all_jobs = list(product(args.datasets, SCENES, NOISE_LEVELS))
+    all_jobs = [
+        (dataset, scene, noise)
+        for dataset in args.datasets
+        for scene in SCENES
+        for noise in get_noise_levels(dataset)
+    ]
     skipped, pending = [], []
     for dataset, scene, noise_level in all_jobs:
         val = read_i_roc(args.root_dir, dataset, scene, noise_level, args.seed)
@@ -170,7 +220,10 @@ if __name__ == '__main__':
         t = threading.Thread(
             target=gpu_worker,
             args=(gid, job_q, args.epochs, args.seed, args.vis, args.dry_run,
-                  args.prompt_mode, args.input_mode, args.root_dir),
+                  args.prompt_mode, args.input_mode, args.root_dir,
+                  args.visual_adapter, args.adapter_bottleneck_ratio, args.adapter_alpha,
+                  args.visual_lora, args.visual_lora_rank, args.visual_lora_alpha, args.visual_lora_dropout,
+                  args.batch_size, args.stat_fusion, args.stat_fusion_beta, args.stat_topk_ratio),
             daemon=True,
         )
         t.start()

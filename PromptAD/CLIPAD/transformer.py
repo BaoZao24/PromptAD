@@ -87,7 +87,7 @@ class PatchDropout(nn.Module):
 # V2V attention
 class Attention(nn.Module):
     def __init__(self, out_dim, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.,
-                 settings=''):
+                 settings='', lora_rank=0, lora_alpha=8.0, lora_dropout=0.0):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
@@ -98,10 +98,42 @@ class Attention(nn.Module):
         self.proj = nn.Linear(out_dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
         self.settings = settings
+        self.lora_rank = int(lora_rank)
+        self.lora_scaling = float(lora_alpha) / self.lora_rank if self.lora_rank > 0 else 0.0
+        self.lora_dropout = nn.Dropout(lora_dropout) if lora_dropout > 0 else nn.Identity()
+
+        if self.lora_rank > 0:
+            self.qkv_lora_a = nn.Linear(dim, self.lora_rank, bias=False)
+            self.qkv_lora_b = nn.Linear(self.lora_rank, dim * 3, bias=False)
+            self.proj_lora_a = nn.Linear(out_dim, self.lora_rank, bias=False)
+            self.proj_lora_b = nn.Linear(self.lora_rank, dim, bias=False)
+            nn.init.kaiming_uniform_(self.qkv_lora_a.weight, a=math.sqrt(5))
+            nn.init.zeros_(self.qkv_lora_b.weight)
+            nn.init.kaiming_uniform_(self.proj_lora_a.weight, a=math.sqrt(5))
+            nn.init.zeros_(self.proj_lora_b.weight)
+
+            self.qkv.weight.requires_grad_(False)
+            if self.qkv.bias is not None:
+                self.qkv.bias.requires_grad_(False)
+            self.proj.weight.requires_grad_(False)
+            if self.proj.bias is not None:
+                self.proj.bias.requires_grad_(False)
+
+    def _qkv(self, x):
+        qkv = self.qkv(x)
+        if self.lora_rank > 0:
+            qkv = qkv + self.lora_scaling * self.qkv_lora_b(self.qkv_lora_a(self.lora_dropout(x)))
+        return qkv
+
+    def _proj(self, x):
+        proj = self.proj(x)
+        if self.lora_rank > 0:
+            proj = proj + self.lora_scaling * self.proj_lora_b(self.proj_lora_a(self.lora_dropout(x)))
+        return proj
 
     def forward(self, x):
         B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        qkv = self._qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         # original self-attention for the original path
@@ -130,8 +162,8 @@ class Attention(nn.Module):
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)  # clip_surgery
         # x = v.transpose(1, 2).reshape(B, N, C) # mask_clip
         x_ori = (attn_ori @ v).transpose(1, 2).reshape(B, N, C)
-        x = self.proj_drop(self.proj(x))
-        x_ori = self.proj_drop(self.proj(x_ori))
+        x = self.proj_drop(self._proj(x))
+        x_ori = self.proj_drop(self._proj(x_ori))
         return [x, x_ori]
 
 
@@ -587,6 +619,9 @@ class V2VTransformer(nn.Module):
         self.feature_memory = []
 
         self.attn = None
+        self.visual_lora_rank = 0
+        self.visual_lora_alpha = 8.0
+        self.visual_lora_dropout = 0.0
 
         self.global_average_pool = global_average_pool
         if attentional_pool:
@@ -600,11 +635,9 @@ class V2VTransformer(nn.Module):
 
         self.init_parameters()
 
-        @torch.no_grad()
         def hook_t1(module, input, output):
             self.mid_feature1 = output[1].permute(1, 0, 2)[:, 1:, :]
 
-        @torch.no_grad()
         def hook_t2(module, input, output):
             self.mid_feature2 = output[1].permute(1, 0, 2)[:, 1:, :]
 
@@ -682,11 +715,22 @@ class V2VTransformer(nn.Module):
 
             # apply architecture surgery on the last 6 blocks
             for i in range(1, 13):  # surgery 7, maskclip 2
-                self.attn = Attention(self.embed_dim, self.embed_dim, self.num_heads, True)
+                self.attn = Attention(
+                    self.embed_dim, self.embed_dim, self.num_heads, True,
+                    lora_rank=self.visual_lora_rank,
+                    lora_alpha=self.visual_lora_alpha,
+                    lora_dropout=self.visual_lora_dropout,
+                )
                 self.attn.qkv.weight.data = self.transformer.resblocks[-i].attn.in_proj_weight.clone()
                 self.attn.qkv.bias.data = self.transformer.resblocks[-i].attn.in_proj_bias.clone()
                 self.attn.proj.weight.data = self.transformer.resblocks[-i].attn.out_proj.weight.clone()
                 self.attn.proj.bias.data = self.transformer.resblocks[-i].attn.out_proj.bias.clone()
+                if self.visual_lora_rank > 0:
+                    self.attn.qkv.weight.requires_grad_(False)
+                    self.attn.qkv.bias.requires_grad_(False)
+                    self.attn.proj.weight.requires_grad_(False)
+                    self.attn.proj.bias.requires_grad_(False)
+                self.attn = self.attn.to(device=x.device, dtype=x.dtype)
                 self.transformer.resblocks[-i].attn = self.attn
 
         # to patches - whether to use dual patchnorm - https://arxiv.org/abs/2302.01327v1
@@ -717,7 +761,7 @@ class V2VTransformer(nn.Module):
         x = self.transformer(x)
 
         x, x_ori = x
-        x[0] = x_ori[0]
+        x = torch.cat([x_ori[0:1], x[1:]], dim=0)
 
         x = x.permute(1, 0, 2)  # LND -> NLD
         # x_ori = x_ori.permute(1, 0, 2)  # LND -> NLD
