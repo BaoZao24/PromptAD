@@ -1,8 +1,8 @@
 # PromptAD — Spectrum Signal Anomaly Detection
 
-This repository extends [PromptAD (CVPR 2024)](http://arxiv.org/abs/2404.05231) for **few-shot cross-site anomaly detection on radio-frequency spectrum signals**.
+This repository extends [PromptAD (CVPR 2024)](http://arxiv.org/abs/2404.05231) for **few-shot anomaly detection on radio-frequency spectrum signals**.
 
-The model is trained with only normal (clean) spectrogram patches from one site and tested on anomalous spectrogram patches (Burst / Chirp / DSSS jamming) from other sites.
+The model is trained with only normal (clean) spectrogram patches and tested on anomalous spectrogram patches (Burst / Chirp / DSSS jamming).
 
 ---
 
@@ -46,39 +46,12 @@ bash install.sh
 
 ---
 
-## Cross-site experiments
-
-**Train on `WeaponMuseum_spectrum`, test on the other 3 sites.**
-
-### Run all signal types in parallel (recommended)
-
-```bash
-# Auto-detect all GPUs, run 30 jobs (3 datasets × 3 sites × 3 JSR) in parallel
-python run_cross_site_all.py --vis
-
-# Specify GPUs explicitly
-python run_cross_site_all.py --gpus 0 1 2 3 --epochs 50 --vis
-
-# Preview commands without running
-python run_cross_site_all.py --dry-run
-```
-
-After all jobs finish, a summary table is printed and `plot_heatmap.py` is called automatically.
-
-### Run one signal type at a time
-
-```bash
-python run_cross_site_burst.py [--epochs 50] [--gpu-id 0] [--dry-run]
-python run_cross_site_chirp.py [--epochs 50] [--gpu-id 0] [--dry-run]
-python run_cross_site_dsss.py  [--epochs 50] [--gpu-id 0] [--dry-run]
-```
-
 ### Result directory layout
 
 ```
 ./result/
 └── {dataset}/
-    └── WeaponMuseum_spectrum_to_{test_site}/
+    └── {scene}/
         └── {noise_level}/
             └── k_24/
                 ├── csv/Seed_111-results.csv   # Image-AUROC, Pixel-AUROC
@@ -89,12 +62,6 @@ python run_cross_site_dsss.py  [--epochs 50] [--gpu-id 0] [--dry-run]
 ---
 
 ## Visualization
-
-### Heatmap (AUROC across sites × JSR × signal types)
-
-```bash
-python plot_heatmap.py --root-dir ./result --seed 111 --out ./result/heatmap_cross_site.png
-```
 
 ### Score map comparison (input / ground truth / anomaly score)
 
@@ -111,11 +78,9 @@ python plot_scoremap.py --dataset burst_signal --scene Playground_spectrum --noi
 ## Training a single run directly
 
 ```bash
-# Cross-site (train on WeaponMuseum_spectrum, test on Playground_spectrum)
 python train_cls.py \
     --dataset burst_signal \
     --class_name Playground_spectrum \
-    --train-site WeaponMuseum_spectrum \
     --noise-level m10db \
     --k-shot 24 --Epoch 50 --gpu-id 0 --vis True
 ```
@@ -126,7 +91,7 @@ Key arguments:
 |---|---|---|
 | `--dataset` | `mvtec` | `burst_signal` / `chirp_signal` / `dsss_signal` / `mvtec` / `visa` |
 | `--class_name` | — | Test site name |
-| `--train-site` | same as `class_name` | Train site (cross-site only) |
+
 | `--noise-level` | `m10db` | JSR level for signal datasets |
 | `--k-shot` | `1` | Number of normal training samples |
 | `--Epoch` | `50` | Training epochs |
@@ -141,11 +106,6 @@ Key arguments:
 ```
 PromptAD/
 ├── train_cls.py              # Main training / evaluation script
-├── run_cross_site_all.py     # Parallel multi-GPU cross-site runner (all datasets)
-├── run_cross_site_burst.py   # Sequential cross-site runner — burst
-├── run_cross_site_chirp.py   # Sequential cross-site runner — chirp
-├── run_cross_site_dsss.py    # Sequential cross-site runner — DSSS
-├── plot_heatmap.py           # AUROC heatmap visualization
 ├── plot_scoremap.py          # Score map comparison visualization
 ├── datasets/
 │   ├── __init__.py           # Dataloader factory
