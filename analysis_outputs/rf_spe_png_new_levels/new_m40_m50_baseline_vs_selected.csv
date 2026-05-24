@@ -1,0 +1,8 @@
+dataset,class,noise,baseline_feature,baseline_i_roc,selected_feature,selected_i_roc,delta
+rf_spe_png,burst,m40db,rgb,81.9700,spectral_gradient,80.5800,-1.3900
+rf_spe_png,burst,m50db,rgb,60.4600,spectral_gradient,61.9000,1.4400
+rf_spe_png,chirp,m40db,rgb,98.9000,spectral_gradient,98.7800,-0.1200
+rf_spe_png,chirp,m50db,rgb,87.7700,spectral_gradient,84.0700,-3.7000
+rf_spe_png,dsss,m40db,rgb,67.7000,dsss_weak_residual,69.2100,1.5100
+rf_spe_png,dsss,m50db,rgb,56.3000,dsss_weak_residual,57.3800,1.0800
+rf_spe_png,wideband_pulse,m50db,rgb,86.0200,rgb,86.0200,0.0000

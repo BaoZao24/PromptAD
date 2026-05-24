@@ -29,13 +29,7 @@ def get_dir_from_args(TASK, root_dir, **kwargs):
     k_shot = kwargs['k_shot']
     dataset = kwargs['dataset']
     class_name = kwargs['class_name']
-    train_site = kwargs.get('train_site', None)
-
-    # 跨站点测试时，目录名包含训练站点信息
-    if train_site and train_site != class_name:
-        dir_class_name = f'{train_site}_to_{class_name}'
-    else:
-        dir_class_name = class_name
+    dir_class_name = class_name
 
     # 对于 burst/dsss 等有 noise_level 的数据集，按 noise_level 区分目录
     # deceptive_signal 没有 noise_level 参数但目录结构中固定为 0db
@@ -43,9 +37,6 @@ def get_dir_from_args(TASK, root_dir, **kwargs):
     split_mode = kwargs.get('split_mode', 'legacy')
     if dataset == 'deceptive_signal':
         base_dir = os.path.join(root_dir, f'{dataset}', f'{dir_class_name}', '0db', f'k_{k_shot}')
-    elif dataset == 'rf_open':
-        # category already encodes signal_type + jsr (e.g. burst_m10db); no extra subdir
-        base_dir = os.path.join(root_dir, f'{dataset}', f'{dir_class_name}', f'k_{k_shot}')
     elif dataset in {'burst_signal', 'dsss_signal', 'chirp_signal'} and split_mode != 'legacy':
         base_dir = os.path.join(root_dir, f'{dataset}', f'{dir_class_name}', f'{noise_level}', split_mode, f'k_{k_shot}')
     elif noise_level:

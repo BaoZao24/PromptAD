@@ -18,6 +18,7 @@ valid_backbones = ['ViT-B-16-plus-240', "ViT-B-16"]
 valid_pretrained_datasets = ['laion400m_e32']
 
 from torchvision import transforms
+from torchvision.transforms import functional as TF
 
 
 # CLIP 预训练时使用的图像归一化参数。
@@ -56,6 +57,250 @@ class SpectrogramGradientChannels:
             self._safe_normalize(time_grad),
             self._safe_normalize(freq_grad),
         ], dim=0)
+
+
+class SpectrogramGradientChannelsV2:
+    def __init__(self, sigma=1.0, percentile=0.995):
+        self.sigma = sigma
+        self.percentile = percentile
+        self.to_tensor = transforms.ToTensor()
+
+    def _robust_normalize(self, channel):
+        flat = channel.flatten()
+        if flat.numel() == 0:
+            return channel
+        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
+        return (channel / scale).clamp(0.0, 1.0)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        gray_np = gray.squeeze(0).numpy()
+
+        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
+        time_grad = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
+        freq_grad = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
+
+        time_grad = torch.from_numpy(np.abs(time_grad)).unsqueeze(0)
+        freq_grad = torch.from_numpy(np.abs(freq_grad)).unsqueeze(0)
+
+        return torch.cat([
+            gray,
+            self._robust_normalize(time_grad),
+            self._robust_normalize(freq_grad),
+        ], dim=0)
+
+
+class ChirpDirectionalChannels:
+    def __init__(self, sigma=1.0, percentile=0.995):
+        self.sigma = sigma
+        self.percentile = percentile
+        self.to_tensor = transforms.ToTensor()
+
+    def _robust_normalize(self, channel):
+        flat = channel.flatten()
+        if flat.numel() == 0:
+            return channel
+        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
+        return (channel / scale).clamp(0.0, 1.0)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        gray_np = gray.squeeze(0).numpy()
+
+        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
+        grad_x = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
+        grad_mag = np.sqrt(grad_x * grad_x + grad_y * grad_y)
+
+        kernel_45 = np.array([[2, 1, 0], [1, 0, -1], [0, -1, -2]], dtype=np.float32)
+        kernel_135 = np.array([[0, 1, 2], [-1, 0, 1], [-2, -1, 0]], dtype=np.float32)
+        resp_45 = np.abs(cv2.filter2D(smoothed, cv2.CV_32F, kernel_45))
+        resp_135 = np.abs(cv2.filter2D(smoothed, cv2.CV_32F, kernel_135))
+        diagonal_resp = np.maximum(resp_45, resp_135)
+        diagonal_resp = gaussian_filter(diagonal_resp, sigma=1.0)
+
+        grad_mag = torch.from_numpy(grad_mag).unsqueeze(0)
+        diagonal_resp = torch.from_numpy(diagonal_resp).unsqueeze(0)
+
+        return torch.cat([
+            gray,
+            self._robust_normalize(grad_mag),
+            self._robust_normalize(diagonal_resp),
+        ], dim=0)
+
+
+class ChirpRidgeChannels:
+    def __init__(self, sigma=1.0, percentile=0.995):
+        self.sigma = sigma
+        self.percentile = percentile
+        self.to_tensor = transforms.ToTensor()
+
+    def _robust_normalize(self, channel):
+        flat = channel.flatten()
+        if flat.numel() == 0:
+            return channel
+        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
+        return (channel / scale).clamp(0.0, 1.0)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        gray_np = gray.squeeze(0).numpy()
+
+        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
+        kernel_45 = np.array([
+            [0, 0, 1, 0, 0],
+            [0, 1, 2, 1, 0],
+            [1, 2, 3, 2, 1],
+            [0, 1, 2, 1, 0],
+            [0, 0, 1, 0, 0],
+        ], dtype=np.float32)
+        kernel_135 = np.fliplr(kernel_45)
+        kernel_45 = kernel_45 / kernel_45.sum()
+        kernel_135 = kernel_135 / kernel_135.sum()
+
+        ridge_45 = cv2.filter2D(smoothed, cv2.CV_32F, kernel_45)
+        ridge_135 = cv2.filter2D(smoothed, cv2.CV_32F, kernel_135)
+        ridge_resp = np.maximum(ridge_45, ridge_135)
+        ridge_resp = np.maximum(ridge_resp - smoothed, 0.0)
+
+        continuity_45 = cv2.filter2D(ridge_resp, cv2.CV_32F, kernel_45)
+        continuity_135 = cv2.filter2D(ridge_resp, cv2.CV_32F, kernel_135)
+        continuity = np.maximum(continuity_45, continuity_135)
+
+        ridge_resp = torch.from_numpy(ridge_resp).unsqueeze(0)
+        continuity = torch.from_numpy(continuity).unsqueeze(0)
+
+        return torch.cat([
+            gray,
+            self._robust_normalize(ridge_resp),
+            self._robust_normalize(continuity),
+        ], dim=0)
+
+
+class ChirpTrackEnhanceChannels:
+    def __init__(self, img_resize=240, img_cropsize=240, sigma_small=0.8, sigma_large=3.0, percentile=0.995, kernel_size=11, angles=(-60, -45, -30, 30, 45, 60)):
+        self.img_resize = img_resize
+        self.img_cropsize = img_cropsize
+        self.sigma_small = sigma_small
+        self.sigma_large = sigma_large
+        self.percentile = percentile
+        self.kernel_size = kernel_size
+        self.angles = angles
+        self.to_tensor = transforms.ToTensor()
+        self.kernels = [self._make_line_kernel(kernel_size, angle) for angle in angles]
+
+    @staticmethod
+    def _make_line_kernel(kernel_size, angle_deg):
+        kernel = np.zeros((kernel_size, kernel_size), dtype=np.uint8)
+        center = kernel_size // 2
+        radius = kernel_size // 2
+        theta = np.deg2rad(angle_deg)
+        dx = int(round(radius * np.cos(theta)))
+        dy = int(round(radius * np.sin(theta)))
+        pt1 = (center - dx, center - dy)
+        pt2 = (center + dx, center + dy)
+        cv2.line(kernel, pt1, pt2, color=1, thickness=1)
+        kernel = kernel.astype(np.float32)
+        s = kernel.sum()
+        if s > 0:
+            kernel /= s
+        return kernel
+
+    def _robust_normalize(self, channel):
+        flat = channel.flatten()
+        if flat.numel() == 0:
+            return channel
+        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
+        return (channel / scale).clamp(0.0, 1.0)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        gray_np = gray.squeeze(0).numpy().astype(np.float32)
+
+        fine = gaussian_filter(gray_np, sigma=self.sigma_small)
+        coarse = gaussian_filter(gray_np, sigma=self.sigma_large)
+        local_bright = np.maximum(fine - coarse, 0.0)
+
+        track_resp = []
+        continuity_resp = []
+        for kernel in self.kernels:
+            track = cv2.filter2D(local_bright, cv2.CV_32F, kernel)
+            continuity = cv2.filter2D(track, cv2.CV_32F, kernel)
+            track_resp.append(track)
+            continuity_resp.append(continuity)
+
+        track_map = np.max(np.stack(track_resp, axis=0), axis=0)
+        continuity_map = np.max(np.stack(continuity_resp, axis=0), axis=0)
+        continuity_map = np.maximum(continuity_map - 0.25 * track_map, 0.0)
+
+        feature = torch.cat([
+            gray,
+            self._robust_normalize(torch.from_numpy(track_map).unsqueeze(0)),
+            self._robust_normalize(torch.from_numpy(continuity_map).unsqueeze(0)),
+        ], dim=0)
+
+        feature = TF.resize(feature, [self.img_resize, self.img_resize], interpolation=transforms.InterpolationMode.BICUBIC)
+        feature = TF.center_crop(feature, [self.img_cropsize, self.img_cropsize])
+        return feature
+
+
+class ChirpRGBTrackChannels:
+    def __init__(self, sigma_small=0.8, sigma_large=2.5, percentile=0.995, kernel_size=9, alpha=0.35, angles=(-60, -45, -30, 30, 45, 60)):
+        self.sigma_small = sigma_small
+        self.sigma_large = sigma_large
+        self.percentile = percentile
+        self.kernel_size = kernel_size
+        self.alpha = alpha
+        self.angles = angles
+        self.to_tensor = transforms.ToTensor()
+        self.kernels = [self._make_line_kernel(kernel_size, angle) for angle in angles]
+
+    @staticmethod
+    def _make_line_kernel(kernel_size, angle_deg):
+        kernel = np.zeros((kernel_size, kernel_size), dtype=np.uint8)
+        center = kernel_size // 2
+        radius = kernel_size // 2
+        theta = np.deg2rad(angle_deg)
+        dx = int(round(radius * np.cos(theta)))
+        dy = int(round(radius * np.sin(theta)))
+        pt1 = (center - dx, center - dy)
+        pt2 = (center + dx, center + dy)
+        cv2.line(kernel, pt1, pt2, color=1, thickness=1)
+        kernel = kernel.astype(np.float32)
+        s = kernel.sum()
+        if s > 0:
+            kernel /= s
+        return kernel
+
+    def _robust_normalize(self, channel):
+        flat = channel.flatten()
+        if flat.numel() == 0:
+            return channel
+        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
+        return (channel / scale).clamp(0.0, 1.0)
+
+    def __call__(self, image):
+        rgb = self.to_tensor(image.convert('RGB'))
+        gray = self.to_tensor(image.convert('L')).squeeze(0).numpy().astype(np.float32)
+
+        fine = gaussian_filter(gray, sigma=self.sigma_small)
+        coarse = gaussian_filter(gray, sigma=self.sigma_large)
+        local_bright = np.maximum(fine - coarse, 0.0)
+
+        track_resp = []
+        continuity_resp = []
+        for kernel in self.kernels:
+            track = cv2.filter2D(local_bright, cv2.CV_32F, kernel)
+            continuity = cv2.filter2D(track, cv2.CV_32F, kernel)
+            track_resp.append(track)
+            continuity_resp.append(continuity)
+
+        track_map = np.max(np.stack(track_resp, axis=0), axis=0)
+        continuity_map = np.max(np.stack(continuity_resp, axis=0), axis=0)
+        enhance = np.maximum(track_map, continuity_map)
+        enhance = self._robust_normalize(torch.from_numpy(enhance).unsqueeze(0))
+
+        return torch.clamp(rgb + self.alpha * enhance.repeat(3, 1, 1), 0.0, 1.0)
 
 
 class LogPowerChannels:
@@ -240,7 +485,7 @@ class PromptLearner(nn.Module):
     #
     # 这里的“可学习 prompt”不是普通英文单词，而是 CLIP 文本 embedding 空间中的可训练向量。
     def __init__(self, n_ctx, n_pro, n_ctx_ab, n_pro_ab, classname, clip_model, pre,
-                 dataset_name=None, prompt_mode="rf", train_site=None):
+                 dataset_name=None, prompt_mode="rf"):
         super().__init__()
 
         # 根据 CLIP 精度选择 prompt 向量的数据类型。
@@ -253,10 +498,10 @@ class PromptLearner(nn.Module):
         # rf 模式会把 RF 任务中的信号类型解析成更适合 CLIP 的自然语言。
         # legacy 模式保留旧逻辑，便于做 ablation。
         state_anomaly1 = get_abnormal_prompt_states(
-            classname, dataset_name, prompt_mode, train_site=train_site
+            classname, dataset_name, prompt_mode
         )
         classname = get_prompt_classname(
-            classname, dataset_name, prompt_mode, train_site=train_site
+            classname, dataset_name, prompt_mode
         )
 
         # CLIP 文本 token 的 embedding 维度。
@@ -446,7 +691,6 @@ class PromptAD(torch.nn.Module):
         super(PromptAD, self).__init__()
 
         # k-shot 中的 shot 数。
-        # 对 rf_open 来说，k_shot=1 表示用 1 条 MeasRes 记录作为正常训练样本来源。
         self.shot = kwargs['k_shot']
 
         # 输出异常图的目标尺寸。
@@ -463,7 +707,6 @@ class PromptAD(torch.nn.Module):
         # 加载 CLIP 主体、创建 PromptLearner、初始化文本/视觉特征缓存。
         self.prompt_mode = kwargs.get('prompt_mode', 'rf')
         self.dataset_name = kwargs.get('dataset', None)
-        self.train_site = kwargs.get('train_site', None)
         self.input_mode = self._resolve_input_mode(kwargs.get('input_mode', 'auto'), self.dataset_name)
         self.cls_score_mode = kwargs.get('cls_score_mode', 'text_only')
         self.visual_topk_ratio = kwargs.get('visual_topk_ratio', 0.05)
@@ -501,6 +744,28 @@ class PromptAD(torch.nn.Module):
             self.transform = transforms.Compose(pre_resize_crop + [
                 SpectrogramGradientChannels(),
                 transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'spectral_gradient_v2':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                SpectrogramGradientChannelsV2(),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'chirp_directional':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                ChirpDirectionalChannels(),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'chirp_ridge':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                ChirpRidgeChannels(),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'chirp_track_enhance':
+            self.transform = transforms.Compose([
+                ChirpTrackEnhanceChannels(
+                    img_resize=kwargs['img_resize'],
+                    img_cropsize=kwargs['img_cropsize']),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'chirp_rgb_track':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                ChirpRGBTrackChannels(),
+                transforms.Normalize(mean=mean_train, std=std_train)])
         elif self.input_mode == 'log_power':
             self.transform = transforms.Compose(pre_resize_crop + [
                 LogPowerChannels(),
@@ -554,11 +819,21 @@ class PromptAD(torch.nn.Module):
                     return 'spectral_gradient'
                 if dataset_name == 'dsss_signal':
                     return 'rgb'
-                if dataset_name in {'spectrum', 'sample', 'deceptive_signal', 'rf_open'}:
+                if dataset_name in {'spectrum', 'sample', 'deceptive_signal', 'rf_spe_png'}:
+                    return 'spectral_gradient'
+                return 'rgb'
+            if input_mode == 'signal_adaptive_v2':
+                if dataset_name in {'burst_signal', 'chirp_signal'}:
+                    return 'spectral_gradient'
+                if dataset_name == 'dsss_signal':
+                    return 'dsss_weak_residual'
+                if dataset_name == 'wideband_pulse':
+                    return 'rgb'
+                if dataset_name in {'spectrum', 'sample', 'deceptive_signal', 'rf_spe_png'}:
                     return 'spectral_gradient'
                 return 'rgb'
             return input_mode
-        if dataset_name in {'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal', 'wideband_pulse', 'rf_open'}:
+        if dataset_name in {'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal', 'wideband_pulse', 'rf_spe_png'}:
             return 'spectral_gradient'
         return 'rgb'
 
@@ -589,7 +864,6 @@ class PromptAD(torch.nn.Module):
             n_ctx, n_pro, n_ctx_ab, n_pro_ab, class_name, model, self.precision,
             dataset_name=self.dataset_name,
             prompt_mode=self.prompt_mode,
-            train_site=self.train_site,
         )
         self.model = model.to(self.device)
         self.visual_adapters = None

@@ -11,16 +11,6 @@ class_mapping = {
     "pipe_fryum": "pipe fryum",
     "chewinggum": "chewing gum",
     "metal_nut": "metal nut",
-    # rf_open: {signal_type}_{jsr} -> 统一映射为 "radio frequency spectrum"
-    "burst_m10db": "radio frequency spectrum",
-    "burst_m20db": "radio frequency spectrum",
-    "burst_m30db": "radio frequency spectrum",
-    "chirp_m10db": "radio frequency spectrum",
-    "chirp_m20db": "radio frequency spectrum",
-    "chirp_m30db": "radio frequency spectrum",
-    "dsss_m10db":  "radio frequency spectrum",
-    "dsss_m20db":  "radio frequency spectrum",
-    "dsss_m30db":  "radio frequency spectrum",
 }
 
 rf_signal_dataset_mapping = {
@@ -121,12 +111,11 @@ def is_rf_prompt_class(classname, dataset_name=None):
     return get_rf_signal_key(classname, dataset_name) is not None
 
 
-def get_rf_scene_background(classname=None, train_site=None):
-    scene_key = train_site or classname
-    return rf_scene_background_mapping.get(scene_key)
+def get_rf_scene_background(classname=None):
+    return rf_scene_background_mapping.get(classname)
 
 
-def get_prompt_classname(classname, dataset_name=None, prompt_mode="rf", train_site=None):
+def get_prompt_classname(classname, dataset_name=None, prompt_mode="rf"):
     if prompt_mode == "legacy":
         return class_mapping.get(classname, classname)
 
@@ -138,7 +127,7 @@ def get_prompt_classname(classname, dataset_name=None, prompt_mode="rf", train_s
         if prompt_mode == "rf_signal_structured":
             prompt_classname = rf_signal_structured_classname.get(signal_key, prompt_classname)
         if prompt_mode == "rf_scene_conditioned":
-            scene_background = get_rf_scene_background(classname=classname, train_site=train_site)
+            scene_background = get_rf_scene_background(classname=classname)
             if scene_background is not None:
                 prompt_classname = f"{prompt_classname} in {scene_background}"
         return prompt_classname
@@ -146,7 +135,7 @@ def get_prompt_classname(classname, dataset_name=None, prompt_mode="rf", train_s
     return class_mapping.get(classname, classname)
 
 
-def get_abnormal_prompt_states(classname, dataset_name=None, prompt_mode="rf", train_site=None):
+def get_abnormal_prompt_states(classname, dataset_name=None, prompt_mode="rf"):
     if prompt_mode == "legacy":
         return state_anomaly + class_state_abnormal.get(classname, [])
 
@@ -308,8 +297,3 @@ class_state_abnormal = {
     ],
     }
 
-# rf_open 数据集：将 '{signal}_{jsr}' 格式的类名映射到对应信号类型的 prompt 列表
-for _jsr in ('m10db', 'm20db', 'm30db'):
-    class_state_abnormal[f'burst_{_jsr}'] = class_state_abnormal['burst']
-    class_state_abnormal[f'chirp_{_jsr}'] = class_state_abnormal['chirp']
-    class_state_abnormal[f'dsss_{_jsr}']  = class_state_abnormal['dsss']

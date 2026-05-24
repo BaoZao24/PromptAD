@@ -12,7 +12,8 @@ from .burst_signal import load_burst_signal, burst_signal_classes
 from .dsss_signal import load_dsss_signal, dsss_classes
 from .chirp_signal import load_chirp_signal, chirp_signal_classes
 from .wideband_pulse import load_wideband_pulse, wideband_pulse_classes
-from .rf_open_dataset import load_rf_open, rf_open_classes
+from .wideband_pulse_png import load_wideband_pulse_png, wideband_pulse_png_classes
+from .rf_spe_png import load_rf_spe_png, rf_spe_png_classes
 
 
 mean_train = [0.48145466, 0.4578275, 0.40821073]
@@ -28,7 +29,8 @@ load_function_dict = {
     'dsss_signal': load_dsss_signal,
     'chirp_signal': load_chirp_signal,
     'wideband_pulse': load_wideband_pulse,
-    'rf_open': load_rf_open,
+    'wideband_pulse_png': load_wideband_pulse_png,
+    'rf_spe_png': load_rf_spe_png,
 }
 
 dataset_classes = {
@@ -41,7 +43,8 @@ dataset_classes = {
     'dsss_signal': dsss_classes,
     'chirp_signal': chirp_signal_classes,
     'wideband_pulse': wideband_pulse_classes,
-    'rf_open': rf_open_classes,
+    'wideband_pulse_png': wideband_pulse_png_classes,
+    'rf_spe_png': rf_spe_png_classes,
 }
 
 def denormalization(x):
@@ -54,34 +57,30 @@ def get_dataloader_from_args(phase, **kwargs):
     extra_kwargs = {}
     if kwargs.get('dataset') == 'burst_signal':
         extra_kwargs['noise_level'] = kwargs.get('noise_level', 'm10db')
-        if kwargs.get('train_site'):
-            extra_kwargs['train_category'] = kwargs.get('train_site')
         extra_kwargs['split_mode'] = kwargs.get('split_mode', 'legacy')
         extra_kwargs['normal_train_ratio'] = kwargs.get('normal_train_ratio', 0.75)
     elif kwargs.get('dataset') == 'dsss_signal':
         extra_kwargs['noise_level'] = kwargs.get('noise_level', 'm10db')
-        if kwargs.get('train_site'):
-            extra_kwargs['train_category'] = kwargs.get('train_site')
         extra_kwargs['split_mode'] = kwargs.get('split_mode', 'legacy')
         extra_kwargs['normal_train_ratio'] = kwargs.get('normal_train_ratio', 0.75)
     elif kwargs.get('dataset') == 'chirp_signal':
         extra_kwargs['noise_level'] = kwargs.get('noise_level', 'm10db')
-        if kwargs.get('train_site'):
-            extra_kwargs['train_category'] = kwargs.get('train_site')
         extra_kwargs['split_mode'] = kwargs.get('split_mode', 'legacy')
         extra_kwargs['normal_train_ratio'] = kwargs.get('normal_train_ratio', 0.75)
     elif kwargs.get('dataset') == 'wideband_pulse':
         extra_kwargs['noise_level'] = kwargs.get('noise_level', 'm20db')
-        if kwargs.get('train_site'):
-            extra_kwargs['train_category'] = kwargs.get('train_site')
         extra_kwargs['split_mode'] = kwargs.get('split_mode', 'legacy')
         extra_kwargs['normal_train_ratio'] = kwargs.get('normal_train_ratio', 0.75)
-    elif kwargs.get('dataset') == 'rf_open':
-        pass  # category 已编码 signal_type + noise_level，无需额外 kwargs
+    elif kwargs.get('dataset') == 'wideband_pulse_png':
+        extra_kwargs['noise_level'] = kwargs.get('noise_level', 'm20db')
+        extra_kwargs['split_mode'] = kwargs.get('split_mode', 'legacy')
+        extra_kwargs['normal_train_ratio'] = kwargs.get('normal_train_ratio', 0.75)
+    elif kwargs.get('dataset') == 'rf_spe_png':
+        extra_kwargs['noise_level'] = kwargs.get('noise_level', 'm10db')
+        extra_kwargs['split_mode'] = kwargs.get('split_mode', 'legacy')
+        extra_kwargs['normal_train_ratio'] = kwargs.get('normal_train_ratio', 0.75)
     elif kwargs.get('dataset') == 'deceptive_signal':
         extra_kwargs['freq'] = kwargs.get('freq', None)
-        if kwargs.get('train_site'):
-            extra_kwargs['train_category'] = kwargs.get('train_site')
 
     dataset_inst = CLIPDataset(
         load_function=load_function_dict[kwargs['dataset']],

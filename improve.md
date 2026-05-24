@@ -1608,6 +1608,25 @@ python run_rf_split_all.py --gpus 0 1 2 3 --epochs 50 --prompt-mode rf --input-m
 - 和前面的四组核心对比一致，当前主要收益应归因于输入特征提取优化，而不是自然语言 prompt；
 - 论文中更稳妥的写法是：prompt 结构化作为任务先验尝试，单独收益有限；最终性能提升主要来自 signal-adaptive front-end。
 
+可能原因分析：
+
+1. PromptAD 不是完全固定手工 prompt 的方法。模型中包含可学习的 prompt / context token，训练过程中这些 token 会自动适配 normal / abnormal 的判别方向。因此，手工把提示词从 generic 改成 RF-specific，可能只提供了有限的额外信息。
+2. 当前任务的主要瓶颈更可能在视觉侧。RF 频谱图和自然图像差异很大，如果视觉编码器没有充分提取 burst 边缘、chirp 斜线、DSSS 弱铺展等结构，文本端即使写出更详细的描述，也很难直接带来稳定提升。
+3. RF 频谱语义和 CLIP 预训练语义之间存在 domain gap。类似 `chirp signal with sloped time-frequency trace` 的描述对人是清楚的，但 CLIP 的原始预训练语料未必建立了这种 RF 频谱文本和图像结构之间的强对应关系。
+4. 异常检测最终区分的是 normal / abnormal。如果 baseline prompt 已经覆盖基本的正常与异常概念，继续加入更细的结构化自然语言描述，可能不会显著改变文本特征空间。
+
+因此，prompt-only 失败并不说明提示词实验没有价值，而是说明在当前 RF 频谱异常检测设置下，单纯修改自然语言 prompt 不是主要收益来源。更稳妥的论文表述是：
+
+```text
+Prompt-only modifications provide limited gains, possibly because PromptAD already learns task-specific context tokens and because the dominant bottleneck lies in RF spectrogram visual representation rather than natural-language prompt wording.
+```
+
+对应中文表述：
+
+```text
+提示词单独修改收益有限，可能是因为 PromptAD 已经包含可学习上下文 token，能够吸收部分文本侧适配；同时，RF 频谱异常检测的主要瓶颈更可能位于视觉表征侧，而不是自然语言提示词本身。
+```
+
 ## 下一步：轻量 Visual Adapter
 
 由于 prompt-only 实验没有带来稳定收益，后续改进不再继续堆自然语言模板，而是转向视觉特征提取侧。当前新增一个轻量残差 Visual Adapter，用来在冻结 CLIP 视觉主干的前提下，对 RF 频谱特征做小幅域适配。
@@ -2282,7 +2301,77 @@ We adopt a signal-adaptive front-end selection strategy. For burst and chirp sig
 
 这个规则比前一版更适合生产部署，因为它只依赖 signal type，不依赖具体场景名称。对于未知场景，只要知道信号类型是 DSSS，就使用同一个 `dsss_weak_residual` front-end。
 
-但需要注意：当前结论仍然只基于 `seed=111`。如果要作为最终论文结果，需要继续跑 `seed=222/333`，报告 `mean ± std`，确认 `dsss_weak_residual` 的提升不是单 seed 偶然结果。
+### 三 seed 稳定性补充
+
+为确认 `dsss_weak_residual` 不是单 seed 偶然结果，补跑了 `seed=111/222/333`，并统一写入标准结果目录：
+
+- `result_split_ablation/rf_dsss_weak_residual`
+- 汇总文件：`analysis_outputs/multi_seed_stability/dsss_inputs_mean_std.csv`
+
+三种 DSSS 输入在 12 个 DSSS 点上的三 seed 汇总如下：
+
+| method | mean Image-AUROC | std |
+|---|---:|---:|
+| `rf + rgb` | 89.4981 | 0.1087 |
+| `rf + dsss_statistical` | 91.2033 | 0.7567 |
+| `rf + dsss_weak_residual` | 95.4031 | 0.0424 |
+
+结论：
+- `dsss_weak_residual` 的三 seed 平均值为 `95.4031 ± 0.0424`；
+- 相比 `rf + rgb` 提升 `+5.9050`；
+- 相比 `dsss_statistical` 提升 `+4.1998`；
+- 标准差很小，说明该提升在当前 seed 设置下非常稳定。
+
+因此 DSSS 最终推荐统一使用 `dsss_weak_residual`，不再采用 scene-specific selection。
+
+### 最终 signal-adaptive v2 规则
+
+更新后的最终输入选择规则为：
+
+| signal type | selected feature |
+|---|---|
+| `burst_signal` | `spectral_gradient` |
+| `chirp_signal` | `spectral_gradient` |
+| `dsss_signal` | `dsss_weak_residual` |
+
+其中：
+- `signal_adaptive_v1` 是旧方案：burst/chirp 用 `spectral_gradient`，DSSS 用 `rgb`；
+- `signal_adaptive_v2` 是新方案：burst/chirp 用 `spectral_gradient`，DSSS 用 `dsss_weak_residual`。
+
+三 seed 汇总文件：
+- `analysis_outputs/multi_seed_stability/final_selection_mean_std.csv`
+
+复现实验命令：
+
+```bash
+python run_rf_split_all.py \
+  --gpus 0 1 2 3 \
+  --epochs 50 \
+  --seed 111 \
+  --prompt-mode rf \
+  --input-mode signal_adaptive_v2 \
+  --root-dir ./result_split_ablation/rf_signal_adaptive_v2
+```
+
+补充说明：当前三 seed 的 `signal_adaptive_v2` 总表是由已经完成的 `rf_signal_adaptive` 中 burst/chirp 结果和 `rf_dsss_weak_residual` 中 DSSS 结果组合得到；代码现在已经支持直接用 `--input-mode signal_adaptive_v2` 复跑完整 36 点。
+
+整体 36 点结果：
+
+| method | mean Image-AUROC | std |
+|---|---:|---:|
+| `rf + rgb` | 84.7853 | 0.0750 |
+| `signal_adaptive_v1` | 86.6971 | 0.1386 |
+| `signal_adaptive_v2_weak_dsss` | 88.6655 | 0.1797 |
+
+相对提升：
+
+| comparison | mean delta | std |
+|---|---:|---:|
+| `signal_adaptive_v1 - rf + rgb` | +1.9119 | 0.1207 |
+| `signal_adaptive_v2 - rf + rgb` | +3.8802 | 0.1658 |
+| `signal_adaptive_v2 - signal_adaptive_v1` | +1.9683 | 0.0452 |
+
+这说明：原始 `signal_adaptive` 已经稳定优于 RGB baseline；把 DSSS 从 RGB 替换为 `dsss_weak_residual` 后，整体 36 点均值进一步稳定提升约 `+1.97`。
 
 ## Wideband pulse baseline 对比实验
 
@@ -2309,6 +2398,12 @@ rf + spectral_gradient
 
 结果文件：
 - `analysis_outputs/wideband_pulse_feature_compare/rf_spectral_gradient_vs_rgb.csv`
+
+Heatmap：
+- `analysis_outputs/wideband_pulse_feature_compare/rgb_heatmap.png`
+- `analysis_outputs/wideband_pulse_feature_compare/spectral_gradient_heatmap.png`
+- `analysis_outputs/wideband_pulse_feature_compare/delta_heatmap.png`
+- `analysis_outputs/wideband_pulse_feature_compare/wideband_rgb_vs_spectral_gradient_heatmaps.png`
 
 ### 逐项结果
 
@@ -2356,3 +2451,115 @@ rf + spectral_gradient
 | `wideband_pulse` | `rgb` |
 
 从现象上看，`wideband_pulse` 虽然有 pulse 边界，但在低信噪比 `m40db` 下，强梯度增强可能会放大噪声边缘、削弱原始宽带能量结构。因此它不能简单归入 burst/chirp 的边缘主导类。
+
+## RF_SPE_PNG wideband pulse RGB 实验
+
+除了四场景版本 `/mnt/data/wangbei/data/datasets/wideband_pulse` 外，还补充了单数据源版本：
+
+```text
+/mnt/data/wangbei/data/RF_SPE_PNG/wideband_pulse
+```
+
+该版本没有 scene 分层，目录结构为：
+
+```text
+normal/m20db,m30db,m40db
+abnormal/m20db,m30db,m40db
+groundtruth/m20db,m30db,m40db
+```
+
+因此注册为单场景数据集：
+
+```text
+dataset = wideband_pulse_png
+class_name = wideband_pulse
+```
+
+### 实验设置
+
+- dataset：`wideband_pulse_png`
+- class：`wideband_pulse`
+- source：`RF_SPE_PNG/wideband_pulse`
+- noise：`m20db` / `m30db` / `m40db`
+- prompt：`rf`
+- input：`rgb`
+- split：`normal_75_25`
+- epoch：50
+- seed：111
+
+结果文件：
+- `analysis_outputs/wideband_pulse_png_rgb/rf_rgb_results.csv`
+- `analysis_outputs/wideband_pulse_png_rgb/rf_rgb_heatmap.png`
+
+### 结果
+
+| noise | Image-AUROC |
+|---|---:|
+| m20db | 98.1700 |
+| m30db | 98.6300 |
+| m40db | 94.0400 |
+| mean | 96.9467 |
+
+### 结论
+
+`RF_SPE_PNG/wideband_pulse` 在 RGB 输入下整体很高，平均 `96.9467`。这进一步支持当前 wideband 的默认选择：
+
+```text
+wideband_pulse -> rgb
+```
+
+## Chirp m50db：为什么 selection 会失效，以及最终策略
+
+在 `rf_spe_png + chirp + m50db` 这组公开数据实验中，我们进一步验证了低信噪比下的 chirp 特征提取。结论是：`m50db` 条件下，继续强调 chirp 的结构增强并不能带来收益，当前最稳的方案仍然是保留 `rgb`。
+
+已观察到的结果包括：
+
+- `rgb baseline = 87.77`
+- `spectral_gradient = 84.07`
+- `chirp_track_enhance` 首轮约为 `68.6`
+- `chirp_rgb_track` 首轮约为 `84.7`，仍低于 RGB baseline
+
+这说明在 `m50db` 条件下，chirp 的主要可分信息已经不再是稳定的几何结构，而更像非常微弱的原始视觉差异。此时：
+
+1. 梯度、方向性和 ridge 类方法会放大背景噪声、插值伪影和局部纹理；
+2. 过强的结构先验会把真实但微弱的 chirp 轨迹压坏；
+3. 直接保留原始 RGB 输入，反而能保留更多弱但完整的视觉线索。
+
+因此，selection 规则不能写成固定的“chirp 永远使用结构增强”，而应写成两层策略：
+
+- 常规 SNR 条件下：按异常形态做 selection；
+- 极低 SNR 条件下，例如 `m50db`：默认回退到 `rgb` baseline。
+
+这个改法不是事后修补，而是有机制依据的保守策略：当异常结构弱到接近背景噪声时，结构增强类特征的偏置会强于它带来的增益，因此回退 RGB 是更稳的选择。
+
+## 更新：自测数据的 burst / chirp 切换到优化后的 spectral gradient
+
+在公开数据新增低 ISR 实验之后，我们进一步把 优化后的 `spectral_gradient` 跑到了自测四场景数据上，结论是：优化后的 `spectral_gradient` 在自测 `burst` 和 `chirp` 上都优于原始 RGB baseline，也优于旧版 `spectral_gradient`，因此更适合作为最终默认方案。
+
+对比文件：
+
+```text
+analysis_outputs/optimized_spectral_gradient_selftest_compare.csv
+```
+
+自测均值结果如下：
+
+| dataset | baseline_rgb | optimized_spectral_gradient | delta |
+|---|---:|---:|---:|
+| `burst_signal` | 86.3117 | 89.4200 | +3.1083 |
+| `chirp_signal` | 78.7308 | 85.2983 | +6.5675 |
+
+因此最终方案更新为：
+
+- 自测常规难度下：`burst/chirp -> optimized spectral gradient`
+- `dsss -> dsss_weak_residual`
+- `wideband_pulse -> rgb`
+- 公开数据极低 SNR 条件下，例如 `m50db`：默认回退 `rgb` baseline
+
+也就是说，当前主线不再是“所有 burst/chirp 都使用旧 `spectral_gradient`”，而是：
+
+```text
+optimized spectral gradient + low-SNR rgb fallback
+```
+
+这个更新同时解释了为什么公开数据 `chirp m50db` 仍然失败，而自测 chirp 却能从优化后的梯度输入中获益：两者的协议和难度不同。自测 75/25 协议下，chirp 的结构仍然足够可见，平滑 + Sobel + 稳健归一化能带来更强的结构表征；但在公开极低 SNR 条件下，原始视觉差异比结构先验更可靠，因此要回退 RGB。

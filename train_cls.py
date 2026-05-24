@@ -376,9 +376,8 @@ def str2bool(v):
 
 def get_args():
     parser = argparse.ArgumentParser(description='Anomaly detection')
-    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa', 'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal', 'wideband_pulse', 'rf_open'])
+    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa', 'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal', 'wideband_pulse', 'wideband_pulse_png', 'rf_spe_png'])
     parser.add_argument('--class_name', type=str, default='carpet')
-    parser.add_argument('--train-site', type=str, default=None, help='训练站点（跨站点测试时指定，默认与 class_name 相同）')
 
     parser.add_argument('--img-resize', type=int, default=240)
     parser.add_argument('--img-cropsize', type=int, default=240)
@@ -414,10 +413,10 @@ def get_args():
                                  "rf_scene_conditioned", "rf_signal_structured"],
                         help="generic 使用无频谱语义的通用异常 prompt；rf_domain 只加入 RF/spectrogram 任务域词；rf_signal_structured 使用信号类型结构词")
     parser.add_argument("--input-mode", type=str, default="auto",
-                        choices=["auto", "rgb", "spectral_gradient", "signal_adaptive", "log_power",
+                        choices=["auto", "rgb", "spectral_gradient", "spectral_gradient_v2", "chirp_directional", "chirp_ridge", "chirp_track_enhance", "chirp_rgb_track", "signal_adaptive", "signal_adaptive_v2", "log_power",
                                  "dsss_statistical", "dsss_energy_smooth", "dsss_lowfreq_band", "dsss_energy_profile",
                                  "dsss_rgb_residual", "dsss_weak_residual", "dsss_clahe"],
-                        help="signal_adaptive 对 burst/chirp 使用频谱梯度，对 dsss 使用 RGB；log_power 使用灰度 log-power 压缩；dsss_* 使用 DSSS 专用通道")
+                        help="signal_adaptive 对 burst/chirp 使用频谱梯度、对 dsss 使用 RGB；signal_adaptive_v2 对 dsss 使用 weak residual；log_power 使用灰度 log-power 压缩")
     parser.add_argument("--cls-score-mode", type=str, default="text_only",
                         choices=["text_only", "visual_topk", "visual_topk_max", "visual_topk_freq"],
                         help="图像级分数融合方式")
@@ -457,7 +456,7 @@ def get_args():
                         help="normal_75_25 模式下正常样本训练比例")
 
     # burst_signal related
-    parser.add_argument("--noise-level", type=str, default='m10db', choices=['m10db', 'm20db', 'm30db', 'm40db'])
+    parser.add_argument("--noise-level", type=str, default='m10db', choices=['m10db', 'm20db', 'm30db', 'm40db', 'm50db'])
 
     # optimizer
     parser.add_argument("--lr", type=float, default=0.002)
