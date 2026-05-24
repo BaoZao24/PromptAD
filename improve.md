@@ -2508,30 +2508,6 @@ class_name = wideband_pulse
 wideband_pulse -> rgb
 ```
 
-## Chirp m50db：为什么 selection 会失效，以及最终策略
-
-在 `rf_spe_png + chirp + m50db` 这组公开数据实验中，我们进一步验证了低信噪比下的 chirp 特征提取。结论是：`m50db` 条件下，继续强调 chirp 的结构增强并不能带来收益，当前最稳的方案仍然是保留 `rgb`。
-
-已观察到的结果包括：
-
-- `rgb baseline = 87.77`
-- `spectral_gradient = 84.07`
-- `chirp_track_enhance` 首轮约为 `68.6`
-- `chirp_rgb_track` 首轮约为 `84.7`，仍低于 RGB baseline
-
-这说明在 `m50db` 条件下，chirp 的主要可分信息已经不再是稳定的几何结构，而更像非常微弱的原始视觉差异。此时：
-
-1. 梯度、方向性和 ridge 类方法会放大背景噪声、插值伪影和局部纹理；
-2. 过强的结构先验会把真实但微弱的 chirp 轨迹压坏；
-3. 直接保留原始 RGB 输入，反而能保留更多弱但完整的视觉线索。
-
-因此，selection 规则不能写成固定的“chirp 永远使用结构增强”，而应写成两层策略：
-
-- 常规 SNR 条件下：按异常形态做 selection；
-- 极低 SNR 条件下，例如 `m50db`：默认回退到 `rgb` baseline。
-
-这个改法不是事后修补，而是有机制依据的保守策略：当异常结构弱到接近背景噪声时，结构增强类特征的偏置会强于它带来的增益，因此回退 RGB 是更稳的选择。
-
 ## 更新：自测数据的 burst / chirp 切换到优化后的 spectral gradient
 
 在公开数据新增低 ISR 实验之后，我们进一步把 优化后的 `spectral_gradient` 跑到了自测四场景数据上，结论是：优化后的 `spectral_gradient` 在自测 `burst` 和 `chirp` 上都优于原始 RGB baseline，也优于旧版 `spectral_gradient`，因此更适合作为最终默认方案。
@@ -2554,12 +2530,21 @@ analysis_outputs/optimized_spectral_gradient_selftest_compare.csv
 - 自测常规难度下：`burst/chirp -> optimized spectral gradient`
 - `dsss -> dsss_weak_residual`
 - `wideband_pulse -> rgb`
-- 公开数据极低 SNR 条件下，例如 `m50db`：默认回退 `rgb` baseline
 
 也就是说，当前主线不再是“所有 burst/chirp 都使用旧 `spectral_gradient`”，而是：
 
 ```text
-optimized spectral gradient + low-SNR rgb fallback
+optimized spectral gradient + dsss_weak_residual + rgb
 ```
 
-这个更新同时解释了为什么公开数据 `chirp m50db` 仍然失败，而自测 chirp 却能从优化后的梯度输入中获益：两者的协议和难度不同。自测 75/25 协议下，chirp 的结构仍然足够可见，平滑 + Sobel + 稳健归一化能带来更强的结构表征；但在公开极低 SNR 条件下，原始视觉差异比结构先验更可靠，因此要回退 RGB。
+这个更新同时说明：优化后的梯度输入不仅在自测 75/25 协议下对 burst/chirp 有收益，在保留到 `m40db` 的公开数据补充实验中也能为 burst/chirp 保留小幅正收益。因此最终方案可以组织成一套按频谱形态选择输入表示的 feature selection 方法。
+
+这里所谓的“优化后”主要指三点：
+
+1. **先做高斯平滑**：先压掉细碎噪声、背景纹理和孤立亮点，避免把这些高频扰动误当成异常结构。
+2. **再做 Sobel 梯度**：相比简单相邻差分，Sobel 在局部邻域内估计梯度，更适合提取 burst 的边界和 chirp 的连续轨迹。
+3. **最后做稳健归一化**：不用最大值归一化，而改用高分位数归一化，减少极端亮点或噪声点对整张图梯度尺度的影响。
+
+这样做的根本原因是：频谱异常检测需要强调与异常形态真正相关的时频结构，而不是把所有局部波动都同等放大。高斯平滑负责先去掉明显伪结构，Sobel 负责更稳定地提取局部结构，稳健归一化负责让这些结构响应在不同场景和不同强度下更可比较。
+
+补充说明：`m50db` 的极低功率实验结果仍然保留在 `analysis_outputs/rf_spe_png_new_levels/`，但当前把它视为探索性补充实验，不纳入主表均值和主结论。

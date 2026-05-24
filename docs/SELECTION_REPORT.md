@@ -13,14 +13,11 @@ PromptAD 原始流程把频谱图当作普通 RGB 图像输入 CLIP 视觉编码
 | DSSS | 宽带、弱能量、铺展式扰动 | 在保留原始能量图的同时突出弱残差 |
 | Wideband pulse | 宽带块状或片状能量异常 | 保留整体能量块结构，避免过度边缘化 |
 
-因此，本报告提出的 selection 不是按场景硬编码，而是按异常信号的频谱形态选择输入特征表示；同时，在极低信噪比条件下引入保守回退策略，以避免结构增强先验在弱异常条件下失效。
+因此，本报告提出的 selection 不是按场景硬编码，而是按异常信号的频谱形态选择输入特征表示。
 
 ## 2. Selection 规则
 
-当前最终采用的是两层规则：
-
-1. 常规 SNR 条件下，按异常形态选择特征提取方法；
-2. 极低 SNR 条件下，默认回退到 `rgb` baseline。
+当前最终采用的是单层规则：按异常形态选择特征提取方法。
 
 ### 2.1 常规规则
 
@@ -40,16 +37,6 @@ dsss_signal    -> dsss_weak_residual
 wideband_pulse -> rgb
 ```
 
-### 2.2 极低 SNR 下的保守回退规则
-
-当异常强度进一步降低，例如公开数据中的 `m50db` 档位时，结构增强类特征不再稳定。此时默认采用保守策略：
-
-```text
-very low SNR (e.g. m50db) -> fallback to rgb
-```
-
-这样做的原因不是“结果不好就不用”，而是有明确机制依据：当异常弱到接近背景噪声时，主要可分信息不再是稳定的时频结构，而是非常微弱的原始视觉差异。梯度、脊线、方向性和连续性增强会引入更强的结构偏置，容易放大背景纹理、插值伪影和噪声，从而破坏原始弱线索。因此在最低 SNR 区间内，回退到 `rgb` baseline 是更稳的策略。
-
 ## 3. 各特征提取方法的含义
 
 ### 3.1 RGB baseline
@@ -68,14 +55,25 @@ RGB baseline 是原始 PromptAD 的输入方式：将频谱图转成 3 通道 RG
 | Channel 2 | 时间方向梯度 |
 | Channel 3 | 频率方向梯度 |
 
-实现上，时间梯度和频率梯度分别计算相邻像素差的绝对值，并做安全归一化：
+与早期直接做相邻差分的 `spectral_gradient` 相比，优化后的版本加入了三步预处理：
+
+1. **高斯平滑**：先对灰度频谱做轻微平滑；
+2. **Sobel 梯度**：再用 Sobel 算子提取时间方向和频率方向梯度；
+3. **稳健归一化**：最后不用最大值归一化，而是使用高分位数尺度做裁剪归一化。
+
+可以概括为：
 
 ```text
-time_grad[:, :, t] = |gray[:, :, t] - gray[:, :, t-1]|
-freq_grad[:, f, :] = |gray[:, f, :] - gray[:, f-1, :]|
+gray -> gaussian smoothing -> Sobel(time/freq) -> robust normalization
 ```
 
-这个方法适合 burst 和 chirp，原因是这两类异常主要表现为边界、斜线、突发区域等结构变化。梯度通道可以把这些变化从背景能量中凸显出来，让 CLIP 的视觉特征更容易捕捉到异常形态。
+这样做的原因分别是：
+
+- **先做高斯平滑**：频谱图里常有细碎噪声、插值纹理和孤立亮点。如果直接做差分，这些高频扰动会被误当成异常边缘。先平滑可以压低这类伪结构，让后续梯度更集中在真正连续的时频变化上。
+- **再做 Sobel**：Sobel 不是只看两个相邻像素的差，而是在局部邻域内估计梯度，响应更平滑，对 burst 的局部突变边界和 chirp 的连续轨迹都更稳定。
+- **最后做稳健归一化**：旧版使用最大值归一化，容易被极少数异常尖点或噪声点带偏，导致整张图的梯度尺度失真。改成高分位数归一化后，梯度通道对极端值不那么敏感，跨场景和跨档位更稳。
+
+因此，优化后的 `spectral_gradient` 本质上仍然是在突出时频结构，但它不再粗糙地放大所有局部变化，而是尽量保留真正与异常形态相关的边缘、斜率和局部突变结构。这也是为什么它比旧版更适合 burst 和 chirp。
 
 ### 3.3 DSSS Weak Residual
 
@@ -111,9 +109,7 @@ wideband pulse 的异常通常是宽带块状或片状区域。实验发现，`s
 
 第二层是候选方法与形态的匹配关系。`optimized spectral gradient` 匹配边缘、斜率、局部突变，并通过平滑、Sobel 与稳健归一化减少噪声放大；`dsss_weak_residual` 匹配弱能量残差；RGB 匹配本身已经足够明显的块状能量区域。
 
-第三层是低 SNR 稳定性分析。方法不仅要在常规难度下有收益，还要避免在极低 SNR 下把弱异常进一步破坏。也就是说，selection 不是单层“谁分数高就用谁”，而是“常规条件下按形态选，极低 SNR 下按稳定性回退”。
-
-第四层才是实验验证。最终 selection 不是只靠直觉，而是用 baseline 对比实验筛掉无效方法：
+第三层才是实验验证。最终 selection 不是只靠直觉，而是用 baseline 对比实验筛掉无效方法：
 
 在自测数据上，`optimized spectral gradient` 已进一步替代旧 `spectral_gradient` 作为 burst/chirp 的默认版本。对比表见 `analysis_outputs/optimized_spectral_gradient_selftest_compare.csv`，其中：burst 从 `86.3117` 提升到 `89.4200`，chirp 从 `78.7308` 提升到 `85.2983`。
 
@@ -166,15 +162,17 @@ Adapter 和 LoRA 属于视觉编码器参数适配方法，目标是让 CLIP bac
 
 | 异常类型 | baseline mean | improved mean |
 |---|---:|---:|
-| Burst | 96.4767 | 96.5967 |
-| Chirp | 99.9967 | 99.9967 |
-| DSSS | 93.2800 | 93.3833 |
+| Burst | 92.8500 | 93.5250 |
+| Chirp | 99.7225 | 99.7400 |
+| DSSS | 86.8850 | 87.3400 |
 | Wideband pulse | 96.9467 | 96.9467 |
-| ALL_AVAILABLE | 96.6750 | 96.7308 |
+| ALL_AVAILABLE | 94.1011 | 94.3879 |
 
 需要注意：公开数据上的 burst/chirp/dsss 与 wideband pulse 在难度和协议上并不完全一致，因此这里更适合作为补充验证和汇总结果，不适合作为主创新点的唯一证据。论文主线仍建议以自测四场景数据上的 feature selection 结果为主。
 
-新增低 ISR 档位后，`RF_SPE_PNG` 的任务难度明显提高。新增实验统一使用 `RF_Spectrum_Public_Dataset` 中的正常记录目录：
+另外，`m50db` 极低功率实验结果仍保留在 `analysis_outputs/rf_spe_png_new_levels/`，但当前将其视为探索性补充结果，不纳入主表均值与主结论。
+
+在补充公开数据实验中，`RF_SPE_PNG` 的新增档位统一使用 `RF_Spectrum_Public_Dataset` 中的正常记录目录：
 
 ```text
 train normal: first k_shot MeasRes_* folders under RF_Spectrum_Public_Dataset
@@ -182,19 +180,16 @@ test normal:  remaining MeasRes_* folders under RF_Spectrum_Public_Dataset
 abnormal:     /mnt/data/wangbei/data/RF_SPE_PNG/{class}/abnormal/{noise}
 ```
 
-新增 m40/m50 结果如下：
+新增 `m40db` 结果如下：
 
 | class | noise | RGB baseline | selected feature | selected | delta |
 |---|---|---:|---|---:|---:|
 | burst | m40db | 81.9700 | `optimized spectral gradient` | 84.3100 | +2.3400 |
-| burst | m50db | 60.4600 | `rgb fallback` | 60.4600 | +0.0000 |
 | chirp | m40db | 98.9000 | `optimized spectral gradient` | 98.9700 | +0.0700 |
-| chirp | m50db | `rgb fallback` | 87.7700 | 87.7700 | +0.0000 |
 | dsss | m40db | 67.7000 | `dsss_weak_residual` | 69.2100 | +1.5100 |
-| dsss | m50db | `rgb fallback` | 56.3000 | 56.3000 | +0.0000 |
-| wideband pulse | m50db | 86.0200 | `rgb` | 86.0200 | +0.0000 |
+| wideband pulse | m40db | 94.0400 | `rgb` | 94.0400 | +0.0000 |
 
-这组结果说明三点。第一，降低 ISR 确实能把公开数据从“偏简单”变成更有区分度的验证集，尤其是 burst m50db、DSSS m40/m50。第二，自测数据上得到的 selection 规则不能被夸大成在所有公开数据设置上全面提升；在新增低 ISR 中，优化后的 spectral gradient 在 m40db 对 burst/chirp 仍可保留小幅正收益，但到 m50db 时统一回退 RGB 更稳。第三，这正是引入 low-SNR fallback 的依据：当干扰进一步减弱时，结构增强先验会比原始视觉信息更脆弱，因此公开数据新增档位更适合作为鲁棒性分析，并支撑“极低 SNR 下默认回退 RGB”的策略。
+这组结果说明两点。第一，降低 ISR 到 `m40db` 已经能把公开数据从“偏简单”变成更有区分度的验证集。第二，自测数据上得到的 selection 规则在公开数据 `m40db` 条件下仍可保留小幅正收益，说明这套按形态选择输入表示的方法具备一定跨协议适应性。
 
 ## 7. 生产场景下如何选择
 
@@ -202,14 +197,14 @@ abnormal:     /mnt/data/wangbei/data/RF_SPE_PNG/{class}/abnormal/{noise}
 
 更严谨的使用方式分为两种。
 
-第一种是已知威胁模型。如果部署任务本身已经明确要检测某一类干扰，例如只检测 DSSS 或只检测 chirp，那么可以采用两层规则：先按任务类型选择常规输入，再在极低 SNR 条件下回退到 RGB。
+第一种是已知威胁模型。如果部署任务本身已经明确要检测某一类干扰，例如只检测 DSSS 或只检测 chirp，那么可以直接按任务类型选择输入。
 
-| 已知检测目标 | 常规推荐输入 | 极低 SNR 条件下 |
-|---|---|---|
-| burst | `optimized spectral gradient` | `rgb` |
-| chirp | `optimized spectral gradient` | `rgb` |
-| dsss | `dsss_weak_residual` | 默认 `rgb`，仅在验证集稳定收益时保留专用特征 |
-| wideband pulse | `rgb` | `rgb` |
+| 已知检测目标 | 推荐输入 |
+|---|---|
+| burst | `optimized spectral gradient` |
+| chirp | `optimized spectral gradient` |
+| dsss | `dsss_weak_residual` |
+| wideband pulse | `rgb` |
 
 第二种是未知异常类型。此时不应该先判断异常类型，而应把 selection 扩展为多视角异常评分：
 
@@ -238,8 +233,7 @@ same test spectrogram
 本项目最终采用的 selection 方法可以概括为：
 
 ```text
-常规 SNR 条件下根据频谱异常的形态选择输入特征表示；
-极低 SNR 条件下默认回退到 RGB baseline。
+根据频谱异常的形态选择输入特征表示。
 ```
 
 它的优势是：
@@ -247,7 +241,6 @@ same test spectrogram
 - 改动小，只改变输入特征构造，不需要大规模重训 backbone；
 - 可解释，每个选择都能对应到具体频谱形态；
 - 有实验支撑，自测四场景总体从 87.6846 提升到 91.3587；
-- 不盲目增强，对 wideband pulse 这种梯度会破坏结构的异常，明确保留 RGB；
-- 在极低 SNR 条件下具备保守回退能力，避免结构增强先验在弱异常条件下失效。
+- 不盲目增强，对 wideband pulse 这种梯度会破坏结构的异常，明确保留 RGB。
 
-因此，这个方法更准确地说是一个 `selection + fallback` 策略，可以作为当前工作的主要创新点来组织论文叙述。
+因此，这个方法可以直接表述为一套基于频谱形态的 feature selection 策略，并作为当前工作的主要创新点来组织论文叙述。

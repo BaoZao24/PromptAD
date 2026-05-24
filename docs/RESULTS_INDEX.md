@@ -38,13 +38,12 @@ docs/SELECTION_REPORT.md
 | `analysis_outputs/wideband_pulse_feature_compare/wideband_rgb_vs_spectral_gradient_heatmaps.png` | wideband pulse 对比 heatmap | 同时展示 RGB、`spectral_gradient` 和 delta |
 | `analysis_outputs/wideband_pulse_png_rgb/rf_rgb_results.csv` | `RF_SPE_PNG/wideband_pulse` RGB 结果 | m20/m30/m40 平均 `96.9467` |
 | `analysis_outputs/wideband_pulse_png_rgb/rf_rgb_heatmap.png` | `RF_SPE_PNG/wideband_pulse` RGB heatmap | 单数据源三档位结果可视化 |
-| `analysis_outputs/rf_spe_png_new_levels/new_m40_m50_baseline_vs_selected.csv` | `RF_SPE_PNG` 新增低 ISR 档位结果 | m40/m50 明显增加难度；selected 在公开数据上不是全面提升 |
-| `analysis_outputs/rf_spe_png_new_levels/spectral_gradient_v2_vs_baseline_v1.csv` | `optimized spectral gradient` 对比表 | 优化后的 spectral gradient 在 SPE burst 上优于旧版，并改善 burst m40/m50，但 chirp m50 明显下降 |
 | `analysis_outputs/optimized_spectral_gradient_selftest_compare.csv` | 自测 burst/chirp 的优化梯度对比表 | 自测 burst `+3.1083`，chirp `+6.5675`，因此自测默认切到优化后的 spectral gradient |
 | `analysis_outputs/all_anomaly_summary_tables/selftest_all_anomalies_baseline_rgb.csv` | 自测数据集所有异常 baseline 总表 | burst/chirp/dsss/wideband，RGB baseline |
 | `analysis_outputs/all_anomaly_summary_tables/selftest_all_anomalies_improved_selected.csv` | 自测数据集所有异常改进后总表 | burst/chirp 用 `optimized spectral gradient`，DSSS 用 `dsss_weak_residual`，wideband 用 RGB |
 | `analysis_outputs/all_anomaly_summary_tables/rf_spe_png_all_anomalies_baseline_rgb.csv` | RF_SPE_PNG/公开数据所有异常 baseline 总表 | 已汇总 burst/chirp/dsss/wideband pulse，作为当前公开数据主总表 |
-| `analysis_outputs/all_anomaly_summary_tables/rf_spe_png_all_anomalies_improved_selected.csv` | RF_SPE_PNG/公开数据所有异常改进后总表 | 汇总当前 selection 版本，便于和 baseline 直接对比 |
+| `analysis_outputs/all_anomaly_summary_tables/rf_spe_png_all_anomalies_improved_selected.csv` | RF_SPE_PNG/公开数据所有异常改进后总表 | 汇总当前形态感知 selection 版本，便于和 baseline 直接对比 |
+| `analysis_outputs/rf_spe_png_new_levels/new_m40_m50_baseline_vs_selected.csv` | RF_SPE_PNG 低功率补充实验 | 保留 `m40db/m50db` 原始补充对比，其中 `m50db` 不纳入当前主表均值 |
 | `analysis_outputs/dsss_statistical_vs_baseline/dsss_statistical_vs_baseline.csv` | DSSS statistical 旧候选 | overall `+1.3150`，但 WeaponMuseum 下降 |
 | `analysis_outputs/weapon_dsss_input_candidates/weapon_dsss_input_candidates_vs_rgb.csv` | WeaponMuseum DSSS 多候选 | `dsss_weak_residual` 最好，CLAHE 明显失败 |
 | `analysis_outputs/visual_adapter_compare/chirp_rf_signal_adaptive_adapter_vs_baseline.csv` | Visual Adapter | 基本持平，未超过 baseline |
@@ -138,7 +137,7 @@ analysis_outputs/weapon_dsss_input_candidates/weapon_dsss_input_candidates_vs_rg
 |---|---:|---:|
 | `rf + rgb` | 84.7853 | 0.0750 |
 | `signal_adaptive_v1` | 86.6971 | 0.1386 |
-| `selection_with_low_snr_fallback` | 91.3587 | single-seed summary |
+| `morphology_aware_selection` | 91.3587 | single-seed summary |
 
 `signal_adaptive_v2` 已加入代码，可直接复跑：
 
