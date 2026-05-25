@@ -2,7 +2,7 @@
 
 这个文档用于快速定位当前保留在根目录的关键结果。低优先级、临时和负结果 raw 目录已经移动到 `archive_results/`，但汇总 CSV 仍保留在 `analysis_outputs/`。
 
-Selection 方法的报告正文见：
+历史上的 selection 探索报告见：
 
 ```text
 docs/SELECTION_REPORT.md
@@ -10,16 +10,23 @@ docs/SELECTION_REPORT.md
 
 ## 当前推荐结论
 
-当前最清晰的 selection 规则是：
+当前更值得继续推进的主线不是按异常类型做 `selection`，而是通用融合输入 `morph_fusion_dualgrad`：
 
-| signal type | selected feature |
-|---|---|
-| `burst_signal` | `optimized spectral gradient` |
-| `chirp_signal` | `optimized spectral gradient` |
-| `dsss_signal` | `dsss_weak_residual` |
-| `wideband_pulse` | `rgb`，当前不采用 `spectral_gradient` |
+```text
+morph_fusion_dualgrad = weak_residual + time_gradient + freq_gradient
+```
 
-`dsss_weak_residual` 已补齐 `seed=111/222/333`。三 seed 下 DSSS 12 点均值为 `95.4031 ± 0.0424`，相对 `rf + rgb` 的 `89.4981 ± 0.1087` 稳定提升。
+目前已经拿到的完整自测四数据集结果是：
+
+| dataset | baseline | current selection | `morph_fusion_dualgrad` |
+|---|---:|---:|---:|
+| `burst_signal` | 86.3117 | 89.4200 | **89.8767** |
+| `chirp_signal` | 78.7308 | **85.2983** | 84.7750 |
+| `dsss_signal` | 89.5625 | 94.5833 | **95.8283** |
+| `wideband_pulse` | **96.1333** | **96.1333** | 92.6858 |
+| overall | 87.6846 | **91.3587** | 90.7914 |
+
+这说明通用融合路线明显优于 RGB baseline，但当前还略低于针对异常类型手工设计的最优 selection。后续文档默认把 selection 视为探索记录，把 `morph_fusion_dualgrad` 视为更合理的通用方案。
 
 ## 目录说明
 
@@ -131,7 +138,7 @@ analysis_outputs/weapon_dsss_input_candidates/weapon_dsss_input_candidates_vs_rg
 | `rf + dsss_statistical` | 91.2033 | 0.7567 |
 | `rf + dsss_weak_residual` | 95.4031 | 0.0424 |
 
-最终 36 点 selection 汇总：
+历史 36 点 selection 汇总：
 
 | method | mean Image-AUROC | std |
 |---|---:|---:|

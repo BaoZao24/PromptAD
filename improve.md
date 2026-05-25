@@ -2508,43 +2508,65 @@ class_name = wideband_pulse
 wideband_pulse -> rgb
 ```
 
-## 更新：自测数据的 burst / chirp 切换到优化后的 spectral gradient
+## 当前主线：morph_fusion_dualgrad
 
-在公开数据新增低 ISR 实验之后，我们进一步把 优化后的 `spectral_gradient` 跑到了自测四场景数据上，结论是：优化后的 `spectral_gradient` 在自测 `burst` 和 `chirp` 上都优于原始 RGB baseline，也优于旧版 `spectral_gradient`，因此更适合作为最终默认方案。
-
-对比文件：
+在完成一系列面向特定异常类型的特征提取探索之后，当前项目的后续主线已经切换为**不依赖异常类型先验的通用融合输入**：
 
 ```text
-analysis_outputs/optimized_spectral_gradient_selftest_compare.csv
+morph_fusion_dualgrad = weak_residual + time_gradient + freq_gradient
 ```
 
-自测均值结果如下：
+这样调整的原因很明确：真实生产场景中，测试前通常不知道当前异常究竟更像 `burst`、`chirp`、`DSSS` 还是 `wideband`，因此不能把“按异常类型切换特征提取器”作为最终方法。更合理的做法，是为每张未知异常频谱图统一构造一套同时包含**弱残差信息**和**时频结构信息**的输入表示。
 
-| dataset | baseline_rgb | optimized_spectral_gradient | delta |
+### 三通道设计
+
+`morph_fusion_dualgrad` 的三个通道分别是：
+
+1. `weak_residual`：保留相对背景的弱偏离信息，用来增强微弱异常；
+2. `time_gradient`：强调时间方向的结构变化、突发边界和轨迹局部变化；
+3. `freq_gradient`：强调频率方向的结构变化、频带边界和轮廓信息。
+
+这种设计的目标不是为某一类异常单独最优，而是让同一个输入表示同时覆盖：
+
+- 弱异常偏离；
+- 时间维结构突变；
+- 频率维结构突变。
+
+### 当前最硬的自测结果
+
+当前已经拿到完整、自洽的自测四数据集 baseline 对比结果。对比表见：
+
+```text
+analysis_outputs/all_anomaly_summary_tables/selftest_morph_fusion_dualgrad_vs_baseline.csv
+```
+
+| dataset | baseline | `morph_fusion_dualgrad` | delta |
 |---|---:|---:|---:|
-| `burst_signal` | 86.3117 | 89.4200 | +3.1083 |
-| `chirp_signal` | 78.7308 | 85.2983 | +6.5675 |
+| `burst_signal` | 86.3117 | 89.8767 | +3.5650 |
+| `chirp_signal` | 78.7308 | 84.8008 | +6.0700 |
+| `dsss_signal` | 89.5625 | 95.8283 | +6.2658 |
+| `wideband_pulse` | 96.1333 | 92.6858 | -3.4475 |
+| overall | 87.6846 | 90.7979 | +3.1133 |
 
-因此最终方案更新为：
+### 当前结论
 
-- 自测常规难度下：`burst/chirp -> optimized spectral gradient`
-- `dsss -> dsss_weak_residual`
-- `wideband_pulse -> rgb`
+从现有证据看，`morph_fusion_dualgrad` 已经具备两点明确价值：
 
-也就是说，当前主线不再是“所有 burst/chirp 都使用旧 `spectral_gradient`”，而是：
+1. **它比 RGB baseline 明显更强。**
+   在自测四数据集上，整体从 `87.6846` 提升到 `90.7979`。
 
-```text
-optimized spectral gradient + dsss_weak_residual + rgb
-```
+2. **它更符合开放异常检测和实际生产部署逻辑。**
+   因为它不依赖异常类型先验，输入前端不需要先做异常类别判断。
 
-这个更新同时说明：优化后的梯度输入不仅在自测 75/25 协议下对 burst/chirp 有收益，在保留到 `m40db` 的公开数据补充实验中也能为 burst/chirp 保留小幅正收益。因此最终方案可以组织成一套按频谱形态选择输入表示的 feature selection 方法。
+同时也要保持表述严谨：
 
-这里所谓的“优化后”主要指三点：
+- `burst`、`chirp`、`DSSS` 上提升明确；
+- `wideband_pulse` 目前仍下降，说明这套统一融合表示还不是终局版本；
+- 公开数据上的完整补充评估仍待补齐，因此当前主结论以自测四数据集为准。
 
-1. **先做高斯平滑**：先压掉细碎噪声、背景纹理和孤立亮点，避免把这些高频扰动误当成异常结构。
-2. **再做 Sobel 梯度**：相比简单相邻差分，Sobel 在局部邻域内估计梯度，更适合提取 burst 的边界和 chirp 的连续轨迹。
-3. **最后做稳健归一化**：不用最大值归一化，而改用高分位数归一化，减少极端亮点或噪声点对整张图梯度尺度的影响。
+### 当前材料状态
 
-这样做的根本原因是：频谱异常检测需要强调与异常形态真正相关的时频结构，而不是把所有局部波动都同等放大。高斯平滑负责先去掉明显伪结构，Sobel 负责更稳定地提取局部结构，稳健归一化负责让这些结构响应在不同场景和不同强度下更可比较。
-
-补充说明：`m50db` 的极低功率实验结果仍然保留在 `analysis_outputs/rf_spe_png_new_levels/`，但当前把它视为探索性补充实验，不纳入主表均值和主结论。
+- **活动方案文档**：`现有方案介绍.md`
+- **开发过程记录**：`improve.md`
+- **活动结果总表**：`analysis_outputs/all_anomaly_summary_tables/`
+- **selection 与其他旧路线**：已整体封存到 `archive_results/`，不再作为现行方案使用。
