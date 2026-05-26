@@ -90,6 +90,275 @@ class SpectrogramGradientChannelsV2:
         ], dim=0)
 
 
+class MorphFusionChannels:
+    def __init__(self, sigma=1.0, percentile=0.995, alpha=0.2):
+        self.sigma = sigma
+        self.percentile = percentile
+        self.alpha = alpha
+        self.to_tensor = transforms.ToTensor()
+
+    def _robust_normalize(self, channel):
+        flat = channel.flatten()
+        if flat.numel() == 0:
+            return channel
+        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
+        return (channel / scale).clamp(0.0, 1.0)
+
+    @staticmethod
+    def _minmax(channel):
+        c_min = channel.amin(dim=(-2, -1), keepdim=True)
+        c_max = channel.amax(dim=(-2, -1), keepdim=True)
+        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        gray_np = gray.squeeze(0).numpy()
+
+        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
+        time_grad = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
+        freq_grad = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
+        grad_mag = np.sqrt(time_grad * time_grad + freq_grad * freq_grad)
+
+        freq_background = gray.median(dim=-1, keepdim=True).values
+        residual = (gray - freq_background).abs()
+        weak_residual = self._minmax(gray + self.alpha * residual)
+
+        grad_mag = torch.from_numpy(grad_mag).unsqueeze(0)
+        return torch.cat([
+            gray,
+            self._robust_normalize(grad_mag),
+            weak_residual,
+        ], dim=0)
+
+
+class MorphFusionPlusChannels:
+    def __init__(self, sigma=1.0, percentile=0.995, alpha=0.2, grad_weight=0.35):
+        self.sigma = sigma
+        self.percentile = percentile
+        self.alpha = alpha
+        self.grad_weight = grad_weight
+        self.to_tensor = transforms.ToTensor()
+
+    def _robust_normalize(self, channel):
+        flat = channel.flatten()
+        if flat.numel() == 0:
+            return channel
+        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
+        return (channel / scale).clamp(0.0, 1.0)
+
+    @staticmethod
+    def _minmax(channel):
+        c_min = channel.amin(dim=(-2, -1), keepdim=True)
+        c_max = channel.amax(dim=(-2, -1), keepdim=True)
+        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        gray_np = gray.squeeze(0).numpy()
+
+        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
+        time_grad = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
+        freq_grad = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
+        grad_mag = np.sqrt(time_grad * time_grad + freq_grad * freq_grad)
+        grad_mag = self._robust_normalize(torch.from_numpy(np.abs(grad_mag)).unsqueeze(0))
+
+        freq_background = gray.median(dim=-1, keepdim=True).values
+        residual = (gray - freq_background).abs()
+        weak_residual = self._minmax(gray + self.alpha * residual)
+
+        return torch.cat([
+            gray,
+            self._minmax(gray + self.grad_weight * grad_mag),
+            weak_residual,
+        ], dim=0)
+
+
+class MorphFusionDualGradChannels:
+    def __init__(self, sigma=1.0, percentile=0.995, alpha=0.2):
+        self.sigma = sigma
+        self.percentile = percentile
+        self.alpha = alpha
+        self.to_tensor = transforms.ToTensor()
+
+    def _robust_normalize(self, channel):
+        flat = channel.flatten()
+        if flat.numel() == 0:
+            return channel
+        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
+        return (channel / scale).clamp(0.0, 1.0)
+
+    @staticmethod
+    def _minmax(channel):
+        c_min = channel.amin(dim=(-2, -1), keepdim=True)
+        c_max = channel.amax(dim=(-2, -1), keepdim=True)
+        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        gray_np = gray.squeeze(0).numpy()
+
+        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
+        time_grad = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
+        freq_grad = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
+
+        freq_background = gray.median(dim=-1, keepdim=True).values
+        residual = (gray - freq_background).abs()
+        weak_residual = self._minmax(gray + self.alpha * residual)
+
+        return torch.cat([
+            weak_residual,
+            self._robust_normalize(torch.from_numpy(np.abs(time_grad)).unsqueeze(0)),
+            self._robust_normalize(torch.from_numpy(np.abs(freq_grad)).unsqueeze(0)),
+        ], dim=0)
+
+
+
+class MorphFusionBalancedChannels:
+    def __init__(self, sigma=1.0, percentile=0.995, alpha=0.2, grad_weight=0.2):
+        self.sigma = sigma
+        self.percentile = percentile
+        self.alpha = alpha
+        self.grad_weight = grad_weight
+        self.to_tensor = transforms.ToTensor()
+
+    def _robust_normalize(self, channel):
+        flat = channel.flatten()
+        if flat.numel() == 0:
+            return channel
+        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
+        return (channel / scale).clamp(0.0, 1.0)
+
+    @staticmethod
+    def _minmax(channel):
+        c_min = channel.amin(dim=(-2, -1), keepdim=True)
+        c_max = channel.amax(dim=(-2, -1), keepdim=True)
+        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        gray_np = gray.squeeze(0).numpy()
+
+        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
+        time_grad = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
+        freq_grad = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
+        grad_mag = np.sqrt(time_grad * time_grad + freq_grad * freq_grad)
+        grad_mag = self._robust_normalize(torch.from_numpy(np.abs(grad_mag)).unsqueeze(0))
+
+        freq_background = gray.median(dim=-1, keepdim=True).values
+        residual = (gray - freq_background).abs()
+        weak_residual = self._minmax(gray + self.alpha * residual)
+        structure_blend = self._minmax(gray + self.grad_weight * grad_mag)
+
+        return torch.cat([
+            gray,
+            weak_residual,
+            structure_blend,
+        ], dim=0)
+
+
+class MorphFusionGrayResGradChannels:
+    def __init__(self, sigma=1.0, percentile=0.995, alpha=0.2):
+        self.sigma = sigma
+        self.percentile = percentile
+        self.alpha = alpha
+        self.to_tensor = transforms.ToTensor()
+
+    def _robust_normalize(self, channel):
+        flat = channel.flatten()
+        if flat.numel() == 0:
+            return channel
+        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
+        return (channel / scale).clamp(0.0, 1.0)
+
+    @staticmethod
+    def _minmax(channel):
+        c_min = channel.amin(dim=(-2, -1), keepdim=True)
+        c_max = channel.amax(dim=(-2, -1), keepdim=True)
+        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        gray_np = gray.squeeze(0).numpy()
+
+        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
+        time_grad = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
+        freq_grad = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
+        grad_mag = np.sqrt(time_grad * time_grad + freq_grad * freq_grad)
+
+        freq_background = gray.median(dim=-1, keepdim=True).values
+        residual = (gray - freq_background).abs()
+        weak_residual = self._minmax(gray + self.alpha * residual)
+
+        return torch.cat([
+            gray,
+            weak_residual,
+            self._robust_normalize(torch.from_numpy(np.abs(grad_mag)).unsqueeze(0)),
+        ], dim=0)
+
+
+class MorphFusionGrayResEnergyChannels:
+    def __init__(self, alpha=0.2, kernel_size=15):
+        self.alpha = alpha
+        self.kernel_size = kernel_size
+        self.to_tensor = transforms.ToTensor()
+
+    @staticmethod
+    def _minmax(channel):
+        c_min = channel.amin(dim=(-2, -1), keepdim=True)
+        c_max = channel.amax(dim=(-2, -1), keepdim=True)
+        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+
+        freq_background = gray.median(dim=-1, keepdim=True).values
+        residual = (gray - freq_background).abs()
+        weak_residual = self._minmax(gray + self.alpha * residual)
+
+        pad = self.kernel_size // 2
+        local_sq_mean = F.avg_pool2d((gray * gray).unsqueeze(0), self.kernel_size, stride=1, padding=pad).squeeze(0)
+        local_energy = torch.sqrt(local_sq_mean.clamp_min(0.0))
+
+        return torch.cat([
+            gray,
+            weak_residual,
+            self._minmax(local_energy),
+        ], dim=0)
+
+
+class MorphFusionGrayResBandChannels:
+    def __init__(self, alpha=0.2, kernel_size=15, smooth_mix=0.5, profile_mix=0.5):
+        self.alpha = alpha
+        self.kernel_size = kernel_size
+        self.smooth_mix = smooth_mix
+        self.profile_mix = profile_mix
+        self.to_tensor = transforms.ToTensor()
+
+    @staticmethod
+    def _minmax(channel):
+        c_min = channel.amin(dim=(-2, -1), keepdim=True)
+        c_max = channel.amax(dim=(-2, -1), keepdim=True)
+        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+
+        freq_background = gray.median(dim=-1, keepdim=True).values
+        residual = (gray - freq_background).abs()
+        weak_residual = self._minmax(gray + self.alpha * residual)
+
+        pad = self.kernel_size // 2
+        local_smooth = F.avg_pool2d(gray.unsqueeze(0), self.kernel_size, stride=1, padding=pad).squeeze(0)
+        row_band_profile = local_smooth.mean(dim=-1, keepdim=True).expand_as(gray)
+        band_response = self.smooth_mix * local_smooth + self.profile_mix * row_band_profile
+
+        return torch.cat([
+            gray,
+            weak_residual,
+            self._minmax(band_response),
+        ], dim=0)
+
+
 class ChirpDirectionalChannels:
     def __init__(self, sigma=1.0, percentile=0.995):
         self.sigma = sigma
@@ -747,6 +1016,34 @@ class PromptAD(torch.nn.Module):
         elif self.input_mode == 'spectral_gradient_v2':
             self.transform = transforms.Compose(pre_resize_crop + [
                 SpectrogramGradientChannelsV2(),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionChannels(),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_plus':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionPlusChannels(),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_dualgrad':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionDualGradChannels(),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_balanced':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionBalancedChannels(),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gray_resgrad':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGrayResGradChannels(),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gray_resenergy':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGrayResEnergyChannels(),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gray_resband':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGrayResBandChannels(),
                 transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
         elif self.input_mode == 'chirp_directional':
             self.transform = transforms.Compose(pre_resize_crop + [

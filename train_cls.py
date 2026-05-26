@@ -91,10 +91,20 @@ def save_check_point(model, path):
     state_dict = model.state_dict()
     selected_state_dict = {
         k: v for k, v in state_dict.items()
-        if k in selected_keys or k.startswith('visual_adapters.') or '.lora_' in k
+        if k in selected_keys or k.startswith('prompt_learner.') or k.startswith('visual_adapters.') or '.lora_' in k
     }
 
     torch.save(selected_state_dict, path)
+
+
+def save_image_scores(names, scores_img, gt_list, path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    np.savez_compressed(
+        path,
+        names=np.asarray(names),
+        scores=np.asarray(scores_img, dtype=np.float32),
+        labels=np.asarray(gt_list, dtype=np.int32),
+    )
 
 
 def save_visualization_samples(names, test_imgs, score_maps, gt_mask_list, gt_list, save_folder):
@@ -312,14 +322,18 @@ def fit(model,
 
         result_dict = metric_cal_img(np.array(scores_img), gt_list, np.array(score_maps))
 
+        score_path = os.path.join(os.path.dirname(os.path.dirname(csv_path)), 'scores', f"Seed_{args.seed}-image_scores.npz")
+
         if best_result_dict is None:
             best_result_dict = result_dict
             save_check_point(model, check_path)
+            save_image_scores(names, scores_img, gt_list, score_path)
             save_metric(best_result_dict, dataset_classes[args.dataset], args.class_name, args.dataset, csv_path)
 
         elif best_result_dict['i_roc'] < result_dict['i_roc']:
             best_result_dict = result_dict
             save_check_point(model, check_path)
+            save_image_scores(names, scores_img, gt_list, score_path)
             save_metric(best_result_dict, dataset_classes[args.dataset], args.class_name, args.dataset, csv_path)
 
         current_i_roc = round(result_dict['i_roc'], 2)
@@ -413,10 +427,10 @@ def get_args():
                                  "rf_scene_conditioned", "rf_signal_structured"],
                         help="generic 使用无频谱语义的通用异常 prompt；rf_domain 只加入 RF/spectrogram 任务域词；rf_signal_structured 使用信号类型结构词")
     parser.add_argument("--input-mode", type=str, default="auto",
-                        choices=["auto", "rgb", "spectral_gradient", "spectral_gradient_v2", "chirp_directional", "chirp_ridge", "chirp_track_enhance", "chirp_rgb_track", "signal_adaptive", "signal_adaptive_v2", "log_power",
+                        choices=["auto", "rgb", "spectral_gradient", "spectral_gradient_v2", "morph_fusion", "morph_fusion_plus", "morph_fusion_dualgrad", "morph_fusion_balanced", "morph_fusion_gray_resgrad", "morph_fusion_gray_resenergy", "morph_fusion_gray_resband", "chirp_directional", "chirp_ridge", "chirp_track_enhance", "chirp_rgb_track", "signal_adaptive", "signal_adaptive_v2", "log_power",
                                  "dsss_statistical", "dsss_energy_smooth", "dsss_lowfreq_band", "dsss_energy_profile",
                                  "dsss_rgb_residual", "dsss_weak_residual", "dsss_clahe"],
-                        help="signal_adaptive 对 burst/chirp 使用频谱梯度、对 dsss 使用 RGB；signal_adaptive_v2 对 dsss 使用 weak residual；log_power 使用灰度 log-power 压缩")
+                        help="morph_fusion*、morph_fusion_balanced、morph_fusion_gray_resgrad、morph_fusion_gray_resenergy 与 morph_fusion_gray_resband 为通用多视图融合输入；signal_adaptive 对 burst/chirp 使用频谱梯度、对 dsss 使用 RGB；signal_adaptive_v2 对 dsss 使用 weak residual；log_power 使用灰度 log-power 压缩")
     parser.add_argument("--cls-score-mode", type=str, default="text_only",
                         choices=["text_only", "visual_topk", "visual_topk_max", "visual_topk_freq"],
                         help="图像级分数融合方式")

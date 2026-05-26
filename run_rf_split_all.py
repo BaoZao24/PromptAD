@@ -156,7 +156,7 @@ if __name__ == '__main__':
                         choices=['generic', 'rf_domain', 'rf', 'legacy', 'rf_object_agnostic',
                                  'rf_scene_conditioned', 'rf_signal_structured'])
     parser.add_argument('--input-mode', type=str, default='auto',
-                        choices=['auto', 'rgb', 'spectral_gradient', 'spectral_gradient_v2', 'chirp_directional', 'chirp_ridge', 'chirp_track_enhance', 'chirp_rgb_track', 'signal_adaptive', 'signal_adaptive_v2', 'log_power',
+                        choices=['auto', 'rgb', 'spectral_gradient', 'spectral_gradient_v2', 'morph_fusion', 'morph_fusion_plus', 'morph_fusion_dualgrad', 'morph_fusion_balanced', 'morph_fusion_gray_resgrad', 'morph_fusion_gray_resenergy', 'morph_fusion_gray_resband', 'chirp_directional', 'chirp_ridge', 'chirp_track_enhance', 'chirp_rgb_track', 'signal_adaptive', 'signal_adaptive_v2', 'log_power',
                                  'dsss_statistical', 'dsss_energy_smooth', 'dsss_lowfreq_band', 'dsss_energy_profile',
                                  'dsss_rgb_residual', 'dsss_weak_residual', 'dsss_clahe'])
     parser.add_argument('--visual-adapter', action='store_true', default=False,
