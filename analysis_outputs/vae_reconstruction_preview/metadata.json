@@ -1,0 +1,33 @@
+{
+  "model_path": "/mnt/data/wangbei/anomaly_detection/vae_ism_ano/result_rf_public_256/best.pth",
+  "model_kwargs": {
+    "input_size": 256,
+    "base_channels": 32,
+    "latent_dim": 256,
+    "fc_dim": 4096,
+    "decoder_fc_dim": 2048
+  },
+  "device": "cuda",
+  "samples": [
+    {
+      "sample": "/mnt/data/wangbei/data/datasets/chirp/Playground_spectrum/abnormal/m20db/Playground_spectrum_chirp_m20db_t00000-04000_f106.40-107.90MHz_patch024_abnormal.png",
+      "output": "/mnt/data/wangbei/PromptAD/analysis_outputs/vae_reconstruction_preview/Playground_spectrum_chirp_m20db_t00000-04000_f106.40-107.90MHz_patch024__vae_recon.png",
+      "mse_sum": 450.62060546875
+    },
+    {
+      "sample": "/mnt/data/wangbei/data/datasets/wideband_pulse/WeaponMuseum_spectrum/abnormal/m40db/WeaponMuseum_spectrum_wideband_pulse_m40db_t12000-16000_f102.40-103.90MHz_patch163_abnormal.png",
+      "output": "/mnt/data/wangbei/PromptAD/analysis_outputs/vae_reconstruction_preview/WeaponMuseum_spectrum_wideband_pulse_m40db_t12000-16000_f102.40-103.90MHz_patch163__vae_recon.png",
+      "mse_sum": 414.706298828125
+    },
+    {
+      "sample": "/mnt/data/wangbei/data/datasets/burst/Gymnasium_spectrum/abnormal/m30db/Gymnasium_spectrum_burst_m30db_t00000-04000_f89.60-91.10MHz_patch003_abnormal.png",
+      "output": "/mnt/data/wangbei/PromptAD/analysis_outputs/vae_reconstruction_preview/Gymnasium_spectrum_burst_m30db_t00000-04000_f89.60-91.10MHz_patch003__vae_recon.png",
+      "mse_sum": 1022.5965576171875
+    },
+    {
+      "sample": "/mnt/data/wangbei/data/datasets/dsss/Gymnasium_spectrum/abnormal/m30db/Gymnasium_spectrum_dsss_m30db_t00000-04000_f101.60-103.10MHz_patch018_abnormal.png",
+      "output": "/mnt/data/wangbei/PromptAD/analysis_outputs/vae_reconstruction_preview/Gymnasium_spectrum_dsss_m30db_t00000-04000_f101.60-103.10MHz_patch018__vae_recon.png",
+      "mse_sum": 515.8440551757812
+    }
+  ]
+}

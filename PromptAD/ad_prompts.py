@@ -18,6 +18,7 @@ rf_signal_dataset_mapping = {
     "chirp_signal": "chirp",
     "dsss_signal": "dsss",
     "deceptive_signal": "deceptive",
+    "wideband_pulse": "wideband",
 }
 
 rf_state_anomaly = [
@@ -52,6 +53,7 @@ rf_signal_structured_classname = {
     "chirp": "chirp signal radio frequency spectrogram",
     "dsss": "DSSS spread-spectrum radio frequency spectrogram",
     "deceptive": "deceptive signal radio frequency spectrogram",
+    "wideband": "wideband pulse radio frequency spectrogram",
 }
 
 rf_signal_structured_state_anomaly = {
@@ -85,6 +87,14 @@ rf_signal_structured_state_anomaly = {
         "{} with deceptive RF emission mimicking normal activity",
         "{} with counterfeit spectrum occupancy",
     ],
+    "wideband": [
+        "{} with abnormal rectangular wideband occupancy block",
+        "{} with block-like broadband energy patch inconsistent with background",
+        "{} with unexpected filled-in wideband time-frequency rectangle",
+        "{} with truncated rectangular spectrum occupancy region",
+        "{} with anomalous broad block-shaped RF emission",
+        "{} with low-power wideband occupancy block embedded in background",
+    ],
 }
 
 rf_scene_background_mapping = {
@@ -100,7 +110,7 @@ def get_rf_signal_key(classname, dataset_name=None):
         return rf_signal_dataset_mapping[dataset_name]
 
     name = classname.lower()
-    for signal_key in ("burst", "chirp", "dsss", "deceptive"):
+    for signal_key in ("burst", "chirp", "dsss", "deceptive", "wideband"):
         if signal_key in name:
             return signal_key
 

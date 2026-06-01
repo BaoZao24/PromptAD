@@ -97,7 +97,8 @@ def safe_print(*args, **kwargs):
 def gpu_worker(gpu_id, job_queue, epochs, seed, vis, dry_run, prompt_mode, input_mode, root_dir,
                visual_adapter, adapter_bottleneck_ratio, adapter_alpha,
                visual_lora, visual_lora_rank, visual_lora_alpha, visual_lora_dropout,
-               batch_size, stat_fusion, stat_fusion_beta, stat_topk_ratio):
+               batch_size, stat_fusion, stat_fusion_beta, stat_topk_ratio,
+               multiview_fusion, multiview_fusion_rule, multiview_fusion_lambda):
     while True:
         try:
             dataset, scene, noise_level = job_queue.get_nowait()
@@ -123,6 +124,9 @@ def gpu_worker(gpu_id, job_queue, epochs, seed, vis, dry_run, prompt_mode, input
             f'--stat-fusion {stat_fusion} '
             f'--stat-fusion-beta {stat_fusion_beta} '
             f'--stat-topk-ratio {stat_topk_ratio} '
+            f'--multiview-fusion {multiview_fusion} '
+            f'--multiview-fusion-rule {multiview_fusion_rule} '
+            f'--multiview-fusion-lambda {multiview_fusion_lambda} '
             f'--split-mode {SPLIT_MODE} --normal-train-ratio 0.75'
         )
         safe_print(f'[GPU {gpu_id}] START  {dataset} | {scene} | {noise_level}')
@@ -156,9 +160,9 @@ if __name__ == '__main__':
                         choices=['generic', 'rf_domain', 'rf', 'legacy', 'rf_object_agnostic',
                                  'rf_scene_conditioned', 'rf_signal_structured'])
     parser.add_argument('--input-mode', type=str, default='auto',
-                        choices=['auto', 'rgb', 'spectral_gradient', 'spectral_gradient_v2', 'morph_fusion', 'morph_fusion_plus', 'morph_fusion_dualgrad', 'morph_fusion_balanced', 'morph_fusion_gray_resgrad', 'morph_fusion_gray_resenergy', 'morph_fusion_gray_resband', 'chirp_directional', 'chirp_ridge', 'chirp_track_enhance', 'chirp_rgb_track', 'signal_adaptive', 'signal_adaptive_v2', 'log_power',
+                        choices=['auto', 'rgb', 'spectral_gradient', 'spectral_gradient_v2', 'morph_fusion', 'morph_fusion_plus', 'morph_fusion_dualgrad', 'morph_fusion_balanced', 'morph_fusion_gray_resgrad', 'morph_fusion_gray_contrast_resgrad', 'morph_fusion_gabor_residual', 'morph_fusion_gabor_residual_a01', 'morph_fusion_gabor_texture', 'morph_fusion_gabor_directional_residual', 'morph_fusion_gray_residual_a01', 'morph_fusion_gray_resenergy', 'morph_fusion_gray_resband', 'chirp_directional', 'chirp_ridge', 'chirp_track_enhance', 'chirp_rgb_track', 'signal_adaptive', 'signal_adaptive_v2', 'log_power',
                                  'dsss_statistical', 'dsss_energy_smooth', 'dsss_lowfreq_band', 'dsss_energy_profile',
-                                 'dsss_rgb_residual', 'dsss_weak_residual', 'dsss_clahe'])
+                                 'dsss_rgb_residual', 'dsss_weak_residual', 'dsss_weak_residual_only', 'dsss_weak_residual_only_a01', 'dsss_clahe'])
     parser.add_argument('--visual-adapter', action='store_true', default=False,
                         help='启用冻结 CLIP 后的轻量残差 visual adapter')
     parser.add_argument('--adapter-bottleneck-ratio', type=float, default=0.25)
@@ -173,6 +177,11 @@ if __name__ == '__main__':
                         help='启用传统频谱统计分数直接融合，不做 z-score')
     parser.add_argument('--stat-fusion-beta', type=float, default=0.5)
     parser.add_argument('--stat-topk-ratio', type=float, default=0.05)
+    parser.add_argument('--multiview-fusion', action='store_true', default=False,
+                        help='启用固定三视图在线分数融合')
+    parser.add_argument('--multiview-fusion-rule', type=str, default='mean',
+                        choices=['max', 'mean', 'conservative_lam0.5'])
+    parser.add_argument('--multiview-fusion-lambda', type=float, default=0.5)
     parser.add_argument('--datasets', type=str, nargs='+', default=DATASETS, choices=DATASETS,
                         help='要运行的数据集子集，默认运行全部')
     parser.add_argument('--vis', action='store_true', default=False)
@@ -223,7 +232,8 @@ if __name__ == '__main__':
                   args.prompt_mode, args.input_mode, args.root_dir,
                   args.visual_adapter, args.adapter_bottleneck_ratio, args.adapter_alpha,
                   args.visual_lora, args.visual_lora_rank, args.visual_lora_alpha, args.visual_lora_dropout,
-                  args.batch_size, args.stat_fusion, args.stat_fusion_beta, args.stat_topk_ratio),
+                  args.batch_size, args.stat_fusion, args.stat_fusion_beta, args.stat_topk_ratio,
+                  args.multiview_fusion, args.multiview_fusion_rule, args.multiview_fusion_lambda),
             daemon=True,
         )
         t.start()

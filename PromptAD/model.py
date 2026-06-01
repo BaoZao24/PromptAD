@@ -90,6 +90,65 @@ class SpectrogramGradientChannelsV2:
         ], dim=0)
 
 
+
+class GrayContrastOnlyChannels:
+    def __init__(self, clip_limit=2.0, tile_grid_size=(8, 8)):
+        self.clip_limit = clip_limit
+        self.tile_grid_size = tile_grid_size
+        self.to_tensor = transforms.ToTensor()
+
+    def __call__(self, image):
+        gray_pil = image.convert('L')
+        gray_np = np.array(gray_pil)
+        clahe = cv2.createCLAHE(clipLimit=self.clip_limit, tileGridSize=self.tile_grid_size)
+        enhanced = clahe.apply(gray_np)
+        enhanced = self.to_tensor(Image.fromarray(enhanced))
+        return torch.cat([enhanced, enhanced, enhanced], dim=0)
+
+
+class WeakResidualOnlyChannels:
+    def __init__(self, alpha=0.2):
+        self.alpha = alpha
+        self.to_tensor = transforms.ToTensor()
+
+    @staticmethod
+    def _minmax(channel):
+        c_min = channel.amin(dim=(-2, -1), keepdim=True)
+        c_max = channel.amax(dim=(-2, -1), keepdim=True)
+        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        freq_background = gray.median(dim=-1, keepdim=True).values
+        residual = (gray - freq_background).abs()
+        weak_residual = self._minmax(gray + self.alpha * residual)
+        return torch.cat([weak_residual, weak_residual, weak_residual], dim=0)
+
+
+class GradMagnitudeOnlyChannels:
+    def __init__(self, sigma=1.0, percentile=0.995):
+        self.sigma = sigma
+        self.percentile = percentile
+        self.to_tensor = transforms.ToTensor()
+
+    def _robust_normalize(self, channel):
+        flat = channel.flatten()
+        if flat.numel() == 0:
+            return channel
+        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
+        return (channel / scale).clamp(0.0, 1.0)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        gray_np = gray.squeeze(0).numpy()
+        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
+        time_grad = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
+        freq_grad = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
+        grad_mag = np.sqrt(time_grad * time_grad + freq_grad * freq_grad)
+        grad_mag = self._robust_normalize(torch.from_numpy(np.abs(grad_mag)).unsqueeze(0))
+        return torch.cat([grad_mag, grad_mag, grad_mag], dim=0)
+
+
 class MorphFusionChannels:
     def __init__(self, sigma=1.0, percentile=0.995, alpha=0.2):
         self.sigma = sigma
@@ -293,6 +352,309 @@ class MorphFusionGrayResGradChannels:
             gray,
             weak_residual,
             self._robust_normalize(torch.from_numpy(np.abs(grad_mag)).unsqueeze(0)),
+        ], dim=0)
+
+
+
+
+class MorphFusionGrayContrastResGradChannels:
+    def __init__(self, sigma=1.0, percentile=0.995, alpha=0.2, clahe_clip_limit=2.0, clahe_tile_grid_size=8):
+        self.sigma = sigma
+        self.percentile = percentile
+        self.alpha = alpha
+        self.clahe_clip_limit = clahe_clip_limit
+        self.clahe_tile_grid_size = clahe_tile_grid_size
+        self.to_tensor = transforms.ToTensor()
+        self.clahe = cv2.createCLAHE(
+            clipLimit=self.clahe_clip_limit,
+            tileGridSize=(self.clahe_tile_grid_size, self.clahe_tile_grid_size),
+        )
+
+    def _robust_normalize(self, channel):
+        flat = channel.flatten()
+        if flat.numel() == 0:
+            return channel
+        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
+        return (channel / scale).clamp(0.0, 1.0)
+
+    @staticmethod
+    def _minmax(channel):
+        c_min = channel.amin(dim=(-2, -1), keepdim=True)
+        c_max = channel.amax(dim=(-2, -1), keepdim=True)
+        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        gray_np = gray.squeeze(0).numpy()
+
+        gray_u8 = np.clip(gray_np * 255.0, 0, 255).astype(np.uint8)
+        gray_contrast = self.clahe.apply(gray_u8).astype(np.float32) / 255.0
+        gray_contrast = torch.from_numpy(gray_contrast).unsqueeze(0)
+
+        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
+        time_grad = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
+        freq_grad = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
+        grad_mag = np.sqrt(time_grad * time_grad + freq_grad * freq_grad)
+
+        freq_background = gray.median(dim=-1, keepdim=True).values
+        residual = (gray - freq_background).abs()
+        weak_residual = self._minmax(gray + self.alpha * residual)
+
+        return torch.cat([
+            gray_contrast,
+            weak_residual,
+            self._robust_normalize(torch.from_numpy(np.abs(grad_mag)).unsqueeze(0)),
+        ], dim=0)
+
+
+class MorphFusionGaborResidualChannels:
+    def __init__(self, alpha=0.2, clahe_clip_limit=2.0, clahe_tile_grid_size=8,
+                 gabor_kernel_size=31, gabor_sigma=6.0, gabor_lambda=18.0, gabor_gamma=0.5,
+                 percentile=0.995):
+        self.alpha = alpha
+        self.percentile = percentile
+        self.to_tensor = transforms.ToTensor()
+        self.clahe = cv2.createCLAHE(
+            clipLimit=clahe_clip_limit,
+            tileGridSize=(clahe_tile_grid_size, clahe_tile_grid_size),
+        )
+        self.gabor_kernels = [
+            cv2.getGaborKernel(
+                (gabor_kernel_size, gabor_kernel_size),
+                gabor_sigma,
+                theta,
+                gabor_lambda,
+                gabor_gamma,
+                0,
+                ktype=cv2.CV_32F,
+            )
+            for theta in (0, np.pi / 4, np.pi / 2, 3 * np.pi / 4)
+        ]
+
+    def _robust_normalize(self, channel):
+        flat = channel.flatten()
+        if flat.numel() == 0:
+            return channel
+        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
+        return (channel / scale).clamp(0.0, 1.0)
+
+    @staticmethod
+    def _minmax(channel):
+        c_min = channel.amin(dim=(-2, -1), keepdim=True)
+        c_max = channel.amax(dim=(-2, -1), keepdim=True)
+        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        gray_np = gray.squeeze(0).numpy()
+        gray_u8 = np.clip(gray_np * 255.0, 0, 255).astype(np.uint8)
+
+        gray_contrast = self.clahe.apply(gray_u8).astype(np.float32) / 255.0
+        gray_contrast = torch.from_numpy(gray_contrast).unsqueeze(0)
+
+        freq_background = gray.median(dim=-1, keepdim=True).values
+        residual = (gray - freq_background).abs()
+        weak_residual = self._minmax(gray + self.alpha * residual)
+
+        gabor_responses = [
+            np.abs(cv2.filter2D(gray_np, cv2.CV_32F, kernel))
+            for kernel in self.gabor_kernels
+        ]
+        gabor_broad = np.max(np.stack(gabor_responses, axis=0), axis=0)
+        gabor_broad = self._robust_normalize(torch.from_numpy(gabor_broad).unsqueeze(0))
+
+        return torch.cat([
+            gray_contrast,
+            weak_residual,
+            gabor_broad,
+        ], dim=0)
+
+
+class MorphFusionGaborDirectionalResidualChannels:
+    def __init__(self, row_weight=0.25, col_weight=0.45, clahe_clip_limit=2.0, clahe_tile_grid_size=8,
+                 gabor_kernel_size=31, gabor_sigma=6.0, gabor_lambda=18.0, gabor_gamma=0.5,
+                 percentile=0.995, residual_percentile=0.99):
+        self.row_weight = row_weight
+        self.col_weight = col_weight
+        self.percentile = percentile
+        self.residual_percentile = residual_percentile
+        self.to_tensor = transforms.ToTensor()
+        self.clahe = cv2.createCLAHE(
+            clipLimit=clahe_clip_limit,
+            tileGridSize=(clahe_tile_grid_size, clahe_tile_grid_size),
+        )
+        self.gabor_kernels = [
+            cv2.getGaborKernel(
+                (gabor_kernel_size, gabor_kernel_size),
+                gabor_sigma,
+                theta,
+                gabor_lambda,
+                gabor_gamma,
+                0,
+                ktype=cv2.CV_32F,
+            )
+            for theta in (0, np.pi / 4, np.pi / 2, 3 * np.pi / 4)
+        ]
+
+    def _robust_normalize(self, channel, percentile=None):
+        percentile = self.percentile if percentile is None else percentile
+        flat = channel.flatten()
+        if flat.numel() == 0:
+            return channel
+        scale = torch.quantile(flat, percentile).clamp_min(1e-6)
+        return (channel / scale).clamp(0.0, 1.0)
+
+    @staticmethod
+    def _minmax(channel):
+        c_min = channel.amin(dim=(-2, -1), keepdim=True)
+        c_max = channel.amax(dim=(-2, -1), keepdim=True)
+        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        gray_np = gray.squeeze(0).numpy()
+        gray_u8 = np.clip(gray_np * 255.0, 0, 255).astype(np.uint8)
+
+        gray_contrast = self.clahe.apply(gray_u8).astype(np.float32) / 255.0
+        gray_contrast = torch.from_numpy(gray_contrast).unsqueeze(0)
+
+        row_background = np.median(gray_np, axis=1, keepdims=True)
+        row_residual = np.abs(gray_np - row_background)
+
+        col_background = np.median(gray_np, axis=0, keepdims=True)
+        col_background = cv2.GaussianBlur(col_background.astype(np.float32), (31, 1), 0)
+        col_residual = np.maximum(gray_np - col_background, 0.0)
+
+        row_residual = self._robust_normalize(
+            torch.from_numpy(row_residual).unsqueeze(0),
+            self.residual_percentile,
+        )
+        col_residual = self._robust_normalize(
+            torch.from_numpy(col_residual).unsqueeze(0),
+            self.residual_percentile,
+        )
+        directional_residual = self._minmax(gray + self.row_weight * row_residual + self.col_weight * col_residual)
+
+        gabor_responses = [
+            np.abs(cv2.filter2D(gray_np, cv2.CV_32F, kernel))
+            for kernel in self.gabor_kernels
+        ]
+        gabor_broad = np.max(np.stack(gabor_responses, axis=0), axis=0)
+        gabor_broad = self._robust_normalize(torch.from_numpy(gabor_broad).unsqueeze(0))
+
+        return torch.cat([
+            gray_contrast,
+            directional_residual,
+            gabor_broad,
+        ], dim=0)
+
+
+class MorphFusionGrayResidualChannels:
+    def __init__(self, alpha=0.1, clahe_clip_limit=2.0, clahe_tile_grid_size=8):
+        self.alpha = alpha
+        self.to_tensor = transforms.ToTensor()
+        self.clahe = cv2.createCLAHE(
+            clipLimit=clahe_clip_limit,
+            tileGridSize=(clahe_tile_grid_size, clahe_tile_grid_size),
+        )
+
+    @staticmethod
+    def _minmax(channel):
+        c_min = channel.amin(dim=(-2, -1), keepdim=True)
+        c_max = channel.amax(dim=(-2, -1), keepdim=True)
+        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        gray_np = gray.squeeze(0).numpy()
+        gray_u8 = np.clip(gray_np * 255.0, 0, 255).astype(np.uint8)
+
+        gray_contrast = self.clahe.apply(gray_u8).astype(np.float32) / 255.0
+        gray_contrast = torch.from_numpy(gray_contrast).unsqueeze(0)
+
+        freq_background = gray.median(dim=-1, keepdim=True).values
+        residual = (gray - freq_background).abs()
+        weak_residual = self._minmax(gray + self.alpha * residual)
+
+        return torch.cat([
+            gray_contrast,
+            weak_residual,
+            gray,
+        ], dim=0)
+
+
+class MorphFusionGaborTextureChannels:
+    def __init__(self, alpha=0.2, clahe_clip_limit=2.0, clahe_tile_grid_size=8,
+                 gabor_kernel_size=31, gabor_sigma=6.0, gabor_lambda=18.0, gabor_gamma=0.5,
+                 texture_kernel_size=15, percentile=0.995):
+        self.alpha = alpha
+        self.percentile = percentile
+        self.texture_kernel_size = texture_kernel_size
+        self.to_tensor = transforms.ToTensor()
+        self.clahe = cv2.createCLAHE(
+            clipLimit=clahe_clip_limit,
+            tileGridSize=(clahe_tile_grid_size, clahe_tile_grid_size),
+        )
+        self.gabor_kernels = [
+            cv2.getGaborKernel(
+                (gabor_kernel_size, gabor_kernel_size),
+                gabor_sigma,
+                theta,
+                gabor_lambda,
+                gabor_gamma,
+                0,
+                ktype=cv2.CV_32F,
+            )
+            for theta in (0, np.pi / 4, np.pi / 2, 3 * np.pi / 4)
+        ]
+
+    def _robust_normalize(self, channel):
+        flat = channel.flatten()
+        if flat.numel() == 0:
+            return channel
+        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
+        return (channel / scale).clamp(0.0, 1.0)
+
+    @staticmethod
+    def _minmax(channel):
+        c_min = channel.amin(dim=(-2, -1), keepdim=True)
+        c_max = channel.amax(dim=(-2, -1), keepdim=True)
+        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+
+    def _local_std(self, gray):
+        pad = self.texture_kernel_size // 2
+        gray_b = gray.unsqueeze(0)
+        mean = F.avg_pool2d(gray_b, self.texture_kernel_size, stride=1, padding=pad)
+        mean_sq = F.avg_pool2d(gray_b * gray_b, self.texture_kernel_size, stride=1, padding=pad)
+        var = (mean_sq - mean * mean).clamp_min(0.0)
+        return torch.sqrt(var).squeeze(0)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        gray_np = gray.squeeze(0).numpy()
+        gray_u8 = np.clip(gray_np * 255.0, 0, 255).astype(np.uint8)
+
+        gray_contrast = self.clahe.apply(gray_u8).astype(np.float32) / 255.0
+        gray_contrast = torch.from_numpy(gray_contrast).unsqueeze(0)
+
+        freq_background = gray.median(dim=-1, keepdim=True).values
+        residual = (gray - freq_background).abs()
+        weak_residual = self._minmax(gray + self.alpha * residual)
+
+        gabor_responses = [
+            np.abs(cv2.filter2D(gray_np, cv2.CV_32F, kernel))
+            for kernel in self.gabor_kernels
+        ]
+        gabor_broad = np.max(np.stack(gabor_responses, axis=0), axis=0)
+        gabor_broad = self._robust_normalize(torch.from_numpy(gabor_broad).unsqueeze(0))
+
+        local_std = self._robust_normalize(self._local_std(gray))
+        texture_mix = torch.maximum(gabor_broad, local_std)
+
+        return torch.cat([
+            gray_contrast,
+            weak_residual,
+            texture_mix,
         ], dim=0)
 
 
@@ -1037,6 +1399,26 @@ class PromptAD(torch.nn.Module):
             self.transform = transforms.Compose(pre_resize_crop + [
                 MorphFusionGrayResGradChannels(),
                 transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gabor_residual':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGaborResidualChannels(),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gabor_residual_a01':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGaborResidualChannels(alpha=0.1),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gabor_texture':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGaborTextureChannels(),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gabor_directional_residual':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGaborDirectionalResidualChannels(),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gray_residual_a01':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGrayResidualChannels(alpha=0.1),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
         elif self.input_mode == 'morph_fusion_gray_resenergy':
             self.transform = transforms.Compose(pre_resize_crop + [
                 MorphFusionGrayResEnergyChannels(),
@@ -1090,6 +1472,14 @@ class PromptAD(torch.nn.Module):
         elif self.input_mode == 'dsss_weak_residual':
             self.transform = transforms.Compose(pre_resize_crop + [
                 DSSSWeakResidualChannels(alpha=0.2),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'dsss_weak_residual_only':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                WeakResidualOnlyChannels(alpha=0.2),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'dsss_weak_residual_only_a01':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                WeakResidualOnlyChannels(alpha=0.1),
                 transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
         elif self.input_mode == 'dsss_clahe':
             self.transform = transforms.Compose(pre_resize_crop + [

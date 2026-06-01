@@ -1,0 +1,86 @@
+[
+  {
+    "anomaly": "burst",
+    "scene": "Playground_spectrum",
+    "level": "m30db",
+    "source": "/mnt/data/wangbei/data/datasets/burst/Playground_spectrum/abnormal/m30db/Playground_spectrum_burst_m30db_t10000-14000_f91.20-92.70MHz_patch125_abnormal.png",
+    "output": "/mnt/data/wangbei/PromptAD/analysis_outputs/lbp_gabor_multiscene_preview/burst__Playground__m30db__lbp_gabor.png"
+  },
+  {
+    "anomaly": "burst",
+    "scene": "TimeSquare_spectrum",
+    "level": "m30db",
+    "source": "/mnt/data/wangbei/data/datasets/burst/TimeSquare_spectrum/abnormal/m30db/TimeSquare_spectrum_burst_m30db_t10000-14000_f90.40-91.90MHz_patch124_abnormal.png",
+    "output": "/mnt/data/wangbei/PromptAD/analysis_outputs/lbp_gabor_multiscene_preview/burst__TimeSquare__m30db__lbp_gabor.png"
+  },
+  {
+    "anomaly": "burst",
+    "scene": "WeaponMuseum_spectrum",
+    "level": "m30db",
+    "source": "/mnt/data/wangbei/data/datasets/burst/WeaponMuseum_spectrum/abnormal/m30db/WeaponMuseum_spectrum_burst_m30db_t06000-10000_f99.20-100.70MHz_patch087_abnormal.png",
+    "output": "/mnt/data/wangbei/PromptAD/analysis_outputs/lbp_gabor_multiscene_preview/burst__WeaponMuseum__m30db__lbp_gabor.png"
+  },
+  {
+    "anomaly": "chirp",
+    "scene": "Playground_spectrum",
+    "level": "m30db",
+    "source": "/mnt/data/wangbei/data/datasets/chirp/Playground_spectrum/abnormal/m30db/Playground_spectrum_chirp_m30db_t08000-12000_f106.40-107.90MHz_patch120_abnormal.png",
+    "output": "/mnt/data/wangbei/PromptAD/analysis_outputs/lbp_gabor_multiscene_preview/chirp__Playground__m30db__lbp_gabor.png"
+  },
+  {
+    "anomaly": "chirp",
+    "scene": "TimeSquare_spectrum",
+    "level": "m30db",
+    "source": "/mnt/data/wangbei/data/datasets/chirp/TimeSquare_spectrum/abnormal/m30db/TimeSquare_spectrum_chirp_m30db_t10000-14000_f96.80-98.30MHz_patch132_abnormal.png",
+    "output": "/mnt/data/wangbei/PromptAD/analysis_outputs/lbp_gabor_multiscene_preview/chirp__TimeSquare__m30db__lbp_gabor.png"
+  },
+  {
+    "anomaly": "chirp",
+    "scene": "WeaponMuseum_spectrum",
+    "level": "m30db",
+    "source": "/mnt/data/wangbei/data/datasets/chirp/WeaponMuseum_spectrum/abnormal/m30db/WeaponMuseum_spectrum_chirp_m30db_t08000-12000_f88.80-90.30MHz_patch098_abnormal.png",
+    "output": "/mnt/data/wangbei/PromptAD/analysis_outputs/lbp_gabor_multiscene_preview/chirp__WeaponMuseum__m30db__lbp_gabor.png"
+  },
+  {
+    "anomaly": "dsss",
+    "scene": "Playground_spectrum",
+    "level": "m30db",
+    "source": "/mnt/data/wangbei/data/datasets/dsss/Playground_spectrum/abnormal/m30db/Playground_spectrum_dsss_m30db_t06000-10000_f96.00-97.50MHz_patch083_abnormal.png",
+    "output": "/mnt/data/wangbei/PromptAD/analysis_outputs/lbp_gabor_multiscene_preview/dsss__Playground__m30db__lbp_gabor.png"
+  },
+  {
+    "anomaly": "dsss",
+    "scene": "TimeSquare_spectrum",
+    "level": "m30db",
+    "source": "/mnt/data/wangbei/data/datasets/dsss/TimeSquare_spectrum/abnormal/m30db/TimeSquare_spectrum_dsss_m30db_t06000-10000_f96.00-97.50MHz_patch083_abnormal.png",
+    "output": "/mnt/data/wangbei/PromptAD/analysis_outputs/lbp_gabor_multiscene_preview/dsss__TimeSquare__m30db__lbp_gabor.png"
+  },
+  {
+    "anomaly": "dsss",
+    "scene": "WeaponMuseum_spectrum",
+    "level": "m30db",
+    "source": "/mnt/data/wangbei/data/datasets/dsss/WeaponMuseum_spectrum/abnormal/m30db/WeaponMuseum_spectrum_dsss_m30db_t06000-10000_f104.00-105.50MHz_patch093_abnormal.png",
+    "output": "/mnt/data/wangbei/PromptAD/analysis_outputs/lbp_gabor_multiscene_preview/dsss__WeaponMuseum__m30db__lbp_gabor.png"
+  },
+  {
+    "anomaly": "wideband_pulse",
+    "scene": "Playground_spectrum",
+    "level": "m40db",
+    "source": "/mnt/data/wangbei/data/datasets/wideband_pulse/Playground_spectrum/abnormal/m40db/Playground_spectrum_wideband_pulse_m40db_t06000-10000_f92.80-94.30MHz_patch079_abnormal.png",
+    "output": "/mnt/data/wangbei/PromptAD/analysis_outputs/lbp_gabor_multiscene_preview/wideband_pulse__Playground__m40db__lbp_gabor.png"
+  },
+  {
+    "anomaly": "wideband_pulse",
+    "scene": "TimeSquare_spectrum",
+    "level": "m40db",
+    "source": "/mnt/data/wangbei/data/datasets/wideband_pulse/TimeSquare_spectrum/abnormal/m40db/TimeSquare_spectrum_wideband_pulse_m40db_t12000-16000_f102.40-103.90MHz_patch163_abnormal.png",
+    "output": "/mnt/data/wangbei/PromptAD/analysis_outputs/lbp_gabor_multiscene_preview/wideband_pulse__TimeSquare__m40db__lbp_gabor.png"
+  },
+  {
+    "anomaly": "wideband_pulse",
+    "scene": "WeaponMuseum_spectrum",
+    "level": "m40db",
+    "source": "/mnt/data/wangbei/data/datasets/wideband_pulse/WeaponMuseum_spectrum/abnormal/m40db/WeaponMuseum_spectrum_wideband_pulse_m40db_t06000-10000_f92.00-93.50MHz_patch078_abnormal.png",
+    "output": "/mnt/data/wangbei/PromptAD/analysis_outputs/lbp_gabor_multiscene_preview/wideband_pulse__WeaponMuseum__m40db__lbp_gabor.png"
+  }
+]
