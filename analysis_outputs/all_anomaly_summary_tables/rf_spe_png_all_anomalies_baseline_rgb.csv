@@ -1,6 +1,0 @@
-source,anomaly,dataset,scene,protocol,feature,m10db,m20db,m30db,m40db,mean,result_source
-RF_SPE_PNG + rf_open legacy,Burst,rf_open + rf_spe_png,single_source,k_1 (legacy m10-m30) + public-normal (m40),rgb,98.5300,97.0100,93.8900,81.9700,92.8500,legacy rf_open for m10-m30; public-normal m40 supplementary experiment
-RF_SPE_PNG + rf_open legacy,Chirp,rf_open + rf_spe_png,single_source,k_1 (legacy m10-m30) + public-normal (m40),rgb,100.0000,100.0000,99.9900,98.9000,99.7225,legacy rf_open for m10-m30; public-normal m40 supplementary experiment
-RF_SPE_PNG + rf_open legacy,DSSS,rf_open + rf_spe_png,single_source,k_1 (legacy m10-m30) + public-normal (m40),rgb,97.2600,96.0600,86.5200,67.7000,86.8850,legacy rf_open for m10-m30; public-normal m40 supplementary experiment
-RF_SPE_PNG,Wideband pulse,wideband_pulse_png + rf_spe_png,single_source,k_1 (m20-m40 single-source),rgb,,98.1700,98.6300,94.0400,96.9467,result_wideband_pulse_png/rf_rgb/... for m20-m40
-RF_SPE_PNG mixed protocols,ALL_AVAILABLE,ALL_AVAILABLE,Mean,mixed_k_1_and_public_normal,rgb,98.5967,97.8100,94.7575,85.6525,94.1011,aggregated from rows above; m50db retained only in supplementary records
