@@ -97,6 +97,8 @@ rf_signal_structured_state_anomaly = {
     ],
 }
 
+rf_grouped_abnormal_signal_keys = ("burst", "chirp", "dsss")
+
 rf_scene_background_mapping = {
     "WeaponMuseum_spectrum": "an indoor spectrum scene with relatively stable background activity",
     "Playground_spectrum": "an open outdoor spectrum scene with sparse background activity",
@@ -123,6 +125,15 @@ def is_rf_prompt_class(classname, dataset_name=None):
 
 def get_rf_scene_background(classname=None):
     return rf_scene_background_mapping.get(classname)
+
+
+def get_grouped_rf_abnormal_prompt_specs():
+    specs = []
+    for signal_key in rf_grouped_abnormal_signal_keys:
+        prompt_classname = rf_signal_structured_classname[signal_key]
+        states = rf_signal_structured_state_anomaly[signal_key]
+        specs.append((signal_key, prompt_classname, states))
+    return specs
 
 
 def get_prompt_classname(classname, dataset_name=None, prompt_mode="rf"):
@@ -306,4 +317,3 @@ class_state_abnormal = {
         '{} with incomplete frequency range burst',
     ],
     }
-

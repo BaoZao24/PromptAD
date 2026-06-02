@@ -1,0 +1,5 @@
+dataset,rgb_baseline,morph_fusion_gabor_residual,morph_fusion_gray_residual_a01,delta_gray_residual_vs_baseline
+burst_signal,86.3117,90.0117,90.0708,3.7591
+chirp_signal,78.7308,85.3342,84.9758,6.245
+dsss_signal,96.4883,95.3358,96.6483,0.16
+mean,87.1769,90.2272,90.565,3.3881

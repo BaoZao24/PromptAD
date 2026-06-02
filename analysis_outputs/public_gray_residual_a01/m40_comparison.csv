@@ -1,0 +1,5 @@
+anomaly,rgb_baseline,historical_exploratory_input,morph_fusion_gray_residual_a01,delta_vs_baseline,delta_vs_historical
+burst,81.97,84.31,88.47,6.5,4.16
+chirp,98.9,98.97,99.3,0.4,0.33
+dsss,67.7,69.21,71.88,4.18,2.67
+mean,82.86,84.16,86.55,3.69,2.39
