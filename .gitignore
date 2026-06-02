@@ -63,3 +63,37 @@ datasets/spectrum/
 # OS
 .DS_Store
 Thumbs.db
+
+# Generated score/cache artifacts
+*.npz
+*.npy
+*.pkl
+*.pickle
+*.log
+*.tmp
+
+# Generated figures and office exports are ignored by default.
+# Curated figures/tables are explicitly unignored below or can be added with git add -f.
+*.png
+*.jpg
+*.jpeg
+*.xlsx
+*.html
+
+# Generated experiment outputs
+# Most experiment folders are regenerated artifacts. Keep curated summaries by force-adding them when needed.
+result_split_ablation/
+tmp_*/
+tmp_*
+analysis_outputs/*
+!analysis_outputs/current_scheme_figures/
+!analysis_outputs/current_scheme_figures/*.png
+!analysis_outputs/public_gray_residual_a01/
+!analysis_outputs/public_gray_residual_a01/summary.md
+!analysis_outputs/public_gray_residual_a01/m40_comparison.csv
+!analysis_outputs/universal_gray_residual_a01/
+!analysis_outputs/universal_gray_residual_a01/summary.md
+!analysis_outputs/universal_gray_residual_a01/method_comparison.csv
+!analysis_outputs/universal_gray_residual_a01/*.xlsx
+archive_results/2026_06_01_workspace_cleanup/
+
