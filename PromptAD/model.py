@@ -583,6 +583,30 @@ class MorphFusionGrayResidualChannels:
         ], dim=0)
 
 
+class MorphFusionGrayResidualNoContrastChannels:
+    def __init__(self, alpha=0.1):
+        self.alpha = alpha
+        self.to_tensor = transforms.ToTensor()
+
+    @staticmethod
+    def _minmax(channel):
+        c_min = channel.amin(dim=(-2, -1), keepdim=True)
+        c_max = channel.amax(dim=(-2, -1), keepdim=True)
+        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        freq_background = gray.median(dim=-1, keepdim=True).values
+        residual = (gray - freq_background).abs()
+        weak_residual = self._minmax(gray + self.alpha * residual)
+
+        return torch.cat([
+            gray,
+            weak_residual,
+            gray,
+        ], dim=0)
+
+
 class MorphFusionGaborTextureChannels:
     def __init__(self, alpha=0.2, clahe_clip_limit=2.0, clahe_tile_grid_size=8,
                  gabor_kernel_size=31, gabor_sigma=6.0, gabor_lambda=18.0, gabor_gamma=0.5,
@@ -1116,7 +1140,7 @@ class PromptLearner(nn.Module):
     #
     # 这里的“可学习 prompt”不是普通英文单词，而是 CLIP 文本 embedding 空间中的可训练向量。
     def __init__(self, n_ctx, n_pro, n_ctx_ab, n_pro_ab, classname, clip_model, pre,
-                 dataset_name=None, prompt_mode="rf"):
+                 dataset_name=None, prompt_mode="rf", text_prototype_mode="single"):
         super().__init__()
 
         # 根据 CLIP 精度选择 prompt 向量的数据类型。
@@ -1128,12 +1152,17 @@ class PromptLearner(nn.Module):
 
         # rf 模式会把 RF 任务中的信号类型解析成更适合 CLIP 的自然语言。
         # legacy 模式保留旧逻辑，便于做 ablation。
+        use_grouped_abnormal = (
+            text_prototype_mode in {"grouped_max", "grouped_mean", "grouped_meanmax", "grouped_softmax"}
+            and is_rf_prompt_class(classname, dataset_name)
+        )
         state_anomaly1 = get_abnormal_prompt_states(
             classname, dataset_name, prompt_mode
         )
         classname = get_prompt_classname(
             classname, dataset_name, prompt_mode
         )
+        grouped_abnormal_specs = get_grouped_rf_abnormal_prompt_specs() if use_grouped_abnormal else []
 
         # CLIP 文本 token 的 embedding 维度。
         # 后续可学习 prompt 向量必须和 CLIP token embedding 维度一致。
@@ -1165,15 +1194,33 @@ class PromptLearner(nn.Module):
         # 其中 N 的位置后续会被 normal_ctx 替换成可学习向量。
         normal_prompts = [normal_prompt_prefix + " " + classname + "." for _ in range(n_pro)]
 
-        # 手工异常 prompt 数量。
-        # 每个手工模板会和 n_pro 组 normal_ctx 组合。
-        self.n_ab_handle = len(state_anomaly1)
-
         # 手工异常 prompt，例如：
         # "N N N N abnormal radio frequency spectrum."
         # "N N N N radio frequency spectrum with defect."
         # 注意：它仍然使用 normal_ctx 作为前缀上下文，但异常语义来自手工模板。
-        abnormal_prompts_handle = [normal_prompt_prefix + " " + state.format(classname) + "." for state in state_anomaly1 for _ in range(n_pro)]
+        abnormal_prompts_handle = []
+        abnormal_handle_group_slices = []
+        if use_grouped_abnormal:
+            for group_name, group_classname, group_states in grouped_abnormal_specs:
+                start = len(abnormal_prompts_handle)
+                abnormal_prompts_handle.extend(
+                    normal_prompt_prefix + " " + state.format(group_classname) + "."
+                    for state in group_states
+                    for _ in range(n_pro)
+                )
+                abnormal_handle_group_slices.append((group_name, start, len(abnormal_prompts_handle)))
+        else:
+            abnormal_prompts_handle = [
+                normal_prompt_prefix + " " + state.format(classname) + "."
+                for state in state_anomaly1
+                for _ in range(n_pro)
+            ]
+
+        # 手工异常 prompt 数量。
+        # 每个手工模板会和 n_pro 组 normal_ctx 组合。
+        self.n_ab_handle = len(abnormal_prompts_handle) // n_pro
+        self.use_grouped_abnormal = use_grouped_abnormal
+        self.abnormal_handle_group_slices = abnormal_handle_group_slices
 
         # 可学习异常 prompt，例如：
         # "N N N N A A A A radio frequency spectrum."
@@ -1337,6 +1384,7 @@ class PromptAD(torch.nn.Module):
 
         # 加载 CLIP 主体、创建 PromptLearner、初始化文本/视觉特征缓存。
         self.prompt_mode = kwargs.get('prompt_mode', 'rf')
+        self.text_prototype_mode = kwargs.get('text_prototype_mode', 'single')
         self.dataset_name = kwargs.get('dataset', None)
         self.input_mode = self._resolve_input_mode(kwargs.get('input_mode', 'auto'), self.dataset_name)
         self.cls_score_mode = kwargs.get('cls_score_mode', 'text_only')
@@ -1345,6 +1393,7 @@ class PromptAD(torch.nn.Module):
         self.visual_score_beta = kwargs.get('visual_score_beta', 1.0)
         self.visual_score_gamma = kwargs.get('visual_score_gamma', 0.0)
         self.visual_freq_position_weight = kwargs.get('visual_freq_position_weight', 0.0)
+        self.normal_dist_ridge = kwargs.get('normal_dist_ridge', 1e-4)
         self.use_visual_adapter = kwargs.get('visual_adapter', False)
         self.adapter_bottleneck_ratio = kwargs.get('adapter_bottleneck_ratio', 0.25)
         self.adapter_alpha = kwargs.get('adapter_alpha', 0.2)
@@ -1418,6 +1467,14 @@ class PromptAD(torch.nn.Module):
         elif self.input_mode == 'morph_fusion_gray_residual_a01':
             self.transform = transforms.Compose(pre_resize_crop + [
                 MorphFusionGrayResidualChannels(alpha=0.1),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gray_residual_no_contrast_a01':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGrayResidualNoContrastChannels(alpha=0.1),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'gray_contrast_only':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                GrayContrastOnlyChannels(),
                 transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
         elif self.input_mode == 'morph_fusion_gray_resenergy':
             self.transform = transforms.Compose(pre_resize_crop + [
@@ -1551,6 +1608,7 @@ class PromptAD(torch.nn.Module):
             n_ctx, n_pro, n_ctx_ab, n_pro_ab, class_name, model, self.precision,
             dataset_name=self.dataset_name,
             prompt_mode=self.prompt_mode,
+            text_prototype_mode=self.text_prototype_mode,
         )
         self.model = model.to(self.device)
         self.visual_adapters = None
@@ -1589,10 +1647,22 @@ class PromptAD(torch.nn.Module):
         visual_gallery2 = torch.zeros((self.shot*self.grid_size[0]*self.grid_size[1], self.model.visual.embed_dim))
         self.register_buffer("feature_gallery2", visual_gallery2)
 
-        # text_features 保存最终用于推理的两个文本原型：
+        normal_global_mean = torch.zeros((self.model.visual.output_dim,))
+        normal_global_center = torch.zeros((self.model.visual.output_dim,))
+        normal_global_var = torch.ones((self.model.visual.output_dim,))
+        self.register_buffer("normal_global_mean", normal_global_mean)
+        self.register_buffer("normal_global_center", normal_global_center)
+        self.register_buffer("normal_global_var", normal_global_var)
+
+        # text_features 保存最终用于推理的文本原型：
         # text_features[0] = 正常文本特征；
-        # text_features[1] = 异常文本特征。
-        text_features = torch.zeros((2, self.model.visual.output_dim))
+        # single 模式下 text_features[1] = 单一异常文本特征；
+        # grouped_* 模式下 text_features[1:] = burst/chirp/dsss 异常文本特征。
+        if self.text_prototype_mode in {'grouped_max', 'grouped_mean', 'grouped_meanmax', 'grouped_softmax'} and self.prompt_learner.abnormal_handle_group_slices:
+            num_text_features = 1 + len(self.prompt_learner.abnormal_handle_group_slices)
+        else:
+            num_text_features = 2
+        text_features = torch.zeros((num_text_features, self.model.visual.output_dim))
         self.register_buffer("text_features", text_features)
 
         # 如果使用 fp16，把缓存特征也转成 half，减少显存占用。
@@ -1670,18 +1740,22 @@ class PromptAD(torch.nn.Module):
         # 因此每个 epoch 结束后都需要重新 build text_features。
         normal_text_embeddings, abnormal_text_embeddings_handle, abnormal_text_embeddings_learned = self.prompt_learner()
 
-        # 异常文本包含两部分：
-        # 1. 手工异常 prompt；
-        # 2. 可学习异常 prompt。
-        abnormal_text_embeddings = torch.cat([abnormal_text_embeddings_handle, abnormal_text_embeddings_learned], dim=0)
-
         if self.version == "V1":
             # V1：直接将全部正常 prompt 编码成文本特征；
             # 同时将全部异常 prompt 编码成文本特征。
             normal_text_features = self.encode_text_embedding(normal_text_embeddings, self.tokenized_normal_prompts)
-            abnormal_text_features = self.encode_text_embedding(abnormal_text_embeddings, self.tokenized_abnormal_prompts)
+            abnormal_text_features_handle = self.encode_text_embedding(
+                abnormal_text_embeddings_handle,
+                self.tokenized_abnormal_prompts_handle,
+            )
+            abnormal_text_features_learned = self.encode_text_embedding(
+                abnormal_text_embeddings_learned,
+                self.tokenized_abnormal_prompts_learned,
+            )
+            abnormal_text_features = torch.cat([abnormal_text_features_handle, abnormal_text_features_learned], dim=0)
         elif self.version == "V2":
             # V2：逐条 prompt 编码并归一化，当前默认不使用。
+            abnormal_text_embeddings = torch.cat([abnormal_text_embeddings_handle, abnormal_text_embeddings_learned], dim=0)
             normal_text_features = []
             for phrase_id in range(normal_text_embeddings.size()[0]):
                 normal_text_feature = self.encode_text_embedding(normal_text_embeddings[phrase_id].unsqueeze(0), self.tokenized_normal_prompts)
@@ -1699,25 +1773,26 @@ class PromptAD(torch.nn.Module):
 
         # 多条正常 prompt 求平均，得到一个正常文本原型。
         avr_normal_text_features = torch.mean(normal_text_features, dim=0, keepdim=True)
-        # 多条异常 prompt 求平均，得到一个异常文本原型。
-        avr_abnormal_text_features = torch.mean(abnormal_text_features, dim=0, keepdim=True)
 
-        # 这里对所有单条文本特征做归一化，但后续真正写入的是平均后的两个原型。
-        text_features_all = torch.cat([normal_text_features, abnormal_text_features], dim=0)
-        text_features_all /= text_features_all.norm(dim=-1, keepdim=True)
+        if self.text_prototype_mode in {'grouped_max', 'grouped_mean', 'grouped_meanmax', 'grouped_softmax'} and self.prompt_learner.abnormal_handle_group_slices:
+            # grouped_*：保留多个异常形态原型，而不是把 burst/chirp/dsss 平均成一个异常中心。
+            # 当前分组原型只使用手工异常 prompt，以最大限度保留明确的形态语义。
+            group_features = []
+            for _, start, end in self.prompt_learner.abnormal_handle_group_slices:
+                group_feature = abnormal_text_features_handle[start:end].mean(dim=0, keepdim=True)
+                group_features.append(group_feature)
+            text_features = torch.cat([avr_normal_text_features] + group_features, dim=0)
+        else:
+            # single：多条异常 prompt 求平均，得到一个异常文本原型。
+            avr_abnormal_text_features = torch.mean(abnormal_text_features, dim=0, keepdim=True)
+            text_features = torch.cat([avr_normal_text_features, avr_abnormal_text_features], dim=0)
 
-        avr_normal_text_features = avr_normal_text_features
-        avr_abnormal_text_features = avr_abnormal_text_features
-
-        # 最终推理只保留两个文本原型：
-        # 第 0 个表示 normal，第 1 个表示 abnormal。
-        text_features = torch.cat([avr_normal_text_features, avr_abnormal_text_features], dim=0)
         self.text_features.copy_(text_features / text_features.norm(dim=-1, keepdim=True))
 
-    def build_image_feature_gallery(self, features1, features2):
+    def build_image_feature_gallery(self, features1, features2, global_features=None):
         # 构建正常图像 patch 特征库。
         # 输入 features1/features2 通常来自正常训练样本：
-        # _, _, feature_map1, feature_map2 = model.encode_image(data)
+        # cls_feature, _, feature_map1, feature_map2 = model.encode_image(data)
         #
         # features shape: (batch, num_patch, dim)
         # gallery shape:  (batch * num_patch, dim)
@@ -1738,6 +1813,18 @@ class PromptAD(torch.nn.Module):
             self.feature_gallery2 = gallery2.new_zeros(gallery2.shape)
         self.feature_gallery2.copy_(gallery2)
 
+        if global_features is not None:
+            self.build_global_normal_distribution(global_features)
+
+    def build_global_normal_distribution(self, global_features):
+        normal_features = F.normalize(global_features.float(), dim=-1)
+        mean = normal_features.mean(dim=0)
+        center = F.normalize(mean, dim=0)
+        var = normal_features.var(dim=0, unbiased=False).clamp_min(self.normal_dist_ridge)
+        self.normal_global_mean.copy_(mean.to(self.normal_global_mean.dtype))
+        self.normal_global_center.copy_(center.to(self.normal_global_center.dtype))
+        self.normal_global_var.copy_(var.to(self.normal_global_var.dtype))
+
     def calculate_textual_anomaly_score(self, visual_features, task):
         # 计算“文本异常分数”。
         #
@@ -1751,6 +1838,10 @@ class PromptAD(torch.nn.Module):
         # CLIP 的 logit_scale 温度参数，用来放大图文相似度。
         # 温度越大，softmax 后的概率分布越尖锐。
         t = self.model.logit_scale
+        use_grouped_scoring = (
+            self.text_prototype_mode in {'grouped_max', 'grouped_mean', 'grouped_meanmax', 'grouped_softmax'}
+            and self.text_features.shape[0] > 2
+        )
 
         # batch size。
         N = visual_features[1].shape[0]
@@ -1761,14 +1852,31 @@ class PromptAD(torch.nn.Module):
             # 因此输出的是一张 patch 级文本异常图。
             token_features = visual_features[1]
 
-            # shape 近似为：
-            # token_features: (N, num_patch, dim)
-            # self.text_features.T: (dim, 2)
-            # 输出: (N, num_patch, 2)，最后一维是 [normal_score, abnormal_score]。
-            local_normality_and_abnormality_score = (t * token_features @ self.text_features.T).softmax(dim=-1)
+            logits = t * token_features @ self.text_features.T
+            if use_grouped_scoring:
+                # 多异常原型模式：每个 patch 分别和 burst/chirp/dsss 原型比较。
+                normal_logit = logits[:, :, 0:1]
+                grouped_margin = logits[:, :, 1:] - normal_logit
+                if self.text_prototype_mode == 'grouped_mean':
+                    local_abnormality_score = grouped_margin.mean(dim=-1).sigmoid()
+                elif self.text_prototype_mode == 'grouped_softmax':
+                    grouped_weights = grouped_margin.softmax(dim=-1)
+                    local_fused_margin = (grouped_weights * grouped_margin).sum(dim=-1)
+                    local_abnormality_score = local_fused_margin.sigmoid()
+                elif self.text_prototype_mode == 'grouped_meanmax':
+                    proto_scores = grouped_margin.sigmoid()
+                    local_abnormality_score = 0.5 * proto_scores.mean(dim=-1) + 0.5 * proto_scores.max(dim=-1).values
+                else:
+                    local_abnormality_score = grouped_margin.max(dim=-1).values.sigmoid()
+            else:
+                # shape 近似为：
+                # token_features: (N, num_patch, dim)
+                # self.text_features.T: (dim, 2)
+                # 输出: (N, num_patch, 2)，最后一维是 [normal_score, abnormal_score]。
+                local_normality_and_abnormality_score = logits.softmax(dim=-1)
 
-            # 取第 1 类，也就是 abnormal 概率。
-            local_abnormality_score = local_normality_and_abnormality_score[:, :, 1]
+                # 取第 1 类，也就是 abnormal 概率。
+                local_abnormality_score = local_normality_and_abnormality_score[:, :, 1]
 
             # reshape 成二维 patch 网格：
             # (N, grid_h * grid_w) -> (N, 1, grid_h, grid_w)
@@ -1782,13 +1890,34 @@ class PromptAD(torch.nn.Module):
             # 它直接输出每张图的图像级 abnormal 概率。
             global_feature = visual_features[0]
 
-            # global_feature: (N, dim)
-            # self.text_features.T: (dim, 2)
-            # 输出: (N, 2)，表示每张图对应 [normal_prob, abnormal_prob]。
-            global_normality_and_abnormality_score = (t * global_feature @ self.text_features.T).softmax(dim=-1)
+            logits = t * global_feature @ self.text_features.T
+            if use_grouped_scoring:
+                # 多异常原型模式：
+                # grouped_max: final_score = sigmoid(max_k(sim(image, abnormal_k) - sim(image, normal)))
+                # grouped_mean: final_score = sigmoid(mean_k(sim(image, abnormal_k) - sim(image, normal)))
+                # grouped_softmax: final_score = sigmoid(sum_k softmax(margin_k) * margin_k)
+                # grouped_meanmax: final_score = 0.5 * mean(proto_scores) + 0.5 * max(proto_scores)
+                normal_logit = logits[:, 0:1]
+                grouped_margin = logits[:, 1:] - normal_logit
+                if self.text_prototype_mode == 'grouped_mean':
+                    global_abnormality_score = grouped_margin.mean(dim=-1).sigmoid()
+                elif self.text_prototype_mode == 'grouped_softmax':
+                    grouped_weights = grouped_margin.softmax(dim=-1)
+                    global_fused_margin = (grouped_weights * grouped_margin).sum(dim=-1)
+                    global_abnormality_score = global_fused_margin.sigmoid()
+                elif self.text_prototype_mode == 'grouped_meanmax':
+                    proto_scores = grouped_margin.sigmoid()
+                    global_abnormality_score = 0.5 * proto_scores.mean(dim=-1) + 0.5 * proto_scores.max(dim=-1).values
+                else:
+                    global_abnormality_score = grouped_margin.max(dim=-1).values.sigmoid()
+            else:
+                # global_feature: (N, dim)
+                # self.text_features.T: (dim, 2)
+                # 输出: (N, 2)，表示每张图对应 [normal_prob, abnormal_prob]。
+                global_normality_and_abnormality_score = logits.softmax(dim=-1)
 
-            # 取 abnormal 概率作为图像级异常分数。
-            global_abnormality_score = global_normality_and_abnormality_score[:, 1]
+                # 取 abnormal 概率作为图像级异常分数。
+                global_abnormality_score = global_normality_and_abnormality_score[:, 1]
 
             global_abnormality_score = global_abnormality_score.cpu()
 
@@ -1827,6 +1956,19 @@ class PromptAD(torch.nn.Module):
         # (N, grid_h * grid_w) -> (N, 1, grid_h, grid_w)
         return score.reshape((N, self.grid_size[0], self.grid_size[1])).unsqueeze(1)
 
+    def calculate_normal_distribution_score(self, visual_features, mode):
+        global_feature = F.normalize(visual_features[0].float(), dim=-1)
+        if mode == 'center':
+            center = F.normalize(self.normal_global_center.float(), dim=0)
+            score = (1.0 - global_feature @ center) / 2.0
+        elif mode == 'mahalanobis':
+            mean = self.normal_global_mean.float()
+            var = self.normal_global_var.float().clamp_min(self.normal_dist_ridge)
+            score = torch.sqrt(((global_feature - mean) ** 2 / var).mean(dim=-1))
+        else:
+            raise ValueError(f'Unsupported normal distribution score mode: {mode}')
+        return score.detach().cpu().numpy()
+
     def aggregate_visual_image_score(self, visual_anomaly_map):
         patch_scores = visual_anomaly_map.squeeze(1)
         n, h, w = patch_scores.shape
@@ -1855,9 +1997,18 @@ class PromptAD(torch.nn.Module):
 
         return visual_score.detach().cpu().numpy()
 
-    def fuse_cls_scores(self, textual_anomaly, visual_anomaly_map):
+    def fuse_cls_scores(self, textual_anomaly, visual_anomaly_map, visual_features=None):
         if self.cls_score_mode == 'text_only':
             return textual_anomaly
+
+        if self.cls_score_mode in {'normal_center', 'normal_mahalanobis', 'text_normal_center', 'text_normal_mahalanobis'}:
+            if visual_features is None:
+                return textual_anomaly
+            dist_mode = 'center' if 'center' in self.cls_score_mode else 'mahalanobis'
+            normal_score = self.calculate_normal_distribution_score(visual_features, dist_mode)
+            if self.cls_score_mode.startswith('text_'):
+                return self.visual_score_alpha * textual_anomaly + self.visual_score_beta * normal_score
+            return normal_score
 
         visual_score = self.aggregate_visual_image_score(visual_anomaly_map)
 
@@ -1891,7 +2042,7 @@ class PromptAD(torch.nn.Module):
         # 注意：当前 cls 的 Image-AUROC 主要使用 textual_anomaly，
         # 没有把 visual_anomaly_map 聚合后与 textual_anomaly 加权求和。
         visual_anomaly_map = self.calculate_visual_anomaly_score(visual_features)
-        image_scores = self.fuse_cls_scores(textual_anomaly, visual_anomaly_map)
+        image_scores = self.fuse_cls_scores(textual_anomaly, visual_anomaly_map, visual_features)
         anomaly_map = F.interpolate(visual_anomaly_map, size=(self.out_size_h, self.out_size_w),
                                     mode='bilinear', align_corners=False)
 

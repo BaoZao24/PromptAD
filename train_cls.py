@@ -313,6 +313,7 @@ def fit(model,
     # change the model into eval mode
     model.eval_mode()
 
+    global_features = []
     features1 = []
     features2 = []
     print('Building image feature gallery...')
@@ -320,13 +321,15 @@ def fit(model,
 
         data = [model.transform(Image.fromarray(cv2.cvtColor(f.numpy(), cv2.COLOR_BGR2RGB))) for f in data]
         data = torch.stack(data, dim=0).to(device)
-        _, _, feature_map1, feature_map2 = model.encode_image(data)
+        cls_feature, _, feature_map1, feature_map2 = model.encode_image(data)
+        global_features.append(cls_feature)
         features1.append(feature_map1)
         features2.append(feature_map2)
 
+    global_features = torch.cat(global_features, dim=0)
     features1 = torch.cat(features1, dim=0)
     features2 = torch.cat(features2, dim=0)
-    model.build_image_feature_gallery(features1, features2)
+    model.build_image_feature_gallery(features1, features2, global_features)
 
     cached_test_batches = []
     if args.multiview_fusion:
@@ -421,6 +424,7 @@ def fit(model,
         scheduler.step()
         model.build_text_feature_gallery()
         if model.use_visual_adapter or model.use_visual_lora:
+            global_features = []
             features1 = []
             features2 = []
             print('Rebuilding image feature gallery with adapted features...')
@@ -428,12 +432,14 @@ def fit(model,
                 for (data, mask, label, name, img_type) in tqdm(train_data, desc='Adapted gallery', leave=False):
                     data = [model.transform(Image.fromarray(cv2.cvtColor(f.numpy(), cv2.COLOR_BGR2RGB))) for f in data]
                     data = torch.stack(data, dim=0).to(device)
-                    _, _, feature_map1, feature_map2 = model.encode_image(data)
+                    cls_feature, _, feature_map1, feature_map2 = model.encode_image(data)
+                    global_features.append(cls_feature)
                     features1.append(feature_map1)
                     features2.append(feature_map2)
+            global_features = torch.cat(global_features, dim=0)
             features1 = torch.cat(features1, dim=0)
             features2 = torch.cat(features2, dim=0)
-            model.build_image_feature_gallery(features1, features2)
+            model.build_image_feature_gallery(features1, features2, global_features)
 
         print(f'Epoch [{epoch + 1}/{args.Epoch}] evaluating...')
         if args.multiview_fusion:
@@ -600,13 +606,17 @@ def get_args():
                         choices=["generic", "rf_domain", "rf", "legacy", "rf_object_agnostic",
                                  "rf_scene_conditioned", "rf_signal_structured"],
                         help="generic 使用无频谱语义的通用异常 prompt；rf_domain 只加入 RF/spectrogram 任务域词；rf_signal_structured 使用信号类型结构词")
+    parser.add_argument("--text-prototype-mode", type=str, default="single",
+                        choices=["single", "grouped_max", "grouped_mean", "grouped_meanmax", "grouped_softmax"],
+                        help="single 将所有异常 prompt 平均成一个原型；grouped_max 保留 burst/chirp/dsss 多异常原型并取最大异常分数；grouped_meanmax 使用 0.5*mean + 0.5*max 融合多异常原型分数")
     parser.add_argument("--input-mode", type=str, default="auto",
-                        choices=["auto", "rgb", "spectral_gradient", "spectral_gradient_v2", "morph_fusion", "morph_fusion_plus", "morph_fusion_dualgrad", "morph_fusion_balanced", "morph_fusion_gray_resgrad", "morph_fusion_gray_contrast_resgrad", "morph_fusion_gabor_residual", "morph_fusion_gabor_residual_a01", "morph_fusion_gabor_texture", "morph_fusion_gabor_directional_residual", "morph_fusion_gray_residual_a01", "morph_fusion_gray_resenergy", "morph_fusion_gray_resband", "chirp_directional", "chirp_ridge", "chirp_track_enhance", "chirp_rgb_track", "signal_adaptive", "signal_adaptive_v2", "log_power",
+                        choices=["auto", "rgb", "gray_contrast_only", "spectral_gradient", "spectral_gradient_v2", "morph_fusion", "morph_fusion_plus", "morph_fusion_dualgrad", "morph_fusion_balanced", "morph_fusion_gray_resgrad", "morph_fusion_gray_contrast_resgrad", "morph_fusion_gabor_residual", "morph_fusion_gabor_residual_a01", "morph_fusion_gabor_texture", "morph_fusion_gabor_directional_residual", "morph_fusion_gray_residual_a01", "morph_fusion_gray_residual_no_contrast_a01", "morph_fusion_gray_resenergy", "morph_fusion_gray_resband", "chirp_directional", "chirp_ridge", "chirp_track_enhance", "chirp_rgb_track", "signal_adaptive", "signal_adaptive_v2", "log_power",
                                  "dsss_statistical", "dsss_energy_smooth", "dsss_lowfreq_band", "dsss_energy_profile",
                                  "dsss_rgb_residual", "dsss_weak_residual", "dsss_weak_residual_only", "dsss_weak_residual_only_a01", "dsss_clahe"],
                         help="morph_fusion*、morph_fusion_balanced、morph_fusion_gray_resgrad、morph_fusion_gray_contrast_resgrad、morph_fusion_gray_resenergy 与 morph_fusion_gray_resband 为通用多视图融合输入；signal_adaptive 对 burst/chirp 使用频谱梯度、对 dsss 使用 RGB；signal_adaptive_v2 对 dsss 使用 weak residual；log_power 使用灰度 log-power 压缩")
     parser.add_argument("--cls-score-mode", type=str, default="text_only",
-                        choices=["text_only", "visual_topk", "visual_topk_max", "visual_topk_freq"],
+                        choices=["text_only", "visual_topk", "visual_topk_max", "visual_topk_freq",
+                                 "normal_center", "normal_mahalanobis", "text_normal_center", "text_normal_mahalanobis"],
                         help="图像级分数融合方式")
     parser.add_argument("--visual-topk-ratio", type=float, default=0.05,
                         help="visual patch score 聚合时使用的 top-k 比例")
@@ -618,6 +628,8 @@ def get_args():
                         help="visual max score 融合权重")
     parser.add_argument("--visual-freq-position-weight", type=float, default=0.0,
                         help="频率位置约束强度，用于强调远离中心或特定频带的异常")
+    parser.add_argument("--normal-dist-ridge", type=float, default=1e-4,
+                        help="normal distribution diagonal variance 的最小平滑项")
     parser.add_argument("--stat-fusion", type=str2bool, choices=[True, False], default=False,
                         help="是否把传统频谱统计图像级分数直接融合到模型分数中，不做 z-score")
     parser.add_argument("--stat-topk-ratio", type=float, default=0.05,

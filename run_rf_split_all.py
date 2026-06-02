@@ -95,6 +95,9 @@ def safe_print(*args, **kwargs):
 
 
 def gpu_worker(gpu_id, job_queue, epochs, seed, vis, dry_run, prompt_mode, input_mode, root_dir,
+               n_ctx_ab, n_pro_ab, text_prototype_mode,
+               cls_score_mode, visual_topk_ratio, visual_score_alpha, visual_score_beta, visual_score_gamma,
+               visual_freq_position_weight, normal_dist_ridge,
                visual_adapter, adapter_bottleneck_ratio, adapter_alpha,
                visual_lora, visual_lora_rank, visual_lora_alpha, visual_lora_dropout,
                batch_size, stat_fusion, stat_fusion_beta, stat_topk_ratio,
@@ -113,6 +116,16 @@ def gpu_worker(gpu_id, job_queue, epochs, seed, vis, dry_run, prompt_mode, input
             f'--noise-level {noise_level} --vis {vis_str} --seed {seed} '
             f'--root-dir {root_dir} '
             f'--prompt-mode {prompt_mode} --input-mode {input_mode} '
+            f'--text-prototype-mode {text_prototype_mode} '
+            f'--n_ctx_ab {n_ctx_ab} '
+            f'--n_pro_ab {n_pro_ab} '
+            f'--cls-score-mode {cls_score_mode} '
+            f'--visual-topk-ratio {visual_topk_ratio} '
+            f'--visual-score-alpha {visual_score_alpha} '
+            f'--visual-score-beta {visual_score_beta} '
+            f'--visual-score-gamma {visual_score_gamma} '
+            f'--visual-freq-position-weight {visual_freq_position_weight} '
+            f'--normal-dist-ridge {normal_dist_ridge} '
             f'--visual-adapter {visual_adapter} '
             f'--adapter-bottleneck-ratio {adapter_bottleneck_ratio} '
             f'--adapter-alpha {adapter_alpha} '
@@ -159,8 +172,31 @@ if __name__ == '__main__':
     parser.add_argument('--prompt-mode', type=str, default='rf',
                         choices=['generic', 'rf_domain', 'rf', 'legacy', 'rf_object_agnostic',
                                  'rf_scene_conditioned', 'rf_signal_structured'])
+    parser.add_argument('--n-ctx-ab', type=int, default=1,
+                        help='learned abnormal prompt 中每组 abnormal_ctx 的 token 数')
+    parser.add_argument('--n-pro-ab', type=int, default=4,
+                        help='learned abnormal prompt 的组数')
+    parser.add_argument('--text-prototype-mode', type=str, default='single',
+                        choices=['single', 'grouped_max', 'grouped_mean', 'grouped_meanmax', 'grouped_softmax'],
+                        help='single 平均所有异常 prompt；grouped_max 保留 burst/chirp/dsss 多异常原型并取最大异常分数；grouped_meanmax 使用 0.5*mean + 0.5*max 融合多异常原型分数')
+    parser.add_argument('--cls-score-mode', type=str, default='text_only',
+                        choices=['text_only', 'visual_topk', 'visual_topk_max', 'visual_topk_freq',
+                                 'normal_center', 'normal_mahalanobis', 'text_normal_center', 'text_normal_mahalanobis'],
+                        help='图像级分数融合方式')
+    parser.add_argument('--visual-topk-ratio', type=float, default=0.05,
+                        help='visual patch score 聚合时使用的 top-k 比例')
+    parser.add_argument('--visual-score-alpha', type=float, default=1.0,
+                        help='textual score 融合权重')
+    parser.add_argument('--visual-score-beta', type=float, default=1.0,
+                        help='visual top-k score 融合权重')
+    parser.add_argument('--visual-score-gamma', type=float, default=0.0,
+                        help='visual max score 融合权重')
+    parser.add_argument('--visual-freq-position-weight', type=float, default=0.0,
+                        help='频率位置约束强度，用于强调远离中心或特定频带的异常')
+    parser.add_argument('--normal-dist-ridge', type=float, default=1e-4,
+                        help='normal distribution diagonal variance 的最小平滑项')
     parser.add_argument('--input-mode', type=str, default='auto',
-                        choices=['auto', 'rgb', 'spectral_gradient', 'spectral_gradient_v2', 'morph_fusion', 'morph_fusion_plus', 'morph_fusion_dualgrad', 'morph_fusion_balanced', 'morph_fusion_gray_resgrad', 'morph_fusion_gray_contrast_resgrad', 'morph_fusion_gabor_residual', 'morph_fusion_gabor_residual_a01', 'morph_fusion_gabor_texture', 'morph_fusion_gabor_directional_residual', 'morph_fusion_gray_residual_a01', 'morph_fusion_gray_resenergy', 'morph_fusion_gray_resband', 'chirp_directional', 'chirp_ridge', 'chirp_track_enhance', 'chirp_rgb_track', 'signal_adaptive', 'signal_adaptive_v2', 'log_power',
+                        choices=['auto', 'rgb', 'gray_contrast_only', 'spectral_gradient', 'spectral_gradient_v2', 'morph_fusion', 'morph_fusion_plus', 'morph_fusion_dualgrad', 'morph_fusion_balanced', 'morph_fusion_gray_resgrad', 'morph_fusion_gray_contrast_resgrad', 'morph_fusion_gabor_residual', 'morph_fusion_gabor_residual_a01', 'morph_fusion_gabor_texture', 'morph_fusion_gabor_directional_residual', 'morph_fusion_gray_residual_a01', 'morph_fusion_gray_residual_no_contrast_a01', 'morph_fusion_gray_resenergy', 'morph_fusion_gray_resband', 'chirp_directional', 'chirp_ridge', 'chirp_track_enhance', 'chirp_rgb_track', 'signal_adaptive', 'signal_adaptive_v2', 'log_power',
                                  'dsss_statistical', 'dsss_energy_smooth', 'dsss_lowfreq_band', 'dsss_energy_profile',
                                  'dsss_rgb_residual', 'dsss_weak_residual', 'dsss_weak_residual_only', 'dsss_weak_residual_only_a01', 'dsss_clahe'])
     parser.add_argument('--visual-adapter', action='store_true', default=False,
@@ -230,6 +266,9 @@ if __name__ == '__main__':
             target=gpu_worker,
             args=(gid, job_q, args.epochs, args.seed, args.vis, args.dry_run,
                   args.prompt_mode, args.input_mode, args.root_dir,
+                  args.n_ctx_ab, args.n_pro_ab, args.text_prototype_mode,
+                  args.cls_score_mode, args.visual_topk_ratio, args.visual_score_alpha, args.visual_score_beta, args.visual_score_gamma,
+                  args.visual_freq_position_weight, args.normal_dist_ridge,
                   args.visual_adapter, args.adapter_bottleneck_ratio, args.adapter_alpha,
                   args.visual_lora, args.visual_lora_rank, args.visual_lora_alpha, args.visual_lora_dropout,
                   args.batch_size, args.stat_fusion, args.stat_fusion_beta, args.stat_topk_ratio,
