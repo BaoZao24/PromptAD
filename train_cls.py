@@ -26,6 +26,7 @@ from utils.csv_utils import *
 from utils.metrics import *
 from utils.training_utils import *
 from PromptAD import *
+from PromptAD.model import NormalBgDeviationChannels
 from utils.eval_utils import *
 from utils.visualization import plot_sample_cv2
 from torchvision import transforms
@@ -55,6 +56,11 @@ def build_input_transform(input_mode, img_resize, img_cropsize):
     if input_mode == 'dsss_weak_residual':
         return transforms.Compose(pre_resize_crop + [
             DSSSWeakResidualChannels(alpha=0.2),
+            transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train),
+        ])
+    if input_mode == 'dsss_gray_weakresidual_weakresidual':
+        return transforms.Compose(pre_resize_crop + [
+            DSSSGrayWeakResidualResidualChannels(alpha=0.2),
             transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train),
         ])
     if input_mode == 'gray_contrast_only':
@@ -263,14 +269,18 @@ def save_check_point(model, path):
     torch.save(selected_state_dict, path)
 
 
-def save_image_scores(names, scores_img, gt_list, path):
+def save_image_scores(names, scores_img, gt_list, path, visual_maps=None, text_scores=None):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    np.savez_compressed(
-        path,
+    save_dict = dict(
         names=np.asarray(names),
         scores=np.asarray(scores_img, dtype=np.float32),
         labels=np.asarray(gt_list, dtype=np.int32),
     )
+    if visual_maps is not None:
+        save_dict['visual_maps'] = np.asarray(visual_maps, dtype=np.float32)
+    if text_scores is not None:
+        save_dict['text_scores'] = np.asarray(text_scores, dtype=np.float32)
+    np.savez_compressed(path, **save_dict)
 
 
 def save_visualization_samples(names, test_imgs, score_maps, gt_mask_list, gt_list, save_folder):
@@ -317,6 +327,10 @@ def fit(model,
     features1 = []
     features2 = []
     print('Building image feature gallery...')
+    if 'normal_bg' in model.input_mode:
+        median, mad = NormalBgDeviationChannels.compute_normal_bg_stats_from_dataloader(
+            train_data, args.img_resize, args.img_cropsize)
+        model.set_normal_bg_stats(median, mad)
     for (data, mask, label, name, img_type) in tqdm(train_data, desc='Feature gallery', leave=False):
 
         data = [model.transform(Image.fromarray(cv2.cvtColor(f.numpy(), cv2.COLOR_BGR2RGB))) for f in data]
@@ -362,6 +376,8 @@ def fit(model,
     criterion_tip = TripletLoss(margin=0.0)
 
     best_result_dict = None
+    best_visual_maps = None
+    best_text_scores = None
     for epoch in range(args.Epoch):
         print(f'Epoch [{epoch + 1}/{args.Epoch}] training...')
         epoch_loss = 0.0
@@ -446,9 +462,13 @@ def fit(model,
             scores_img, score_maps, test_imgs, gt_list, gt_mask_list, names = evaluate_multiview_fusion(
                 model, dataloader, cached_test_batches, device, args, epoch + 1
             )
+            visual_maps_raw = None
+            text_scores = None
         else:
             scores_img = []
             score_maps = []
+            visual_maps_raw = []
+            text_scores_collected = []
             test_imgs = []
             gt_list = []
             gt_mask_list = []
@@ -460,7 +480,7 @@ def fit(model,
                         data_t = [model.transform(Image.fromarray(f.numpy())) for f in raw_data]
                         data_t = torch.stack(data_t, dim=0).to(device)
                         vf_gpu = model.encode_image(data_t)
-                        score_img, score_map = model.score_cached(vf_gpu, 'cls')
+                        score_img, score_map, raw_maps, ts = model.score_cached(vf_gpu, 'cls', return_raw_map=True)
                         if args.stat_fusion:
                             stat_scores = calculate_batch_stat_scores(raw_data, topk_ratio=args.stat_topk_ratio)
                             score_img = fuse_with_stat_scores(score_img, stat_scores, args.stat_fusion_beta)
@@ -473,10 +493,12 @@ def fit(model,
                             gt_mask_list.append(m)
                         score_maps += score_map
                         scores_img += score_img
+                        visual_maps_raw += raw_maps
+                        text_scores_collected += list(ts)
             else:
                 for batch in tqdm(cached_test_batches, desc=f'Eval {epoch + 1}/{args.Epoch}', leave=False):
                     vf_gpu = [v.to(device) for v in batch['vf']]
-                    score_img, score_map = model.score_cached(vf_gpu, 'cls')
+                    score_img, score_map, raw_maps, ts = model.score_cached(vf_gpu, 'cls', return_raw_map=True)
                     if args.stat_fusion:
                         score_img = fuse_with_stat_scores(score_img, batch['stat_scores'], args.stat_fusion_beta)
 
@@ -488,6 +510,8 @@ def fit(model,
                         gt_mask_list.append(m)
                     score_maps += score_map
                     scores_img += score_img
+                    visual_maps_raw += raw_maps
+                    text_scores_collected += list(ts)
 
         test_imgs, score_maps, gt_mask_list = specify_resolution(test_imgs, score_maps, gt_mask_list, resolution=(args.resolution, args.resolution))
 
@@ -507,13 +531,15 @@ def fit(model,
         if best_result_dict is None:
             best_result_dict = result_dict
             save_check_point(model, check_path)
-            save_image_scores(names, scores_img, gt_list, score_path)
+            save_image_scores(names, scores_img, gt_list, score_path,
+                             visual_maps=visual_maps_raw, text_scores=text_scores_collected)
             save_metric(best_result_dict, dataset_classes[args.dataset], args.class_name, args.dataset, csv_path)
 
         elif best_result_dict['i_roc'] < result_dict['i_roc']:
             best_result_dict = result_dict
             save_check_point(model, check_path)
-            save_image_scores(names, scores_img, gt_list, score_path)
+            save_image_scores(names, scores_img, gt_list, score_path,
+                             visual_maps=visual_maps_raw, text_scores=text_scores_collected)
             save_metric(best_result_dict, dataset_classes[args.dataset], args.class_name, args.dataset, csv_path)
 
         current_i_roc = round(result_dict['i_roc'], 2)
@@ -610,9 +636,10 @@ def get_args():
                         choices=["single", "grouped_max", "grouped_mean", "grouped_meanmax", "grouped_softmax"],
                         help="single 将所有异常 prompt 平均成一个原型；grouped_max 保留 burst/chirp/dsss 多异常原型并取最大异常分数；grouped_meanmax 使用 0.5*mean + 0.5*max 融合多异常原型分数")
     parser.add_argument("--input-mode", type=str, default="auto",
-                        choices=["auto", "rgb", "gray_contrast_only", "spectral_gradient", "spectral_gradient_v2", "morph_fusion", "morph_fusion_plus", "morph_fusion_dualgrad", "morph_fusion_balanced", "morph_fusion_gray_resgrad", "morph_fusion_gray_contrast_resgrad", "morph_fusion_gabor_residual", "morph_fusion_gabor_residual_a01", "morph_fusion_gabor_texture", "morph_fusion_gabor_directional_residual", "morph_fusion_gray_residual_a01", "morph_fusion_gray_residual_no_contrast_a01", "morph_fusion_gray_resenergy", "morph_fusion_gray_resband", "chirp_directional", "chirp_ridge", "chirp_track_enhance", "chirp_rgb_track", "signal_adaptive", "signal_adaptive_v2", "log_power",
+                        choices=["auto", "rgb", "gray_contrast_only", "spectral_gradient", "spectral_gradient_v2", "morph_fusion", "morph_fusion_plus", "morph_fusion_dualgrad", "morph_fusion_balanced", "morph_fusion_gray_resgrad", "morph_fusion_gray_contrast_resgrad", "morph_fusion_gabor_residual", "morph_fusion_gabor_residual_a01", "morph_fusion_gabor_texture", "morph_fusion_gabor_directional_residual", "morph_fusion_gray_residual_a01", "morph_fusion_gray_residual_a01_clahe10", "morph_fusion_gray_residual_a01_clahe15", "morph_fusion_gray_residual_a01_clahe30", "morph_fusion_gray_residual_a01_clahe05", "morph_fusion_gray_residual_a01_clahe80", "morph_fusion_gray_residual_a01_clahe200", "morph_fusion_gray_residual_a01_c5t2", "morph_fusion_gray_residual_a01_tile2", "morph_fusion_gray_residual_a01_tile4", "morph_fusion_gray_residual_a01_tile16", "morph_fusion_gray_residual_a01_tile32", "morph_fusion_gray_residual_no_contrast_a01", "morph_fusion_gray_resenergy", "morph_fusion_gray_resband", "chirp_directional", "chirp_ridge", "chirp_track_enhance", "chirp_rgb_track", "signal_adaptive", "signal_adaptive_v2", "log_power",
                                  "dsss_statistical", "dsss_energy_smooth", "dsss_lowfreq_band", "dsss_energy_profile",
-                                 "dsss_rgb_residual", "dsss_weak_residual", "dsss_weak_residual_only", "dsss_weak_residual_only_a01", "dsss_clahe"],
+                                 "dsss_rgb_residual", "dsss_weak_residual", "dsss_gray_weakresidual_weakresidual", "dsss_weak_residual_only", "dsss_weak_residual_only_a01", "dsss_clahe",
+                                 "morph_fusion_normal_bg_residual", "morph_fusion_contrast_residual_normal_bg"],
                         help="morph_fusion*、morph_fusion_balanced、morph_fusion_gray_resgrad、morph_fusion_gray_contrast_resgrad、morph_fusion_gray_resenergy 与 morph_fusion_gray_resband 为通用多视图融合输入；signal_adaptive 对 burst/chirp 使用频谱梯度、对 dsss 使用 RGB；signal_adaptive_v2 对 dsss 使用 weak residual；log_power 使用灰度 log-power 压缩")
     parser.add_argument("--cls-score-mode", type=str, default="text_only",
                         choices=["text_only", "visual_topk", "visual_topk_max", "visual_topk_freq",
@@ -663,7 +690,7 @@ def get_args():
                         help="normal_75_25 模式下正常样本训练比例")
 
     # burst_signal related
-    parser.add_argument("--noise-level", type=str, default='m10db', choices=['m10db', 'm20db', 'm30db', 'm40db', 'm50db'])
+    parser.add_argument("--noise-level", type=str, default='m10db', choices=['m10db', 'm20db', 'm30db', 'm40db', 'm50db', 'm55db', 'm60db', 'm70db'])
 
     # optimizer
     parser.add_argument("--lr", type=float, default=0.002)

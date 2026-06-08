@@ -1,44 +1,23 @@
 # Public RF_SPE_PNG Validation for `morph_fusion_gray_residual_a01`
 
-Protocol:
+正式公开数据对比表已经更新为新的混合协议：
 
 ```text
-dataset = rf_spe_png
-normal source = RF_Spectrum_Public_Dataset / MeasRes_*
-train normal = first k_shot=1 MeasRes_* folder
-test normal = remaining MeasRes_* folders
-test abnormal = RF_SPE_PNG/{class}/abnormal/m40db
-seed = 111
-epochs = 50
-prompt_mode = rf
-input_mode = morph_fusion_gray_residual_a01
+analysis_outputs/public_current_vs_original/public_current_vs_original.csv
+analysis_outputs/public_current_vs_original/summary.md
 ```
 
-Current unified scheme:
+本目录保留为“现有方案公开数据记录”。
 
-```text
-morph_fusion_gray_residual_a01 = gray_contrast + weak_residual(alpha=0.1) + original_gray
-```
+当前公开数据协议下，现有方案 `rf + morph_fusion_gray_residual_a01` 的 9 条结果为：
 
-Comparison file:
+| anomaly | level 1 | level 2 | level 3 | mean |
+|---|---:|---:|---:|---:|
+| `burst` | 96.88 | 88.47 | 65.29 | 83.55 |
+| `chirp` | 94.16 | 71.75 | 55.55 | 73.82 |
+| `dsss` | 94.99 | 84.40 | 71.88 | 83.76 |
 
-```text
-analysis_outputs/public_gray_residual_a01/m40_comparison.csv
-```
-
-## Results at m40db
-
-| anomaly | RGB baseline | historical exploratory input | current gray_residual_a01 | delta vs baseline | delta vs historical |
-|---|---:|---:|---:|---:|---:|
-| `burst` | 81.97 | 84.31 | 88.47 | +6.50 | +4.16 |
-| `chirp` | 98.90 | 98.97 | 99.30 | +0.40 | +0.33 |
-| `dsss` | 67.70 | 69.21 | 71.88 | +4.18 | +2.67 |
-| **mean** | **82.86** | **84.16** | **86.55** | **+3.69** | **+2.39** |
-
-## Interpretation
-
-On the public `RF_SPE_PNG` validation protocol, the current unified input scheme still improves all three anomaly types at `m40db`.
-
-Compared with RGB baseline, the gain is largest on `burst` and `dsss`, which are also the harder low-SNR cases on this protocol. `chirp` was already very strong with RGB, so the gain is small but still positive.
-
-Compared with the earlier exploratory input setting, the current unified scheme is also better on all three classes. The key point is not to keep selection as a method, but to show that the unified input can improve public-data performance without anomaly-type-specific prior knowledge.
+注：对应档位分别为：
+- `burst`: `m30db / m40db / m50db`
+- `chirp`: `m50db / m55db / m60db`
+- `dsss`: `m20db / m30db / m40db`

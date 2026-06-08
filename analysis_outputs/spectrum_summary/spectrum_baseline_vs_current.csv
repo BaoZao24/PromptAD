@@ -1,0 +1,6 @@
+class,baseline_legacy_rgb,current_rf_gray_residual_a01,delta_current_vs_baseline
+16QAM,98.9,98.48,-0.42
+CHIRP,96.99,98.48,1.49
+GMSK,93.58,96.84,3.26
+QPSK,92.85,94.1,1.25
+average,95.58,96.975,1.395

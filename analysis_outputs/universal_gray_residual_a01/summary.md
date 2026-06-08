@@ -1,8 +1,10 @@
-# Universal gray residual a01 experiment
+# RF prompt + gray residual a01 experiment
 
-Protocol: self-test dataset, `normal_75_25`, seed `111`, 50 epochs, prompt mode `rf`.
+Protocol: self-test dataset, `normal_75_25`, seed `111`, 50 epochs.
 
-Candidate method: `morph_fusion_gray_residual_a01`
+True baseline: original PromptAD, `prompt_mode=legacy`, `input_mode=rgb`.
+
+Current scheme: `prompt_mode=rf`, `input_mode=morph_fusion_gray_residual_a01`.
 
 Table files:
 
@@ -25,22 +27,15 @@ Input channels:
 
 | method | burst | chirp | dsss | three-class mean |
 |---|---:|---:|---:|---:|
-| RGB baseline | 86.3117 | 78.7308 | 96.4883 | 87.1769 |
-| `morph_fusion_gabor_residual` | 90.0117 | 85.3342 | 95.3358 | 90.2272 |
-| `morph_fusion_gray_residual_a01` | 90.0708 | 84.9758 | 96.6483 | 90.5650 |
+| Original PromptAD baseline (`legacy` + RGB) | 86.8375 | 78.9358 | 96.4792 | 87.4175 |
+| Current scheme (`rf` + `morph_fusion_gray_residual_a01`) | 90.0708 | 84.9758 | 96.6483 | 90.5650 |
+| Delta | +3.2333 | +6.0400 | +0.1691 | +3.1475 |
 
 ## Observation
 
-Replacing the Gabor channel with the original gray channel fixes the DSSS degradation while preserving most of the burst/chirp gain.
+The current scheme improves the true original PromptAD baseline by `+3.1475` average Image-AUROC points across the three studied RF anomaly types.
 
-Compared with `morph_fusion_gabor_residual`, the new candidate:
-
-- improves DSSS from `95.3358` to `96.6483`;
-- keeps burst almost unchanged, `90.0117` to `90.0708`;
-- slightly decreases chirp, `85.3342` to `84.9758`;
-- improves the three-class mean from `90.2272` to `90.5650`.
-
-This is currently the better candidate for a unified feature fusion scheme because it does not require knowing the anomaly type in advance.
+The previous `RF prompt + RGB` result should not be called the original baseline because it already contains RF-domain handcrafted prompt states. This summary therefore keeps only the headline comparison: original PromptAD vs current RF-adapted scheme.
 
 ## Contrast ablation
 

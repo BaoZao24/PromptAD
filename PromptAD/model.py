@@ -8,6 +8,7 @@ from torch.nn import functional as F
 from .ad_prompts import *
 from PIL import Image
 from scipy.ndimage import gaussian_filter
+from tqdm import tqdm
 
 from .CLIPAD import SimpleTokenizer as _Tokenizer
 
@@ -607,6 +608,176 @@ class MorphFusionGrayResidualNoContrastChannels:
         ], dim=0)
 
 
+class NormalBgDeviationChannels:
+    """Compute pixel-wise deviation from training normal background distribution.
+
+    Uses robust statistics (median + MAD) estimated from training normal samples only.
+    Can be used standalone or as a channel in morph_fusion variants.
+
+    Formula:
+      median_normal[f,t] = median over N training normal images at pixel (f,t)
+      MAD_normal[f,t]    = median(|I_i[f,t] - median[f,t]|) over training images
+      deviation[f,t]     = |I[f,t] - median[f,t]| / (1.4826 * MAD[f,t] + eps)
+    """
+    def __init__(self):
+        self.to_tensor = transforms.ToTensor()
+        self.median = None
+        self.mad = None
+        self.eps = 1e-6
+
+    def set_stats(self, median_np, mad_np):
+        self.median = torch.from_numpy(median_np.astype(np.float32))
+        self.mad = torch.from_numpy(mad_np.astype(np.float32))
+
+    @staticmethod
+    def compute_normal_bg_stats_from_dataloader(train_dataloader, img_resize=240, img_cropsize=240):
+        """Compute pixel-wise median and MAD from training normal images.
+
+        Only uses training normal samples (label==0), consistent with normal-only training.
+        Images are preprocessed identically to the model transform pipeline:
+        BGR numpy -> RGB -> PIL -> Resize -> CenterCrop -> convert('L') -> grayscale.
+
+        Returns:
+            median: (H, W) numpy float32, pixel-wise median over training normals
+            mad:    (H, W) numpy float32, pixel-wise median absolute deviation
+        """
+        all_gray = []
+        print(f'Computing normal background stats from training data '
+              f'(resize={img_resize}, crop={img_cropsize})...')
+        for (data, mask, label, name, img_type) in tqdm(
+                train_dataloader, desc='Normal bg stats', leave=False):
+            for i in range(len(data)):
+                if int(label[i]) != 0:
+                    continue
+                img_bgr = data[i].numpy()
+                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+                pil_img = Image.fromarray(img_rgb)
+                pil_img = TF.resize(pil_img, (img_resize, img_resize), Image.BICUBIC)
+                pil_img = TF.center_crop(pil_img, img_cropsize)
+                gray_pil = pil_img.convert('L')
+                gray = np.array(gray_pil, dtype=np.float32)
+                if gray.max() > 1.5:
+                    gray /= 255.0
+                all_gray.append(gray)
+
+        if not all_gray:
+            raise RuntimeError(
+                'No training normal images found for normal_bg_deviation stats computation. '
+                'Check dataset and split_mode.'
+            )
+
+        stack = np.stack(all_gray, axis=0)
+        median = np.median(stack, axis=0).astype(np.float32)
+        mad = np.median(np.abs(stack - median), axis=0).astype(np.float32)
+
+        print(f'  Normal bg stats computed: {len(all_gray)} images, '
+              f'shape=({median.shape[0]}, {median.shape[1]}), '
+              f'median(MAD)={mad.mean():.4f}')
+        return median, mad
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        if self.median is None or self.mad is None:
+            raise RuntimeError(
+                'NormalBgDeviationChannels: stats not set. '
+                'Call set_stats() before using the transform.'
+            )
+        median = self.median.to(gray.device)
+        mad = self.mad.to(gray.device)
+
+        abs_dev = (gray - median).abs()
+        deviation = abs_dev / (1.4826 * mad + self.eps)
+
+        deviation_np = deviation.squeeze(0).cpu().numpy()
+        p2 = np.percentile(deviation_np, 2)
+        p98 = np.percentile(deviation_np, 98)
+        deviation = torch.clamp(deviation, float(p2), float(p98))
+        deviation = (deviation - float(p2)) / max(float(p98 - p2), self.eps)
+
+        return torch.cat([deviation, deviation, deviation], dim=0)
+
+
+class MorphFusionNormalBgResidualChannels:
+    """方案A: original_gray + weak_residual(alpha=0.1) + normal_bg_deviation
+
+    Replaces gray_contrast with normal_bg_deviation as the third channel.
+    """
+    def __init__(self, alpha=0.1):
+        self.alpha = alpha
+        self.to_tensor = transforms.ToTensor()
+        self.bg_deviation = NormalBgDeviationChannels()
+
+    def set_bg_stats(self, median_np, mad_np):
+        self.bg_deviation.set_stats(median_np, mad_np)
+
+    @staticmethod
+    def _minmax(channel):
+        c_min = channel.amin(dim=(-2, -1), keepdim=True)
+        c_max = channel.amax(dim=(-2, -1), keepdim=True)
+        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+
+        freq_background = gray.median(dim=-1, keepdim=True).values
+        residual = (gray - freq_background).abs()
+        weak_residual = self._minmax(gray + self.alpha * residual)
+
+        deviation_3ch = self.bg_deviation(image)
+        deviation = deviation_3ch[0:1, :, :]
+
+        return torch.cat([
+            gray,           # channel 1: original_gray
+            weak_residual,  # channel 2: weak_residual
+            deviation,      # channel 3: normal_bg_deviation
+        ], dim=0)
+
+
+class MorphFusionContrastResidualNormalBgChannels:
+    """方案B: gray_contrast + weak_residual(alpha=0.1) + normal_bg_deviation
+
+    Keeps gray_contrast, replaces original_gray with normal_bg_deviation.
+    """
+    def __init__(self, alpha=0.1, clahe_clip_limit=2.0, clahe_tile_grid_size=8):
+        self.alpha = alpha
+        self.to_tensor = transforms.ToTensor()
+        self.clahe = cv2.createCLAHE(
+            clipLimit=clahe_clip_limit,
+            tileGridSize=(clahe_tile_grid_size, clahe_tile_grid_size),
+        )
+        self.bg_deviation = NormalBgDeviationChannels()
+
+    def set_bg_stats(self, median_np, mad_np):
+        self.bg_deviation.set_stats(median_np, mad_np)
+
+    @staticmethod
+    def _minmax(channel):
+        c_min = channel.amin(dim=(-2, -1), keepdim=True)
+        c_max = channel.amax(dim=(-2, -1), keepdim=True)
+        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        gray_np = gray.squeeze(0).numpy()
+        gray_u8 = np.clip(gray_np * 255.0, 0, 255).astype(np.uint8)
+
+        gray_contrast = self.clahe.apply(gray_u8).astype(np.float32) / 255.0
+        gray_contrast = torch.from_numpy(gray_contrast).unsqueeze(0)
+
+        freq_background = gray.median(dim=-1, keepdim=True).values
+        residual = (gray - freq_background).abs()
+        weak_residual = self._minmax(gray + self.alpha * residual)
+
+        deviation_3ch = self.bg_deviation(image)
+        deviation = deviation_3ch[0:1, :, :]
+
+        return torch.cat([
+            gray_contrast,  # channel 1: gray_contrast
+            weak_residual,  # channel 2: weak_residual
+            deviation,      # channel 3: normal_bg_deviation
+        ], dim=0)
+
+
 class MorphFusionGaborTextureChannels:
     def __init__(self, alpha=0.2, clahe_clip_limit=2.0, clahe_tile_grid_size=8,
                  gabor_kernel_size=31, gabor_sigma=6.0, gabor_lambda=18.0, gabor_gamma=0.5,
@@ -1097,6 +1268,25 @@ class DSSSWeakResidualChannels:
         return torch.cat([gray, gray, weak_residual], dim=0)
 
 
+class DSSSGrayWeakResidualResidualChannels:
+    def __init__(self, alpha=0.2):
+        self.alpha = alpha
+        self.to_tensor = transforms.ToTensor()
+
+    @staticmethod
+    def _minmax(channel):
+        c_min = channel.amin(dim=(-2, -1), keepdim=True)
+        c_max = channel.amax(dim=(-2, -1), keepdim=True)
+        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        freq_background = gray.median(dim=-1, keepdim=True).values
+        residual = (gray - freq_background).abs()
+        weak_residual = self._minmax(gray + self.alpha * residual)
+        return torch.cat([gray, weak_residual, weak_residual], dim=0)
+
+
 class DSSSCLAHEChannels:
     def __init__(self, clip_limit=2.0, tile_grid_size=(8, 8)):
         self.clip_limit = clip_limit
@@ -1468,6 +1658,50 @@ class PromptAD(torch.nn.Module):
             self.transform = transforms.Compose(pre_resize_crop + [
                 MorphFusionGrayResidualChannels(alpha=0.1),
                 transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gray_residual_a01_clahe10':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=1.0),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gray_residual_a01_clahe15':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=1.5),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gray_residual_a01_clahe30':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=3.0),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gray_residual_a01_tile4':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=2.0, clahe_tile_grid_size=4),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gray_residual_a01_tile16':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=2.0, clahe_tile_grid_size=16),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gray_residual_a01_clahe05':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=0.5),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gray_residual_a01_clahe80':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=8.0),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gray_residual_a01_clahe200':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=20.0),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gray_residual_a01_c5t2':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=5.0, clahe_tile_grid_size=2),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gray_residual_a01_tile2':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=2.0, clahe_tile_grid_size=2),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_gray_residual_a01_tile32':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=2.0, clahe_tile_grid_size=32),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
         elif self.input_mode == 'morph_fusion_gray_residual_no_contrast_a01':
             self.transform = transforms.Compose(pre_resize_crop + [
                 MorphFusionGrayResidualNoContrastChannels(alpha=0.1),
@@ -1530,6 +1764,10 @@ class PromptAD(torch.nn.Module):
             self.transform = transforms.Compose(pre_resize_crop + [
                 DSSSWeakResidualChannels(alpha=0.2),
                 transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'dsss_gray_weakresidual_weakresidual':
+            self.transform = transforms.Compose(pre_resize_crop + [
+                DSSSGrayWeakResidualResidualChannels(alpha=0.2),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
         elif self.input_mode == 'dsss_weak_residual_only':
             self.transform = transforms.Compose(pre_resize_crop + [
                 WeakResidualOnlyChannels(alpha=0.2),
@@ -1541,6 +1779,16 @@ class PromptAD(torch.nn.Module):
         elif self.input_mode == 'dsss_clahe':
             self.transform = transforms.Compose(pre_resize_crop + [
                 DSSSCLAHEChannels(),
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_normal_bg_residual':
+            self._normal_bg_transform = MorphFusionNormalBgResidualChannels(alpha=0.1)
+            self.transform = transforms.Compose(pre_resize_crop + [
+                self._normal_bg_transform,
+                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
+        elif self.input_mode == 'morph_fusion_contrast_residual_normal_bg':
+            self._normal_bg_transform = MorphFusionContrastResidualNormalBgChannels(alpha=0.1)
+            self.transform = transforms.Compose(pre_resize_crop + [
+                self._normal_bg_transform,
                 transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
         else:
             self.transform = transforms.Compose(pre_resize_crop + [
@@ -1580,6 +1828,16 @@ class PromptAD(torch.nn.Module):
         if dataset_name in {'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal', 'wideband_pulse', 'rf_spe_png'}:
             return 'spectral_gradient'
         return 'rgb'
+
+    def set_normal_bg_stats(self, median, mad):
+        """Inject precomputed normal background statistics into channel transform."""
+        if hasattr(self, '_normal_bg_transform'):
+            self._normal_bg_transform.set_bg_stats(median, mad)
+        else:
+            raise RuntimeError(
+                'set_normal_bg_stats called but current input_mode does not use '
+                'normal_bg_deviation. Check input_mode argument.'
+            )
 
     def get_model(self, n_ctx, n_pro, n_ctx_ab, n_pro_ab, class_name, backbone, pretrained_dataset):
 
@@ -2026,7 +2284,7 @@ class PromptAD(torch.nn.Module):
 
         return textual_anomaly
 
-    def score_cached(self, visual_features, task='cls'):
+    def score_cached(self, visual_features, task='cls', return_raw_map=False):
         # 使用已经缓存好的视觉特征计算异常分数。
         #
         # 当前旧分支中，CLIP 图像编码器冻结，训练过程中图像特征不变。
@@ -2050,6 +2308,11 @@ class PromptAD(torch.nn.Module):
         am_pix = anomaly_map.squeeze(1).numpy()
         am_pix_list = [am_pix[i] for i in range(am_pix.shape[0])]
         am_img_list = [image_scores[i] for i in range(len(image_scores))]
+
+        if return_raw_map:
+            raw_map_np = visual_anomaly_map.squeeze(1).cpu().numpy()  # [N, grid_h, grid_w]
+            raw_map_list = [raw_map_np[i] for i in range(raw_map_np.shape[0])]
+            return am_img_list, am_pix_list, raw_map_list, textual_anomaly
 
         return am_img_list, am_pix_list
 

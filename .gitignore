@@ -91,9 +91,20 @@ analysis_outputs/*
 !analysis_outputs/public_gray_residual_a01/
 !analysis_outputs/public_gray_residual_a01/summary.md
 !analysis_outputs/public_gray_residual_a01/m40_comparison.csv
+!analysis_outputs/public_current_vs_original/
+!analysis_outputs/public_current_vs_original/*.csv
+!analysis_outputs/public_current_vs_original/*.md
+!analysis_outputs/public_current_vs_original/*.xlsx
+!analysis_outputs/spectrum_summary/
+!analysis_outputs/spectrum_summary/*.csv
+!analysis_outputs/spectrum_summary/*.xlsx
 !analysis_outputs/universal_gray_residual_a01/
 !analysis_outputs/universal_gray_residual_a01/summary.md
 !analysis_outputs/universal_gray_residual_a01/method_comparison.csv
 !analysis_outputs/universal_gray_residual_a01/*.xlsx
+!analysis_outputs/ppt/
+!analysis_outputs/ppt/*.pptx
+!analysis_outputs/ppt_assets/
+!analysis_outputs/ppt_assets/*.png
 archive_results/2026_06_01_workspace_cleanup/
 
