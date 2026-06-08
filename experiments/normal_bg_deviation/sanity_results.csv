@@ -1,0 +1,5 @@
+dataset,baseline,planA_normal_bg,planB_contrast_normal_bg,planA_delta,planB_delta
+burst_signal,94.50,94.03,92.72,-0.47,-1.78
+chirp_signal,91.07,88.41,88.35,-2.66,-2.72
+dsss_signal,94.10,94.21,93.55,0.11,-0.55
+mean,93.22,92.22,91.54,-1.01,-1.68

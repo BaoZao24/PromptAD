@@ -1,0 +1,13 @@
+group,label,dataset,scene,noise,prompt,input,Image-AUROC
+A,Original PromptAD,burst_signal,Playground_spectrum,m30db,legacy,rgb,87.46
+B,RF PromptAD,burst_signal,Playground_spectrum,m30db,rf,rgb,87.71
+C,Input-enhanced PromptAD,burst_signal,Playground_spectrum,m30db,legacy,morph_fusion_gray_residual_a01,94.53
+D,Ours-full,burst_signal,Playground_spectrum,m30db,rf,morph_fusion_gray_residual_a01,94.5
+A,Original PromptAD,chirp_signal,Playground_spectrum,m30db,legacy,rgb,82.69
+B,RF PromptAD,chirp_signal,Playground_spectrum,m30db,rf,rgb,82.76
+C,Input-enhanced PromptAD,chirp_signal,Playground_spectrum,m30db,legacy,morph_fusion_gray_residual_a01,91.12
+D,Ours-full,chirp_signal,Playground_spectrum,m30db,rf,morph_fusion_gray_residual_a01,91.07
+A,Original PromptAD,dsss_signal,Playground_spectrum,m30db,legacy,rgb,92.51
+B,RF PromptAD,dsss_signal,Playground_spectrum,m30db,rf,rgb,92.32
+C,Input-enhanced PromptAD,dsss_signal,Playground_spectrum,m30db,legacy,morph_fusion_gray_residual_a01,94.13
+D,Ours-full,dsss_signal,Playground_spectrum,m30db,rf,morph_fusion_gray_residual_a01,94.1

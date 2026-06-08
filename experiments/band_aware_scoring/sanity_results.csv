@@ -1,0 +1,5 @@
+dataset,text_raw,harmonic_baseline,additive_best_auc,additive_delta,harmonic_compat_best_auc,harmonic_compat_delta,chirp_vs_harmonic,conclusion
+burst_signal,0.5474,0.9450,0.9588,+0.0138,0.9602,+0.0153,N/A,borderline
+chirp_signal,0.7164,0.9109,0.8951,-0.0158,0.9087,-0.0023,N/A,degraded_vs_harmonic
+dsss_signal,0.6292,0.9400,0.9514,+0.0113,0.9516,+0.0116,N/A,borderline
+Average,0.6310,0.9320,0.9351,+0.0031,0.9402,+0.0082,negative,NOT_RECOMMENDED
