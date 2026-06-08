@@ -73,17 +73,17 @@ def export_feature_figure(samples, output_path, alpha, paper=False):
     if paper:
         titles = [
             'Input spectrogram',
-            'Local structure view',
-            'Background-deviation view',
-            'Energy-preserving view',
+            'gray_contrast',
+            'weak_residual(alpha=0.1)',
+            'original_gray',
         ]
         fig, axes = plt.subplots(len(rows), 4, figsize=(12.8, 2.85 * len(rows)), constrained_layout=True)
     else:
         titles = [
             'Original spectrogram',
-            'Local structure view',
-            'Background-deviation view',
-            'Energy-preserving view',
+            'gray_contrast',
+            'weak_residual(alpha=0.1)',
+            'original_gray',
             'Fused 3-channel input',
         ]
         fig, axes = plt.subplots(len(rows), 5, figsize=(18, 3.6 * len(rows)), constrained_layout=True)
@@ -115,7 +115,7 @@ def export_feature_figure(samples, output_path, alpha, paper=False):
             ax.axis('off')
         dataset = sample.parts[6] if len(sample.parts) > 6 else sample.parent.name
         axes[r, 0].set_ylabel(dataset_labels.get(dataset, dataset), fontsize=12, rotation=90, labelpad=12)
-    title = 'Examples of structure-aware grayscale residual views' if paper else 'Visualization of the proposed structure-aware grayscale residual fusion'
+    title = 'Examples of gray_contrast, weak_residual(alpha=0.1), and original_gray' if paper else 'Visualization of gray_contrast + weak_residual(alpha=0.1) + original_gray'
     fig.suptitle(title, fontsize=14)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=220 if paper else 180)

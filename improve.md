@@ -1,12 +1,14 @@
-# Improve 开发报告：频谱结构增强方案
+# Improve 开发报告：RF 提示词与频谱结构增强方案
 
 更新时间：2026-06-01
 
 ## 1. 当前结论
 
-本阶段主推方案确定为：
+本阶段已经收敛出一套可直接写入论文主线的方法，不再是分散的探索记录。主推方案确定为：
 
 ```text
+prompt_mode = rf
+input_mode = morph_fusion_gray_residual_a01
 morph_fusion_gray_residual_a01 = gray_contrast + weak_residual(alpha=0.1) + original_gray
 ```
 
@@ -17,6 +19,33 @@ burst_signal
 chirp_signal
 dsss_signal
 ```
+
+## 1.1 本阶段贡献
+
+本阶段最终沉淀下来的贡献可以概括为两点：
+
+1. **RF 提示词适配**：把原始 PromptAD 面向通用工业图像的 prompt，改成面向射频频谱异常的 prompt，使文本原型不再描述“defect / damage”，而是描述“abnormal signal energy / unexpected interference / abnormal time-frequency structure”。
+2. **统一频谱输入构造**：提出 `morph_fusion_gray_residual_a01`，用 `gray_contrast + weak_residual(alpha=0.1) + original_gray` 替代伪彩色 RGB 输入，在不依赖异常类型先验的前提下兼顾 `burst/chirp/dsss` 三类异常。
+
+这两部分组合起来，构成了当前真正有效的完整方案，而不是单独某一个通道或某一个 prompt 小改动。
+
+## 1.2 取得的主提升
+
+相对真正 baseline `legacy + RGB`，当前方案在自测主实验上的结果为：
+
+- `burst_signal`: `86.8375 -> 90.0708`，提升 `+3.2333`
+- `chirp_signal`: `78.9358 -> 84.9758`，提升 `+6.0400`
+- `dsss_signal`: `96.4792 -> 96.6483`，提升 `+0.1691`
+- **三类平均**: `87.4175 -> 90.5650`，提升 `+3.1475`
+
+在更新后的公开协议上，当前方案也保持了正收益：
+
+- `burst` 均值：`80.52 -> 83.55`，提升 `+3.03`
+- `chirp` 均值：`70.14 -> 73.82`，提升 `+3.68`
+- `dsss` 均值：`84.14 -> 83.76`，下降 `-0.38`
+- **九条总体均值**：`78.27 -> 80.37`，提升 `+2.11`
+
+公开协议说明，这套方法不是只对自测数据有效；同时，`dsss` 的结果也提醒我们，它的跨协议泛化仍然是后续需要继续优化的问题。
 
 `wideband_pulse` 暂不纳入主研究对象。原因不是简单删除失败结果，而是实验和可视化都说明：`wideband_pulse` 尤其 `m40db` 属于极低对比度块状异常，当前基于频谱 PNG 的传统特征增强方法很难稳定分离暗弱区域。它会把主线结论拉向另一个问题：低对比度区域检测。因此本阶段聚焦在更符合当前方法优势的突发、线性调频和扩频纹理异常。
 
@@ -34,9 +63,31 @@ dsss_signal
 训练和测试协议一致
 ```
 
-`morph_fusion_gray_residual_a01` 满足这个条件。
+`rf + morph_fusion_gray_residual_a01` 满足这个条件。
 
 ## 3. 方法设计
+### 2.1 三个特征的公式表达
+
+`original_gray`：
+
+```text
+I_gray = Gray(I_rgb)
+```
+
+`gray_contrast`：
+
+```text
+I_contrast = CLAHE(I_gray; clipLimit=2.0, tileGridSize=8×8)
+```
+
+`weak_residual(alpha=0.1)`：
+
+```text
+B(f) = median_t I_gray(f, t)
+R(f, t) = |I_gray(f, t) - B(f)|
+I_res(f, t) = Normalize(I_gray(f, t) + 0.1 * R(f, t))
+```
+
 
 ### 3.1 三个通道
 
@@ -95,6 +146,14 @@ normal_75_25
 seed = 111
 epochs = 50
 prompt_mode = rf
+input_mode = morph_fusion_gray_residual_a01
+```
+
+真正 baseline 使用原始 PromptAD 设置：
+
+```text
+prompt_mode = legacy
+input_mode = rgb
 ```
 
 注意：脚本日志中仍可能出现 `k-shot=1` 字样，这是历史日志字段；当前主实验解释以 `normal_75_25` 为准。
@@ -106,22 +165,23 @@ prompt_mode = rf
 ```text
 analysis_outputs/universal_gray_residual_a01/method_comparison.csv
 analysis_outputs/universal_gray_residual_a01/summary.md
+experiments/baseline_redefinition/original_promptad_legacy_rgb_summary.csv
 ```
 
-| 数据集 | Baseline RGB | gabor_residual | gray_residual_a01 | gray_residual_a01 - baseline |
-|---|---:|---:|---:|---:|
-| `burst_signal` | 86.3117 | 90.0117 | 90.0708 | +3.7591 |
-| `chirp_signal` | 78.7308 | 85.3342 | 84.9758 | +6.2450 |
-| `dsss_signal` | 96.4883 | 95.3358 | 96.6483 | +0.1600 |
-| **三类平均** | **87.1769** | **90.2272** | **90.5650** | **+3.3881** |
+| 数据集 | 原始 PromptAD baseline (`legacy` + RGB) | 现有方案 (`rf` + `gray_residual_a01`) | 提升幅度 |
+|---|---:|---:|---:|
+| `burst_signal` | 86.8375 | 90.0708 | +3.2333 |
+| `chirp_signal` | 78.9358 | 84.9758 | +6.0400 |
+| `dsss_signal` | 96.4792 | 96.6483 | +0.1691 |
+| **三类平均** | **87.4175** | **90.5650** | **+3.1475** |
 
 ## 6. 结果解读
 
-`gray_residual_a01` 相比 RGB baseline 有明确提升：三类平均提升 `+3.3881`。
+`rf + morph_fusion_gray_residual_a01` 相比真正原始 PromptAD baseline 有明确提升：三类平均提升 `+3.1475`。这说明当前方法的主要价值，不是对单一异常做极限优化，而是给 PromptAD 提供了一套更符合频谱图判别方式的统一输入与统一文本语义。
 
-与 `gabor_residual` 相比，`gray_residual_a01` 的三类平均从 `90.2272` 提升到 `90.5650`。主要变化是 `dsss_signal` 从 `95.3358` 提升到 `96.6483`，避免了 Gabor 方向纹理通道对 DSSS 的负影响；`burst_signal` 基本持平；`chirp_signal` 略有下降，但仍明显高于 RGB baseline。
+这里的 baseline 指 `legacy prompt + RGB input`，不是之前文档中误称为 baseline 的 `rf prompt + RGB input`。后者已经包含 RF 手工提示词，属于中间消融设置，不再作为主结果表的对比对象。
 
-因此当前主方案选择 `gray_residual_a01`。它不是单独针对某一种异常类型优化，而是在统一输入变换下兼顾三类异常，更符合实际应用中未知异常类型的设置。
+因此当前主方案选择 `rf + gray_residual_a01`。它不是单独针对某一种异常类型优化，而是在 RF 场景提示词和统一输入变换下兼顾三类异常，更符合实际应用中未知异常类型的设置。
 
 ## 7. wideband 为什么暂不纳入
 
@@ -146,7 +206,7 @@ analysis_outputs/wideband_m40_local_residual_compare
 
 ## 8. Prompt / Adapter / LoRA / VAE 的当前定位
 
-- Prompt 实验：已做过探索，但没有稳定收益。原因可能是 PromptAD/CLIP 已经具备一定文本泛化能力，简单增加描述词无法显著改变视觉特征提取瓶颈。
+- Prompt 实验：RF 场景提示词是当前完整方案的一部分，用于解决原始 PromptAD 文本语义与频谱图不匹配的问题。后续继续增加复杂 prompt、分组异常原型或更多可学习 abnormal token 的实验没有稳定收益，因此不作为额外创新点。
 - Adapter / LoRA：属于参数高效微调路线，理论上可行，但目前不是主创新点。当前主线先收敛在输入特征构造。
 - VAE/AE：适合低对比度异常和正常分布建模，尤其可能适合 wideband m40db。但这会变成“重建式异常检测 + PromptAD 融合”的新路线，建议作为后续扩展，不混入当前主实验。
 
