@@ -14,6 +14,7 @@ import argparse
 
 import torch.optim.lr_scheduler
 import torch
+import torch.nn.functional as F
 import cv2
 import numpy as np
 
@@ -41,6 +42,7 @@ def get_multiview_views(args):
     if getattr(args, 'input_mode', None) == 'morph_fusion_gray_contrast_resgrad':
         return ('gray_contrast_only', 'weak_residual_only', 'grad_mag_only')
     return MULTIVIEW_FUSION_VIEWS
+
 
 
 def build_input_transform(input_mode, img_resize, img_cropsize):
@@ -126,6 +128,7 @@ def cache_test_view_features(model, dataloader, device, args):
     for (raw_data, mask, label, name, img_type) in tqdm(dataloader, desc='Cache multiview feats', leave=False):
         view_cache = {}
         denorm = None
+        image_tensor = None
         first_view = next(iter(view_transforms))
         for view, transform in view_transforms.items():
             data_t = [transform(Image.fromarray(f.numpy())) for f in raw_data]
@@ -134,14 +137,17 @@ def cache_test_view_features(model, dataloader, device, args):
             view_cache[view] = [v.cpu() for v in vf]
             if view == 'rgb':
                 denorm = [denormalization(d.cpu().numpy()) for d in data_t]
+                image_tensor = data_t
             elif denorm is None and view == first_view:
                 denorm = [cv2.cvtColor(f.numpy(), cv2.COLOR_BGR2RGB) if f.ndim == 3 and f.shape[2] == 3 else f.numpy() for f in raw_data]
+                image_tensor = data_t
         cached.append({
             'views': view_cache,
             'mask': mask,
             'label': label,
             'name': name,
             'denorm': denorm,
+            'image': image_tensor.cpu() if image_tensor is not None else None,
         })
     return cached
 
@@ -168,7 +174,7 @@ def evaluate_multiview_fusion(model, dataloader, cached_test_batches, device, ar
                     data_t = [transform(Image.fromarray(f.numpy())) for f in raw_data]
                     data_t = torch.stack(data_t, dim=0).to(device)
                     vf_gpu = model.encode_image(data_t)
-                    score_img, score_map = model.score_cached(vf_gpu, 'cls')
+                    score_img, score_map = model.score_cached(vf_gpu, 'cls', image=data_t)
                     score_img_by_view[view] = score_img
                     score_map_by_view[view] = score_map
                     if view == 'rgb':
@@ -190,7 +196,7 @@ def evaluate_multiview_fusion(model, dataloader, cached_test_batches, device, ar
             score_map_by_view = {}
             for view in get_multiview_views(args):
                 vf_gpu = [v.to(device) for v in batch['views'][view]]
-                score_img, score_map = model.score_cached(vf_gpu, 'cls')
+                score_img, score_map = model.score_cached(vf_gpu, 'cls', image=batch.get('image').to(device) if batch.get('image') is not None else None)
                 score_img_by_view[view] = score_img
                 score_map_by_view[view] = score_map
             fused_img, fused_map = fuse_multiview_scores(
@@ -258,12 +264,16 @@ def save_check_point(model, path):
     selected_keys = [
         'feature_gallery1',
         'feature_gallery2',
+        'cnn_mamba_gallery',
+        'cnn_mamba_global_gallery',
+        'rn50_gallery',
+        'rn50_local_gallery',
         'text_features',
     ]
     state_dict = model.state_dict()
     selected_state_dict = {
         k: v for k, v in state_dict.items()
-        if k in selected_keys or k.startswith('prompt_learner.') or k.startswith('visual_adapters.') or '.lora_' in k
+        if k in selected_keys or k.startswith('prompt_learner.') or k.startswith('visual_adapters.') or k.startswith('score_fusion_head.') or k.startswith('cnn_mamba_local_branch.') or '.lora_' in k
     }
 
     torch.save(selected_state_dict, path)
@@ -310,6 +320,19 @@ def save_visualization_samples(names, test_imgs, score_maps, gt_mask_list, gt_li
         save_folder=save_folder,
     )
 
+def rebuild_cnn_mamba_gallery(model, train_data: DataLoader, device: str, desc: str = 'CNN gallery'):
+    if model.cnn_mamba_local_branch is None:
+        return
+    cnn_mamba_features = []
+    with torch.no_grad():
+        for (data, mask, label, name, img_type) in tqdm(train_data, desc=desc, leave=False):
+            data = [model.transform(Image.fromarray(cv2.cvtColor(f.numpy(), cv2.COLOR_BGR2RGB))) for f in data]
+            data = torch.stack(data, dim=0).to(device)
+            cnn_mamba_features.append(model.encode_cnn_mamba_local(data).detach())
+    if cnn_mamba_features:
+        model.build_cnn_mamba_gallery(torch.cat(cnn_mamba_features, dim=0))
+
+
 def fit(model,
         args,
         dataloader: DataLoader,
@@ -326,6 +349,9 @@ def fit(model,
     global_features = []
     features1 = []
     features2 = []
+    cnn_mamba_features = []
+    rn50_features = []
+    rn50_local_features = []
     print('Building image feature gallery...')
     if 'normal_bg' in model.input_mode:
         median, mad = NormalBgDeviationChannels.compute_normal_bg_stats_from_dataloader(
@@ -339,11 +365,22 @@ def fit(model,
         global_features.append(cls_feature)
         features1.append(feature_map1)
         features2.append(feature_map2)
+        if model.cnn_mamba_local_branch is not None:
+            cnn_mamba_features.append(model.encode_cnn_mamba_local(data).detach())
+        if model.rn50_model is not None:
+            rn50_features.append(model.encode_rn50_image(data).detach())
+            if model.rn50_score_mode in {'local_topk', 'both'} or model.rn50_fusion_mode == 'guided_vit':
+                rn50_local_features.append(model.encode_rn50_local(data).detach())
 
     global_features = torch.cat(global_features, dim=0)
     features1 = torch.cat(features1, dim=0)
     features2 = torch.cat(features2, dim=0)
     model.build_image_feature_gallery(features1, features2, global_features)
+    if model.cnn_mamba_local_branch is not None and cnn_mamba_features:
+        model.build_cnn_mamba_gallery(torch.cat(cnn_mamba_features, dim=0))
+    if model.rn50_model is not None and rn50_features:
+        local_gallery_features = torch.cat(rn50_local_features, dim=0) if rn50_local_features else None
+        model.build_rn50_gallery(torch.cat(rn50_features, dim=0), local_gallery_features)
 
     cached_test_batches = []
     if args.multiview_fusion:
@@ -367,6 +404,7 @@ def fit(model,
                 'name':  name,
                 'denorm': [denormalization(d.cpu().numpy()) for d in data_t],
                 'stat_scores': stat_scores,
+                'image': data_t.cpu() if (args.cnn_vit_mamba_fusion or args.rn50_visual_fusion) else None,
             })
         # ─────────────────────────────────────────────────────────────────────────────
 
@@ -374,6 +412,7 @@ def fit(model,
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.Epoch, eta_min=1e-5)
     criterion = nn.CrossEntropyLoss().to(device)
     criterion_tip = TripletLoss(margin=0.0)
+    criterion_bce = nn.BCEWithLogitsLoss().to(device)
 
     best_result_dict = None
     best_visual_maps = None
@@ -405,7 +444,8 @@ def fit(model,
 
             loss_match_abnormal = (mean_ad_handle - mean_ad_learned).norm(dim=0) ** 2.0
 
-            cls_feature, _, _, _ = model.encode_image(data)
+            visual_features = model.encode_image(data)
+            cls_feature = visual_features[0]
 
             # compute v2t loss and triplet loss
             normal_text_features_ahchor = normal_text_features.mean(dim=0).unsqueeze(0)
@@ -432,6 +472,26 @@ def fit(model,
             trip_loss = criterion_tip(cls_feature, normal_text_features_ahchor, abnormal_text_features_ahchor)
             loss = loss_v2t + trip_loss + loss_match_abnormal * args.lambda1
 
+            if args.cnn_vit_mamba_fusion and args.cnn_mamba_align_lambda > 0:
+                cnn_local_features = model.encode_cnn_mamba_local(data)
+                cnn_global_feature = F.normalize(cnn_local_features.mean(dim=1), dim=-1)
+                vit_global_target = F.normalize(cls_feature.detach(), dim=-1)
+                loss_cnn_align = 1.0 - (cnn_global_feature * vit_global_target).sum(dim=-1).mean()
+                loss = loss + args.cnn_mamba_align_lambda * loss_cnn_align
+
+            if args.learnable_score_fusion:
+                with torch.no_grad():
+                    textual_anomaly = torch.as_tensor(
+                        model.calculate_textual_anomaly_score(visual_features, 'cls'),
+                        device=device,
+                        dtype=visual_features[0].dtype,
+                    )
+                visual_anomaly_map = model.calculate_visual_anomaly_score(visual_features)
+                fusion_logits = model.calculate_learnable_fusion_logit(textual_anomaly, visual_anomaly_map)
+                fusion_targets = label.float().to(device).view(-1)
+                loss_fusion = criterion_bce(fusion_logits.view(-1), fusion_targets)
+                loss = loss + args.learnable_score_fusion_lambda * loss_fusion
+
             epoch_loss += loss.item()
             train_pbar.set_postfix(loss=f'{loss.item():.4f}', avg_loss=f'{epoch_loss / step:.4f}')
 
@@ -457,6 +517,10 @@ def fit(model,
             features2 = torch.cat(features2, dim=0)
             model.build_image_feature_gallery(features1, features2, global_features)
 
+        if model.cnn_mamba_local_branch is not None:
+            print('Rebuilding CNN-Mamba gallery with current local branch...')
+            rebuild_cnn_mamba_gallery(model, train_data, device, desc='CNN-Mamba gallery')
+
         print(f'Epoch [{epoch + 1}/{args.Epoch}] evaluating...')
         if args.multiview_fusion:
             scores_img, score_maps, test_imgs, gt_list, gt_mask_list, names = evaluate_multiview_fusion(
@@ -480,7 +544,7 @@ def fit(model,
                         data_t = [model.transform(Image.fromarray(f.numpy())) for f in raw_data]
                         data_t = torch.stack(data_t, dim=0).to(device)
                         vf_gpu = model.encode_image(data_t)
-                        score_img, score_map, raw_maps, ts = model.score_cached(vf_gpu, 'cls', return_raw_map=True)
+                        score_img, score_map, raw_maps, ts = model.score_cached(vf_gpu, 'cls', return_raw_map=True, image=data_t if (args.cnn_vit_mamba_fusion or args.rn50_visual_fusion) else None)
                         if args.stat_fusion:
                             stat_scores = calculate_batch_stat_scores(raw_data, topk_ratio=args.stat_topk_ratio)
                             score_img = fuse_with_stat_scores(score_img, stat_scores, args.stat_fusion_beta)
@@ -498,7 +562,7 @@ def fit(model,
             else:
                 for batch in tqdm(cached_test_batches, desc=f'Eval {epoch + 1}/{args.Epoch}', leave=False):
                     vf_gpu = [v.to(device) for v in batch['vf']]
-                    score_img, score_map, raw_maps, ts = model.score_cached(vf_gpu, 'cls', return_raw_map=True)
+                    score_img, score_map, raw_maps, ts = model.score_cached(vf_gpu, 'cls', return_raw_map=True, image=batch.get('image').to(device) if batch.get('image') is not None else None)
                     if args.stat_fusion:
                         score_img = fuse_with_stat_scores(score_img, batch['stat_scores'], args.stat_fusion_beta)
 
@@ -684,6 +748,48 @@ def get_args():
                         help="visual LoRA 的缩放系数")
     parser.add_argument("--visual-lora-dropout", type=float, default=0.0,
                         help="visual LoRA 的 dropout")
+    parser.add_argument("--learnable-score-fusion", type=str2bool, choices=[True, False], default=False,
+                        help="是否启用轻量可学习融合头，基于文本分数做残差校正")
+    parser.add_argument("--learnable-score-fusion-hidden-dim", type=int, default=4,
+                        help="轻量融合头的隐藏维度")
+    parser.add_argument("--learnable-score-fusion-alpha", type=float, default=0.25,
+                        help="轻量融合头残差项的缩放系数")
+    parser.add_argument("--learnable-score-fusion-lambda", type=float, default=0.5,
+                        help="轻量融合头辅助 BCE 损失的权重")
+    parser.add_argument("--rn50-visual-fusion", type=str2bool, choices=[True, False], default=False,
+                        help="是否启用冻结 CLIP-RN50 视觉距离分支，与主 ViT/prompt 分数保守融合")
+    parser.add_argument("--rn50-pretrained", type=str, default="openai",
+                        help="RN50 分支使用的 CLIP 预训练权重名称，默认 openai")
+    parser.add_argument("--rn50-visual-beta", type=float, default=0.05,
+                        help="RN50 正常特征距离分数的融合权重")
+    parser.add_argument("--rn50-score-mode", type=str, default="global", choices=["global", "local_topk", "both"],
+                        help="RN50 辅助分数模式：global 用最终 embedding，local_topk 用 layer4 局部 token，both 两者平均")
+    parser.add_argument("--rn50-fusion-mode", type=str, default="score", choices=["score", "guided_vit"],
+                        help="score 表示 RN50 自己出辅助分数；guided_vit 表示 RN50 local map 引导 ViT patch map 聚合")
+    parser.add_argument("--rn50-local-topk-ratio", type=float, default=0.1,
+                        help="RN50 local_topk 模式下聚合最高异常 patch 的比例")
+    parser.add_argument("--rn50-guidance-temperature", type=float, default=0.2,
+                        help="guided_vit 模式下 RN50 attention softmax 温度，越小越集中关注高分局部区域")
+    parser.add_argument("--cnn-vit-mamba-fusion", type=str2bool, choices=[True, False], default=False,
+                        help="是否启用 CNN + ViT + Mamba 风格轻量融合头")
+    parser.add_argument("--cnn-mamba-beta", type=float, default=None,
+                        help="CNN-Mamba local image score 的保守融合权重")
+    parser.add_argument("--cnn-mamba-map-beta", type=float, default=None,
+                        help="CNN-Mamba local heatmap 融合权重，默认不影响原 patch map")
+    parser.add_argument("--cnn-mamba-pool-topk-ratio", type=float, default=0.2,
+                        help="CNN token 聚合时只关注异常距离最高的局部区域比例")
+    parser.add_argument("--cnn-mamba-pool-temperature", type=float, default=0.1,
+                        help="CNN token 异常加权聚合的 softmax 温度，越小越集中关注高分区域")
+    parser.add_argument("--cnn-mamba-align-lambda", type=float, default=0.0,
+                        help="正常样本上 CNN 聚合特征与 CLIP-ViT 全局特征的对齐损失权重")
+    parser.add_argument("--cnn-vit-mamba-alpha", type=float, default=0.05,
+                        help="兼容旧命令：等价于 --cnn-mamba-beta")
+    parser.add_argument("--cnn-vit-mamba-patch-alpha", type=float, default=0.0,
+                        help="兼容旧命令：等价于 --cnn-mamba-map-beta")
+    parser.add_argument("--cnn-vit-mamba-num-blocks", type=int, default=2,
+                        help="CNN+ViT+Mamba token mixer 堆叠层数")
+    parser.add_argument("--cnn-vit-mamba-dropout", type=float, default=0.0,
+                        help="CNN+ViT+Mamba token mixer dropout")
     parser.add_argument("--split-mode", type=str, default="legacy", choices=["legacy", "normal_75_25"],
                         help="legacy 使用原始 few-shot 切分；normal_75_25 使用 3/4 normal 训练、1/4 normal 测试")
     parser.add_argument("--normal-train-ratio", type=float, default=0.75,

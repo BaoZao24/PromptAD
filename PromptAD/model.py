@@ -1322,6 +1322,93 @@ class ResidualVisualAdapter(nn.Module):
         return adapted.to(original_dtype)
 
 
+class LearnableScoreFusionHead(nn.Module):
+    """A tiny residual head that predicts a correction to the text score."""
+
+    def __init__(self, input_dim=4, hidden_dim=4):
+        super().__init__()
+        hidden_dim = max(1, int(hidden_dim))
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, 1),
+        )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class TinyMambaFusionBlock(nn.Module):
+    """Lightweight Mamba-inspired token mixer implemented locally."""
+
+    def __init__(self, dim, expansion=2, kernel_size=3, dropout=0.0):
+        super().__init__()
+        inner_dim = max(1, int(dim * expansion))
+        kernel_size = max(1, int(kernel_size))
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        self.norm = nn.LayerNorm(dim)
+        self.in_proj = nn.Linear(dim, inner_dim * 2)
+        self.dwconv = nn.Conv1d(inner_dim, inner_dim, kernel_size, padding=kernel_size // 2, groups=inner_dim)
+        self.out_proj = nn.Linear(inner_dim, dim)
+        self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+        nn.init.zeros_(self.out_proj.weight)
+        nn.init.zeros_(self.out_proj.bias)
+
+    def forward(self, x):
+        residual = x
+        x = self.norm(x)
+        u, v = self.in_proj(x).chunk(2, dim=-1)
+        u = self.dwconv(u.transpose(1, 2)).transpose(1, 2)
+        u = F.gelu(u)
+        x = self.out_proj(self.dropout(u * torch.sigmoid(v)))
+        return residual + x
+
+
+class TinyCNNPatchEncoder(nn.Module):
+    def __init__(self, dim, grid_size):
+        super().__init__()
+        hidden1 = max(32, dim // 2)
+        hidden2 = max(32, dim)
+        self.stem = nn.Sequential(
+            nn.Conv2d(3, hidden1, kernel_size=3, padding=1),
+            nn.GroupNorm(1, hidden1),
+            nn.GELU(),
+            nn.Conv2d(hidden1, hidden2, kernel_size=3, stride=2, padding=1),
+            nn.GroupNorm(1, hidden2),
+            nn.GELU(),
+            nn.Conv2d(hidden2, dim, kernel_size=3, padding=1),
+            nn.GroupNorm(1, dim),
+            nn.GELU(),
+        )
+        self.pool = nn.AdaptiveAvgPool2d(grid_size)
+
+    def forward(self, image):
+        feat = self.stem(image.float())
+        tokens = self.pool(feat).flatten(2).transpose(1, 2)
+        return tokens
+
+
+class CNNMambaLocalBranch(nn.Module):
+    def __init__(self, dim, grid_size, num_blocks=1, dropout=0.0):
+        super().__init__()
+        self.grid_size = tuple(grid_size)
+        self.cnn_encoder = TinyCNNPatchEncoder(dim=dim, grid_size=self.grid_size)
+        self.mamba_blocks = nn.ModuleList([
+            TinyMambaFusionBlock(dim=dim, dropout=dropout)
+            for _ in range(max(1, int(num_blocks)))
+        ])
+        self.out_norm = nn.LayerNorm(dim)
+
+    def forward(self, image):
+        tokens = self.cnn_encoder(image)
+        for block in self.mamba_blocks:
+            tokens = block(tokens)
+        return F.normalize(self.out_norm(tokens), dim=-1)
+
+
 class PromptLearner(nn.Module):
     # PromptLearner 负责生成三类文本 prompt：
     # 1. normal_prompts：正常样本 prompt，包含可学习 normal_ctx；
@@ -1584,6 +1671,27 @@ class PromptAD(torch.nn.Module):
         self.visual_score_gamma = kwargs.get('visual_score_gamma', 0.0)
         self.visual_freq_position_weight = kwargs.get('visual_freq_position_weight', 0.0)
         self.normal_dist_ridge = kwargs.get('normal_dist_ridge', 1e-4)
+        self.use_learnable_score_fusion = kwargs.get('learnable_score_fusion', False)
+        self.use_cnn_vit_mamba_fusion = kwargs.get('cnn_vit_mamba_fusion', False)
+        self.use_rn50_visual_fusion = kwargs.get('rn50_visual_fusion', False)
+        self.rn50_pretrained = kwargs.get('rn50_pretrained', 'openai')
+        self.rn50_visual_beta = kwargs.get('rn50_visual_beta', 0.05)
+        self.rn50_score_mode = kwargs.get('rn50_score_mode', 'global')
+        self.rn50_fusion_mode = kwargs.get('rn50_fusion_mode', 'score')
+        self.rn50_local_topk_ratio = kwargs.get('rn50_local_topk_ratio', 0.1)
+        self.rn50_guidance_temperature = kwargs.get('rn50_guidance_temperature', 0.2)
+        self.cnn_mamba_beta = kwargs.get('cnn_mamba_beta', None)
+        if self.cnn_mamba_beta is None:
+            self.cnn_mamba_beta = kwargs.get('cnn_vit_mamba_alpha', 0.05)
+        self.cnn_mamba_map_beta = kwargs.get('cnn_mamba_map_beta', None)
+        if self.cnn_mamba_map_beta is None:
+            self.cnn_mamba_map_beta = kwargs.get('cnn_vit_mamba_patch_alpha', 0.0)
+        self.cnn_mamba_pool_topk_ratio = kwargs.get('cnn_mamba_pool_topk_ratio', 0.2)
+        self.cnn_mamba_pool_temperature = kwargs.get('cnn_mamba_pool_temperature', 0.1)
+        self.cnn_vit_mamba_num_blocks = kwargs.get('cnn_vit_mamba_num_blocks', 2)
+        self.cnn_vit_mamba_dropout = kwargs.get('cnn_vit_mamba_dropout', 0.0)
+        self.learnable_score_fusion_hidden_dim = kwargs.get('learnable_score_fusion_hidden_dim', 4)
+        self.learnable_score_fusion_alpha = kwargs.get('learnable_score_fusion_alpha', 0.25)
         self.use_visual_adapter = kwargs.get('visual_adapter', False)
         self.adapter_bottleneck_ratio = kwargs.get('adapter_bottleneck_ratio', 0.25)
         self.adapter_alpha = kwargs.get('adapter_alpha', 0.2)
@@ -1869,6 +1977,21 @@ class PromptAD(torch.nn.Module):
             text_prototype_mode=self.text_prototype_mode,
         )
         self.model = model.to(self.device)
+        self.rn50_model = None
+        self.rn50_output_dim = 0
+        self.rn50_local_dim = 1
+        if self.use_rn50_visual_fusion:
+            rn50_model, _, _ = CLIPAD.create_model_and_transforms(
+                model_name='RN50',
+                pretrained=self.rn50_pretrained,
+                precision=self.precision,
+            )
+            rn50_model.eval()
+            for p in rn50_model.parameters():
+                p.requires_grad_(False)
+            self.rn50_model = rn50_model.to(self.device)
+            self.rn50_output_dim = self.rn50_model.visual.output_dim
+            self.rn50_local_dim = self.rn50_model.visual.layer4[-1].bn3.num_features
         self.visual_adapters = None
         if self.use_visual_adapter:
             adapter_dims = {
@@ -1885,6 +2008,13 @@ class PromptAD(torch.nn.Module):
                     )
             self.visual_adapters = self.visual_adapters.to(self.device)
 
+        self.score_fusion_head = None
+        if self.use_learnable_score_fusion:
+            self.score_fusion_head = LearnableScoreFusionHead(
+                input_dim=4,
+                hidden_dim=self.learnable_score_fusion_hidden_dim,
+            ).to(self.device)
+
         self.tokenizer = tokenizer
         self.normal_text_features = None
         self.abnormal_text_features = None
@@ -1892,6 +2022,14 @@ class PromptAD(torch.nn.Module):
         # CLIP 视觉分支的 patch 网格大小，例如 15×15。
         # 后续 patch 级异常图会 reshape 成这个网格。
         self.grid_size = model.visual.grid_size
+        self.cnn_mamba_local_branch = None
+        if self.use_cnn_vit_mamba_fusion:
+            self.cnn_mamba_local_branch = CNNMambaLocalBranch(
+                dim=self.model.visual.output_dim,
+                grid_size=self.grid_size,
+                num_blocks=self.cnn_vit_mamba_num_blocks,
+                dropout=self.cnn_vit_mamba_dropout,
+            ).to(self.device)
         self.visual_gallery = None
 
         # feature_gallery1 / feature_gallery2 是视觉异常分支的正常样本特征库。
@@ -1905,12 +2043,23 @@ class PromptAD(torch.nn.Module):
         visual_gallery2 = torch.zeros((self.shot*self.grid_size[0]*self.grid_size[1], self.model.visual.embed_dim))
         self.register_buffer("feature_gallery2", visual_gallery2)
 
+        cnn_mamba_gallery = torch.zeros((self.shot*self.grid_size[0]*self.grid_size[1], self.model.visual.output_dim))
+        self.register_buffer("cnn_mamba_gallery", cnn_mamba_gallery)
+        cnn_mamba_global_gallery = torch.zeros((self.shot, self.model.visual.output_dim))
+        self.register_buffer("cnn_mamba_global_gallery", cnn_mamba_global_gallery)
+
         normal_global_mean = torch.zeros((self.model.visual.output_dim,))
         normal_global_center = torch.zeros((self.model.visual.output_dim,))
         normal_global_var = torch.ones((self.model.visual.output_dim,))
         self.register_buffer("normal_global_mean", normal_global_mean)
         self.register_buffer("normal_global_center", normal_global_center)
         self.register_buffer("normal_global_var", normal_global_var)
+
+        rn50_dim = self.rn50_output_dim if self.use_rn50_visual_fusion else self.model.visual.output_dim
+        rn50_gallery = torch.zeros((self.shot, rn50_dim))
+        self.register_buffer("rn50_gallery", rn50_gallery)
+        rn50_local_gallery = torch.zeros((self.shot * 49, self.rn50_local_dim))
+        self.register_buffer("rn50_local_gallery", rn50_local_gallery)
 
         # text_features 保存最终用于推理的文本原型：
         # text_features[0] = 正常文本特征；
@@ -1927,6 +2076,10 @@ class PromptAD(torch.nn.Module):
         if self.precision == 'fp16':
             self.feature_gallery1  = self.feature_gallery1.half()
             self.feature_gallery2  = self.feature_gallery2.half()
+            self.cnn_mamba_gallery = self.cnn_mamba_gallery.half()
+            self.cnn_mamba_global_gallery = self.cnn_mamba_global_gallery.half()
+            self.rn50_gallery = self.rn50_gallery.half()
+            self.rn50_local_gallery = self.rn50_local_gallery.half()
             self.text_features  = text_features.half()
 
         # 保存 tokenized prompt。
@@ -1940,12 +2093,175 @@ class PromptAD(torch.nn.Module):
         params = list(self.prompt_learner.parameters())
         if self.visual_adapters is not None:
             params.extend(self.visual_adapters.parameters())
+        if self.score_fusion_head is not None:
+            params.extend(self.score_fusion_head.parameters())
+        if self.cnn_mamba_local_branch is not None:
+            params.extend(self.cnn_mamba_local_branch.parameters())
         if self.use_visual_lora:
             params.extend(
                 p for name, p in self.model.visual.named_parameters()
                 if 'lora_' in name and p.requires_grad
             )
         return params
+
+    def build_learnable_fusion_features(self, textual_anomaly, visual_anomaly_map):
+        patch_scores = visual_anomaly_map.squeeze(1)
+        n, h, w = patch_scores.shape
+        flat_scores = patch_scores.reshape(n, -1)
+        topk = max(1, int(flat_scores.shape[1] * self.visual_topk_ratio))
+        topk_scores, _ = torch.topk(flat_scores, k=topk, dim=1)
+        mean_topk = topk_scores.mean(dim=1)
+        max_score = flat_scores.max(dim=1).values
+        gap = max_score - mean_topk
+        return torch.stack([textual_anomaly, mean_topk, max_score, gap], dim=-1)
+
+    def calculate_learnable_fusion_logit(self, textual_anomaly, visual_anomaly_map):
+        if self.score_fusion_head is None:
+            raise RuntimeError('calculate_learnable_fusion_logit requires --learnable-score-fusion True')
+        head_device = next(self.score_fusion_head.parameters()).device
+        if not torch.is_tensor(textual_anomaly):
+            textual_anomaly = torch.as_tensor(textual_anomaly, device=head_device, dtype=visual_anomaly_map.dtype)
+        else:
+            textual_anomaly = textual_anomaly.to(device=head_device, dtype=visual_anomaly_map.dtype)
+        visual_anomaly_map = visual_anomaly_map.to(head_device)
+        features = self.build_learnable_fusion_features(textual_anomaly, visual_anomaly_map)
+        delta = self.score_fusion_head(features).squeeze(-1)
+        base_logit = torch.logit(textual_anomaly.clamp(1e-4, 1.0 - 1e-4))
+        return base_logit + float(self.learnable_score_fusion_alpha) * delta
+
+    def encode_rn50_image(self, image):
+        if self.rn50_model is None:
+            raise RuntimeError('encode_rn50_image requires --rn50-visual-fusion True')
+        image = F.interpolate(image.float(), size=(224, 224), mode='bilinear', align_corners=False)
+        if self.precision == 'fp16':
+            image = image.half()
+        with torch.no_grad():
+            rn50_features = self.rn50_model.encode_image(image)
+        if isinstance(rn50_features, (list, tuple)):
+            if len(rn50_features) == 1 and rn50_features[0].dim() == 2:
+                rn50_features = rn50_features[0]
+            elif rn50_features and rn50_features[0].dim() == 1:
+                rn50_features = torch.stack(list(rn50_features), dim=0)
+            else:
+                rn50_features = rn50_features[0]
+        return F.normalize(rn50_features, dim=-1)
+
+    def encode_rn50_local(self, image):
+        if self.rn50_model is None:
+            raise RuntimeError('encode_rn50_local requires --rn50-visual-fusion True')
+        image = F.interpolate(image.float(), size=(224, 224), mode='bilinear', align_corners=False)
+        if self.precision == 'fp16':
+            image = image.half()
+        visual = self.rn50_model.visual
+        with torch.no_grad():
+            x = visual.stem(image)
+            x = visual.layer1(x)
+            x = visual.layer2(x)
+            x = visual.layer3(x)
+            x = visual.layer4(x)
+            tokens = x.flatten(2).transpose(1, 2)
+        return F.normalize(tokens, dim=-1)
+
+    def build_rn50_gallery(self, rn50_features, rn50_local_features=None):
+        gallery = F.normalize(rn50_features, dim=-1)
+        if self.rn50_gallery.shape[0] != gallery.shape[0] or self.rn50_gallery.shape[1] != gallery.shape[1]:
+            self.rn50_gallery = gallery.new_zeros(gallery.shape)
+        self.rn50_gallery.copy_(gallery.to(self.rn50_gallery.dtype))
+        if rn50_local_features is not None:
+            b, n, d = rn50_local_features.shape
+            local_gallery = F.normalize(rn50_local_features.reshape(-1, d), dim=-1)
+            if (self.rn50_local_gallery.shape[0] != local_gallery.shape[0]
+                    or self.rn50_local_gallery.shape[1] != local_gallery.shape[1]):
+                self.rn50_local_gallery = local_gallery.new_zeros(local_gallery.shape)
+            self.rn50_local_gallery.copy_(local_gallery.to(self.rn50_local_gallery.dtype))
+
+    def calculate_rn50_global_score(self, image):
+        rn50_features = self.encode_rn50_image(image)
+        score, _ = (1.0 - rn50_features @ self.rn50_gallery.t()).min(dim=-1)
+        return score / 2.0
+
+    def calculate_rn50_local_map(self, image):
+        local_features = self.encode_rn50_local(image)
+        score, _ = (1.0 - local_features @ self.rn50_local_gallery.t()).min(dim=-1)
+        score = score / 2.0
+        side = int(round(score.shape[1] ** 0.5))
+        return score.reshape((image.shape[0], side, side)).unsqueeze(1)
+
+    def calculate_rn50_local_score(self, image):
+        local_map = self.calculate_rn50_local_map(image)
+        flat = local_map.flatten(1)
+        topk = max(1, int(flat.shape[1] * float(self.rn50_local_topk_ratio)))
+        return torch.topk(flat, k=topk, dim=1).values.mean(dim=1)
+
+    def calculate_rn50_guided_vit_score(self, image, visual_anomaly_map):
+        rn50_map = self.calculate_rn50_local_map(image).to(
+            device=visual_anomaly_map.device,
+            dtype=visual_anomaly_map.dtype,
+        )
+        rn50_map = F.interpolate(
+            rn50_map,
+            size=visual_anomaly_map.shape[-2:],
+            mode='bilinear',
+            align_corners=False,
+        )
+        weights = rn50_map.flatten(1).float()
+        weights = weights - weights.amin(dim=1, keepdim=True)
+        scale = weights.amax(dim=1, keepdim=True).clamp_min(1e-6)
+        weights = weights / scale
+        temperature = max(1e-4, float(self.rn50_guidance_temperature))
+        weights = torch.softmax(weights / temperature, dim=1).to(visual_anomaly_map.dtype)
+        vit_scores = visual_anomaly_map.flatten(1)
+        return (weights * vit_scores).sum(dim=1)
+
+    def calculate_rn50_visual_score(self, image):
+        if self.rn50_score_mode == 'global':
+            return self.calculate_rn50_global_score(image)
+        if self.rn50_score_mode == 'local_topk':
+            return self.calculate_rn50_local_score(image)
+        if self.rn50_score_mode == 'both':
+            return 0.5 * (self.calculate_rn50_global_score(image) + self.calculate_rn50_local_score(image))
+        raise ValueError(f'Unknown rn50_score_mode: {self.rn50_score_mode}')
+
+    def encode_cnn_mamba_local(self, image):
+        if self.cnn_mamba_local_branch is None:
+            raise RuntimeError('encode_cnn_mamba_local requires --cnn-vit-mamba-fusion True')
+        return self.cnn_mamba_local_branch(image)
+
+    def build_cnn_mamba_gallery(self, cnn_mamba_features):
+        b, n, d = cnn_mamba_features.shape
+        gallery = F.normalize(cnn_mamba_features.reshape(-1, d), dim=-1)
+        if self.cnn_mamba_gallery.shape[0] != gallery.shape[0] or self.cnn_mamba_gallery.shape[1] != gallery.shape[1]:
+            self.cnn_mamba_gallery = gallery.new_zeros(gallery.shape)
+        self.cnn_mamba_gallery.copy_(gallery.to(self.cnn_mamba_gallery.dtype))
+
+        global_gallery = F.normalize(cnn_mamba_features.mean(dim=1), dim=-1)
+        if (self.cnn_mamba_global_gallery.shape[0] != global_gallery.shape[0]
+                or self.cnn_mamba_global_gallery.shape[1] != global_gallery.shape[1]):
+            self.cnn_mamba_global_gallery = global_gallery.new_zeros(global_gallery.shape)
+        self.cnn_mamba_global_gallery.copy_(global_gallery.to(self.cnn_mamba_global_gallery.dtype))
+
+    def aggregate_cnn_mamba_by_anomaly(self, local_features, patch_score):
+        b, n, _ = local_features.shape
+        ratio = min(1.0, max(1.0 / float(n), float(self.cnn_mamba_pool_topk_ratio)))
+        topk = max(1, int(n * ratio))
+        masked = patch_score.float().clone()
+        if topk < n:
+            threshold = torch.topk(masked, k=topk, dim=1).values[:, -1:].detach()
+            masked = masked.masked_fill(masked < threshold, -1e4)
+        temperature = max(1e-4, float(self.cnn_mamba_pool_temperature))
+        weights = torch.softmax(masked / temperature, dim=1).to(local_features.dtype)
+        pooled = (weights.unsqueeze(-1) * local_features).sum(dim=1)
+        return F.normalize(pooled, dim=-1), weights
+
+    def calculate_cnn_mamba_local_score(self, image):
+        local_features = self.encode_cnn_mamba_local(image)
+        score, _ = (1.0 - local_features @ self.cnn_mamba_gallery.t()).min(dim=-1)
+        score = score / 2.0
+        patch_map = score.reshape((image.shape[0], self.grid_size[0], self.grid_size[1])).unsqueeze(1)
+        pooled_feature, _ = self.aggregate_cnn_mamba_by_anomaly(local_features, score)
+        image_score, _ = (1.0 - pooled_feature @ self.cnn_mamba_global_gallery.t()).min(dim=-1)
+        image_score = image_score / 2.0
+        return image_score, patch_map
 
     def _adapt_visual_features(self, image_features):
         if self.visual_adapters is None:
@@ -2284,7 +2600,7 @@ class PromptAD(torch.nn.Module):
 
         return textual_anomaly
 
-    def score_cached(self, visual_features, task='cls', return_raw_map=False):
+    def score_cached(self, visual_features, task='cls', return_raw_map=False, image=None):
         # 使用已经缓存好的视觉特征计算异常分数。
         #
         # 当前旧分支中，CLIP 图像编码器冻结，训练过程中图像特征不变。
@@ -2300,17 +2616,38 @@ class PromptAD(torch.nn.Module):
         # 注意：当前 cls 的 Image-AUROC 主要使用 textual_anomaly，
         # 没有把 visual_anomaly_map 聚合后与 textual_anomaly 加权求和。
         visual_anomaly_map = self.calculate_visual_anomaly_score(visual_features)
-        image_scores = self.fuse_cls_scores(textual_anomaly, visual_anomaly_map, visual_features)
+        image_scores = np.asarray(textual_anomaly, dtype=np.float32)
+        if self.rn50_model is not None:
+            if image is None:
+                raise ValueError('score_cached requires image tensors when --rn50-visual-fusion is enabled')
+            if self.rn50_fusion_mode == 'guided_vit':
+                rn50_score = self.calculate_rn50_guided_vit_score(image, visual_anomaly_map)
+            else:
+                rn50_score = self.calculate_rn50_visual_score(image)
+            image_scores = image_scores + float(self.rn50_visual_beta) * rn50_score.detach().cpu().numpy()
+        if self.cnn_mamba_local_branch is not None:
+            if image is None:
+                raise ValueError('score_cached requires image tensors when --cnn-vit-mamba-fusion is enabled')
+            local_image_score, local_patch_map = self.calculate_cnn_mamba_local_score(image)
+            image_scores = image_scores + float(self.cnn_mamba_beta) * local_image_score.detach().cpu().numpy()
+            if float(self.cnn_mamba_map_beta) > 0:
+                visual_anomaly_map = visual_anomaly_map + float(self.cnn_mamba_map_beta) * local_patch_map.to(visual_anomaly_map.device)
+        elif self.score_fusion_head is not None and self.rn50_model is None:
+            textual_anomaly_t = torch.as_tensor(textual_anomaly, device=visual_anomaly_map.device, dtype=visual_anomaly_map.dtype)
+            image_scores = torch.sigmoid(self.calculate_learnable_fusion_logit(textual_anomaly_t, visual_anomaly_map))
+            image_scores = image_scores.detach().cpu().numpy()
+        elif self.rn50_model is None:
+            image_scores = self.fuse_cls_scores(textual_anomaly, visual_anomaly_map, visual_features)
         anomaly_map = F.interpolate(visual_anomaly_map, size=(self.out_size_h, self.out_size_w),
                                     mode='bilinear', align_corners=False)
 
         # 转成 numpy list，供 metric_cal_img 和可视化函数使用。
-        am_pix = anomaly_map.squeeze(1).numpy()
+        am_pix = anomaly_map.detach().squeeze(1).cpu().numpy()
         am_pix_list = [am_pix[i] for i in range(am_pix.shape[0])]
         am_img_list = [image_scores[i] for i in range(len(image_scores))]
 
         if return_raw_map:
-            raw_map_np = visual_anomaly_map.squeeze(1).cpu().numpy()  # [N, grid_h, grid_w]
+            raw_map_np = visual_anomaly_map.detach().squeeze(1).cpu().numpy()  # [N, grid_h, grid_w]
             raw_map_list = [raw_map_np[i] for i in range(raw_map_np.shape[0])]
             return am_img_list, am_pix_list, raw_map_list, textual_anomaly
 
