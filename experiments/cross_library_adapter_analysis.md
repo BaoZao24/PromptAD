@@ -2,6 +2,12 @@
 
 Date: 2026-06-18
 
+> Status: historical pairwise ablation, not the official RF cross-dataset protocol.
+>
+> This document analyzes older `burst_signal/chirp_signal/dsss_signal` pairwise transfer runs inside the project RF dataset family. It should not be used as the main RF cross-library experiment design. The official protocol is documented in `docs/RF跨库实验说明.md`: train on `rf_signal_public_train_smoke/train` derived from `/mnt/data/wangbei/data/RF_SPE_PNG`, and evaluate only on `rf_signal/test` derived from `/mnt/data/wangbei/data/datasets/{burst,chirp,dsss}`.
+>
+> In particular, commands such as `dsss_signal -> burst_signal` are not the correct source/target split for the official RF cross-library experiment.
+
 ## Background
 
 This experiment evaluates whether lightweight adapters can improve RF anomaly detection under cross-library transfer. The key question is whether source-library supervised signals can help PromptAD generalize better to a different target library, without using target abnormal samples during training.

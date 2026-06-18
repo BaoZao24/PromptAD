@@ -43,6 +43,13 @@ from utils.visualization import plot_sample_cv2
 
 TASK = 'CROSS_CLS'
 
+# NOTE:
+# This script implements an older pairwise transfer ablation between project
+# dataset loaders such as burst_signal/chirp_signal/dsss_signal.
+# It is not the official RF cross-dataset protocol described in
+# docs/RF跨库实验说明.md, where training must use rf_signal_public_train
+# and evaluation must use rf_signal/test only.
+
 
 def get_cross_args():
     parser = argparse.ArgumentParser(add_help=False)

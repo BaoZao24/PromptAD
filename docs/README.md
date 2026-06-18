@@ -8,6 +8,7 @@
 - [分数机制说明](分数机制说明.md)
 - [改进记录](improve.md)
 - [Agent handoff brief](agent_handoff_experiment_brief.md)
+- [RF 跨库实验说明](RF跨库实验说明.md)
 - [Score Fusion Adapter 实验方案](score_fusion_adapter_experiment.md)
 
 ## 架构图
