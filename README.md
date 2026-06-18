@@ -83,7 +83,6 @@ Train/test splitting is controlled by `--split-mode`:
 PromptAD/
 ├── train_cls.py              # Single-run image-level training / evaluation (CLS task)
 ├── train_seg.py              # Pixel-level (SEG) training entry
-├── train_cross_cls.py        # Cross-dataset (source→target) training/evaluation
 ├── test_cls.py / test_seg.py # Eval-only (no retraining)
 ├── run_cls.py / run_seg.py   # Legacy batch scripts (mvtec/visa/spectrum/sample)
 ├── run_rf_split_all.py       # MAIN batch script: 3 signals × 4 scenes × 3 JSR × N GPU
@@ -247,7 +246,7 @@ The script:
 2. logs each job to `/tmp/rf_split_<dataset>_<scene>_<noise>_gpu<gid>.log`;
 3. prints a 4×3 `i_roc` summary per dataset once finished.
 
-For cross-dataset (source→target) training use [`train_cross_cls.py`](./train_cross_cls.py); see [`跨库训练.md`](./跨库训练.md) and `experiments/cross_library_adapter_analysis.md`.
+For the RF cross-library adapter plan, see [`docs/PromptAD_adapter_experiment_plan.md`](./docs/PromptAD_adapter_experiment_plan.md). The official PromptAD RF cross-library entrypoint still needs to be implemented.
 
 ---
 
@@ -288,7 +287,7 @@ python plot_scoremap.py --dataset burst_signal --scene Playground_spectrum --noi
 - [`experiments/normal_bg_deviation/`](./experiments/normal_bg_deviation/) — Ablation of `NormalBgDeviationChannels`.
 - [`experiments/vae_fusion/`](./experiments/vae_fusion/) — VAE-fusion branch.
 - [`experiments/failed_directions_summary.md`](./experiments/failed_directions_summary.md) — Summary of directions that did **not** work.
-- [`experiments/cross_library_adapter_analysis.md`](./experiments/cross_library_adapter_analysis.md) — Cross-library adapter architecture analysis.
+- [`docs/PromptAD_adapter_experiment_plan.md`](./docs/PromptAD_adapter_experiment_plan.md) — RF cross-library adapter experiment plan.
 
 > Internal convention: every new method must be compared against the main pipeline (`rf` + `morph_fusion_gray_residual_a01` + `text_only` + `normal_75_25`, seed=111, k=1) and must **not** assume the anomaly type is known at test time.
 

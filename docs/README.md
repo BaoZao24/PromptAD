@@ -8,8 +8,8 @@
 - [分数机制说明](分数机制说明.md)
 - [改进记录](improve.md)
 - [Agent handoff brief](agent_handoff_experiment_brief.md)
-- [RF 跨库实验说明](RF跨库实验说明.md)
-- [Score Fusion Adapter 实验方案](score_fusion_adapter_experiment.md)
+- [PromptAD Adapter 实验计划](PromptAD_adapter_experiment_plan.md)
+- [RF 跨库实验说明（VCP-CLIP 参考协议）](RF跨库实验说明.md)
 
 ## 架构图
 
@@ -24,6 +24,5 @@
 
 ## 实验分析
 
-- [Cross-library adapter analysis](../experiments/cross_library_adapter_analysis.md)
 - [Failed directions summary](../experiments/failed_directions_summary.md)
 - [Huygens literature survey](../experiments/literature_survey_huygens.md)

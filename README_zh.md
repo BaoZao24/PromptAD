@@ -83,7 +83,6 @@ bash install.sh
 PromptAD/
 ├── train_cls.py              # 单次图像级训练 / 评估入口（CLS 任务）
 ├── train_seg.py              # 像素级（SEG）训练入口
-├── train_cross_cls.py        # 跨数据集（source→target）训练评估入口
 ├── test_cls.py / test_seg.py # 仅评估（不重新训练）
 ├── run_cls.py / run_seg.py   # 早期 batch 脚本（mvtec/visa/spectrum/sample）
 ├── run_rf_split_all.py       # 主 batch 脚本：3 信号 × 4 场景 × 3 噪声 × N GPU 并行
@@ -247,7 +246,7 @@ python run_rf_split_all.py --dry-run
 2. 把每个 job 的日志存到 `/tmp/rf_split_<dataset>_<scene>_<noise>_gpu<gid>.log`；
 3. 全部跑完后按 `dataset` 打印 4×3 的 `i_roc` 汇总表。
 
-跨数据集（source→target）训练使用 [`train_cross_cls.py`](./train_cross_cls.py)，参考 [`跨库训练.md`](./跨库训练.md) 与 `experiments/cross_library_adapter_analysis.md`。
+RF 跨库 Adapter 实验计划见 [`docs/PromptAD_adapter_experiment_plan.md`](./docs/PromptAD_adapter_experiment_plan.md)。正式 PromptAD RF 跨库入口还需要后续实现。
 
 ---
 
@@ -288,7 +287,7 @@ python plot_scoremap.py --dataset burst_signal --scene Playground_spectrum --noi
 - [`experiments/normal_bg_deviation/`](./experiments/normal_bg_deviation/) — `NormalBgDeviationChannels` 输入的消融。
 - [`experiments/vae_fusion/`](./experiments/vae_fusion/) — VAE 融合分支记录。
 - [`experiments/failed_directions_summary.md`](./experiments/failed_directions_summary.md) — 已验证不奏效的方向汇总。
-- [`experiments/cross_library_adapter_analysis.md`](./experiments/cross_library_adapter_analysis.md) — 跨库 adapter 架构分析。
+- [`docs/PromptAD_adapter_experiment_plan.md`](./docs/PromptAD_adapter_experiment_plan.md) — RF 跨库 Adapter 实验计划。
 
 > 内部约定：所有新方法都需要在主方案（`rf` + `morph_fusion_gray_residual_a01` + `text_only` + `normal_75_25`，seed=111，k=1）下与原方案对比，不假设测试时已知异常类型。
 
