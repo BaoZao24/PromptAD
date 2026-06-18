@@ -1322,6 +1322,32 @@ class ResidualVisualAdapter(nn.Module):
         return adapted.to(original_dtype)
 
 
+class VisualClassPromptAdapter(nn.Module):
+    def __init__(self, visual_dim, text_dim, token_num=2, bottleneck_ratio=0.25, alpha=0.2):
+        super().__init__()
+        self.token_num = int(token_num)
+        self.text_dim = int(text_dim)
+        self.alpha = float(alpha)
+        hidden_dim = max(1, int(visual_dim * bottleneck_ratio))
+        self.net = nn.Sequential(
+            nn.LayerNorm(visual_dim),
+            nn.Linear(visual_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, self.token_num * self.text_dim),
+        )
+        nn.init.zeros_(self.net[-1].weight)
+        nn.init.zeros_(self.net[-1].bias)
+
+    def forward(self, prototype, dtype=None):
+        if prototype.ndim == 1:
+            prototype = prototype.unsqueeze(0)
+        tokens = self.net(prototype.float()).reshape(prototype.shape[0], self.token_num, self.text_dim)
+        tokens = self.alpha * tokens
+        if dtype is not None:
+            tokens = tokens.to(dtype)
+        return tokens
+
+
 class LearnableScoreFusionHead(nn.Module):
     """A tiny residual head that predicts a correction to the text score."""
 
@@ -1417,7 +1443,9 @@ class PromptLearner(nn.Module):
     #
     # 这里的“可学习 prompt”不是普通英文单词，而是 CLIP 文本 embedding 空间中的可训练向量。
     def __init__(self, n_ctx, n_pro, n_ctx_ab, n_pro_ab, classname, clip_model, pre,
-                 dataset_name=None, prompt_mode="rf", text_prototype_mode="single"):
+                 dataset_name=None, prompt_mode="rf", text_prototype_mode="single",
+                 visual_class_prompt=False, visual_class_token_num=2,
+                 visual_class_prompt_bottleneck_ratio=0.25, visual_class_prompt_alpha=0.2):
         super().__init__()
 
         # 根据 CLIP 精度选择 prompt 向量的数据类型。
@@ -1463,6 +1491,13 @@ class PromptLearner(nn.Module):
         # nn.Parameter 表示这些向量会被 optimizer 更新。
         # 当前训练脚本主要优化 model.prompt_learner.parameters()，
         # 因此 normal_ctx 和 abnormal_ctx 都会参与训练。
+        self.visual_class_prompt = visual_class_prompt
+        self.visual_class_token_num = int(visual_class_token_num)
+        self.visual_class_prompt_bottleneck_ratio = visual_class_prompt_bottleneck_ratio
+        self.visual_class_prompt_alpha = visual_class_prompt_alpha
+        self.visual_class_prompt_adapter = None
+        self.visual_class_prompt_prototype = None
+
         self.normal_ctx = nn.Parameter(normal_ctx_vectors)
         self.abnormal_ctx = nn.Parameter(abnormal_ctx_vectors)
 
@@ -1555,6 +1590,34 @@ class PromptLearner(nn.Module):
         # self.tokenized_abnormal_prompts = tokenized_abnormal_prompts_handle
         # self.name_lens = name_lens
 
+    def set_visual_class_prompt_adapter(self, adapter):
+        object.__setattr__(self, 'visual_class_prompt_adapter', adapter)
+
+    def set_visual_class_prompt_prototype(self, prototype):
+        self.visual_class_prompt_prototype = prototype
+
+    def _get_visual_class_prompt_tokens(self, suffix):
+        if (
+            not self.visual_class_prompt
+            or self.visual_class_prompt_adapter is None
+            or self.visual_class_prompt_prototype is None
+        ):
+            return None
+        prototype = self.visual_class_prompt_prototype.to(device=suffix.device)
+        return self.visual_class_prompt_adapter(prototype, dtype=suffix.dtype)
+
+    def _apply_visual_class_prompt(self, suffix, repeat_count=1):
+        tokens = self._get_visual_class_prompt_tokens(suffix)
+        if tokens is None:
+            return suffix
+        tokens = tokens.expand(suffix.shape[0] // repeat_count, -1, -1)
+        if repeat_count > 1:
+            tokens = tokens.unsqueeze(0).expand(repeat_count, -1, -1, -1).reshape(-1, tokens.shape[1], tokens.shape[2])
+        token_num = min(tokens.shape[1], suffix.shape[1])
+        suffix = suffix.clone()
+        suffix[:, :token_num, :] = suffix[:, :token_num, :] + tokens[:, :token_num, :]
+        return suffix
+
     def forward(self):
 
         # 生成正常 prompt 的 embedding 序列。
@@ -1562,7 +1625,7 @@ class PromptLearner(nn.Module):
         normal_ctx = self.normal_ctx
 
         normal_prefix = self.normal_token_prefix
-        normal_suffix = self.normal_token_suffix
+        normal_suffix = self._apply_visual_class_prompt(self.normal_token_suffix)
 
         normal_prompts = torch.cat(
             [
@@ -1584,7 +1647,10 @@ class PromptLearner(nn.Module):
         normal_ctx1 = normal_ctx.unsqueeze(0).expand(n_ab_handle, -1, -1, -1).reshape(-1, n_ctx, dim)
 
         abnormal_prefix_handle = self.abnormal_token_prefix_handle
-        abnormal_suffix_handle = self.abnormal_token_suffix_handle
+        abnormal_suffix_handle = self._apply_visual_class_prompt(
+            self.abnormal_token_suffix_handle,
+            repeat_count=n_ab_handle,
+        )
 
         abnormal_prompts_handle = torch.cat(
             [
@@ -1599,7 +1665,10 @@ class PromptLearner(nn.Module):
         # 结构为：[SOS] + normal_ctx + abnormal_ctx + [classname + "." + EOS]
         # abnormal_ctx 会通过训练自动学习“异常”的方向。
         abnormal_prefix_learned = self.abnormal_token_prefix_learned
-        abnormal_suffix_learned = self.abnormal_token_suffix_learned
+        abnormal_suffix_learned = self._apply_visual_class_prompt(
+            self.abnormal_token_suffix_learned,
+            repeat_count=self.n_pro_ab,
+        )
         abnormal_ctx = self.abnormal_ctx
         n_pro_ad, n_ctx_ad, dim_ad = abnormal_ctx.shape
 
@@ -1695,6 +1764,10 @@ class PromptAD(torch.nn.Module):
         self.use_visual_adapter = kwargs.get('visual_adapter', False)
         self.adapter_bottleneck_ratio = kwargs.get('adapter_bottleneck_ratio', 0.25)
         self.adapter_alpha = kwargs.get('adapter_alpha', 0.2)
+        self.use_visual_class_prompt = kwargs.get('visual_class_prompt', False)
+        self.visual_class_token_num = kwargs.get('visual_class_token_num', 2)
+        self.visual_class_prompt_bottleneck_ratio = kwargs.get('visual_class_prompt_bottleneck_ratio', 0.25)
+        self.visual_class_prompt_alpha = kwargs.get('visual_class_prompt_alpha', 0.2)
         self.use_visual_lora = kwargs.get('visual_lora', False)
         self.visual_lora_rank = kwargs.get('visual_lora_rank', 4)
         self.visual_lora_alpha = kwargs.get('visual_lora_alpha', 8.0)
@@ -1975,6 +2048,10 @@ class PromptAD(torch.nn.Module):
             dataset_name=self.dataset_name,
             prompt_mode=self.prompt_mode,
             text_prototype_mode=self.text_prototype_mode,
+            visual_class_prompt=self.use_visual_class_prompt,
+            visual_class_token_num=self.visual_class_token_num,
+            visual_class_prompt_bottleneck_ratio=self.visual_class_prompt_bottleneck_ratio,
+            visual_class_prompt_alpha=self.visual_class_prompt_alpha,
         )
         self.model = model.to(self.device)
         self.rn50_model = None
@@ -2007,6 +2084,17 @@ class PromptAD(torch.nn.Module):
                         alpha=self.adapter_alpha,
                     )
             self.visual_adapters = self.visual_adapters.to(self.device)
+
+        self.visual_class_prompt_adapter = None
+        if self.use_visual_class_prompt:
+            self.visual_class_prompt_adapter = VisualClassPromptAdapter(
+                visual_dim=self.model.visual.output_dim,
+                text_dim=self.model.ln_final.weight.shape[0],
+                token_num=self.visual_class_token_num,
+                bottleneck_ratio=self.visual_class_prompt_bottleneck_ratio,
+                alpha=self.visual_class_prompt_alpha,
+            ).to(self.device)
+            self.prompt_learner.set_visual_class_prompt_adapter(self.visual_class_prompt_adapter)
 
         self.score_fusion_head = None
         if self.use_learnable_score_fusion:
@@ -2089,10 +2177,18 @@ class PromptAD(torch.nn.Module):
         self.tokenized_abnormal_prompts_learned = self.prompt_learner.tokenized_abnormal_prompts_learned
         self.tokenized_abnormal_prompts = torch.cat([self.tokenized_abnormal_prompts_handle, self.tokenized_abnormal_prompts_learned], dim=0)
 
+    def set_visual_class_prototype(self, global_features):
+        if self.visual_class_prompt_adapter is None:
+            return
+        prototype = F.normalize(global_features.float(), dim=-1).mean(dim=0, keepdim=True)
+        self.prompt_learner.set_visual_class_prompt_prototype(prototype.detach())
+
     def trainable_parameters(self):
         params = list(self.prompt_learner.parameters())
         if self.visual_adapters is not None:
             params.extend(self.visual_adapters.parameters())
+        if self.visual_class_prompt_adapter is not None:
+            params.extend(self.visual_class_prompt_adapter.parameters())
         if self.score_fusion_head is not None:
             params.extend(self.score_fusion_head.parameters())
         if self.cnn_mamba_local_branch is not None:

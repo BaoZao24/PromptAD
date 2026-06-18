@@ -273,7 +273,7 @@ def save_check_point(model, path):
     state_dict = model.state_dict()
     selected_state_dict = {
         k: v for k, v in state_dict.items()
-        if k in selected_keys or k.startswith('prompt_learner.') or k.startswith('visual_adapters.') or k.startswith('score_fusion_head.') or k.startswith('cnn_mamba_local_branch.') or '.lora_' in k
+        if k in selected_keys or k.startswith('prompt_learner.') or k.startswith('visual_adapters.') or k.startswith('visual_class_prompt_adapter.') or k.startswith('score_fusion_head.') or k.startswith('cnn_mamba_local_branch.') or '.lora_' in k
     }
 
     torch.save(selected_state_dict, path)
@@ -376,6 +376,7 @@ def fit(model,
     features1 = torch.cat(features1, dim=0)
     features2 = torch.cat(features2, dim=0)
     model.build_image_feature_gallery(features1, features2, global_features)
+    model.set_visual_class_prototype(global_features)
     if model.cnn_mamba_local_branch is not None and cnn_mamba_features:
         model.build_cnn_mamba_gallery(torch.cat(cnn_mamba_features, dim=0))
     if model.rn50_model is not None and rn50_features:
@@ -516,6 +517,7 @@ def fit(model,
             features1 = torch.cat(features1, dim=0)
             features2 = torch.cat(features2, dim=0)
             model.build_image_feature_gallery(features1, features2, global_features)
+            model.set_visual_class_prototype(global_features)
 
         if model.cnn_mamba_local_branch is not None:
             print('Rebuilding CNN-Mamba gallery with current local branch...')
@@ -734,6 +736,14 @@ def get_args():
                         help="多视图在线融合规则")
     parser.add_argument("--multiview-fusion-lambda", type=float, default=0.5,
                         help="conservative 融合规则中 aux 提升项的固定权重")
+    parser.add_argument("--visual-class-prompt", type=str2bool, choices=[True, False], default=False,
+                        help="是否启用 VCPA，将正常视觉原型映射成软 class prompt token")
+    parser.add_argument("--visual-class-token-num", type=int, default=2,
+                        help="VCPA 生成的软 class token 数量")
+    parser.add_argument("--visual-class-prompt-bottleneck-ratio", type=float, default=0.25,
+                        help="VCPA 的瓶颈维度比例")
+    parser.add_argument("--visual-class-prompt-alpha", type=float, default=0.2,
+                        help="VCPA 残差分支权重")
     parser.add_argument("--visual-adapter", type=str2bool, choices=[True, False], default=False,
                         help="是否在冻结 CLIP 视觉特征后训练轻量残差 visual adapter")
     parser.add_argument("--adapter-bottleneck-ratio", type=float, default=0.25,
