@@ -201,12 +201,7 @@ def train_one_epoch(model, source_query_loader: DataLoader, args, device: str, e
                 loss = loss + criterion_tip(cls_feature[normal_mask], normal_anchor, abnormal_anchor)
 
         if args.learnable_score_fusion:
-            with torch.no_grad():
-                textual_anomaly = torch.as_tensor(
-                    model.calculate_textual_anomaly_score(visual_features, 'cls'),
-                    device=device,
-                    dtype=visual_features[0].dtype,
-                )
+            textual_anomaly = logits_v2t.softmax(dim=-1)[:, 1]
             visual_anomaly_map = model.calculate_visual_anomaly_score(visual_features)
             fusion_logits = model.calculate_learnable_fusion_logit(textual_anomaly, visual_anomaly_map)
             loss = loss + args.learnable_score_fusion_lambda * criterion_bce(fusion_logits.view(-1), label.float())
@@ -268,7 +263,16 @@ def evaluate_target(model, target_test_loader: DataLoader, args, device: str, ep
 
 def fit_cross(model, args, source_gallery_loader, source_query_loader, target_gallery_loader,
               target_test_loader, device, check_path, csv_path, img_dir, score_path):
-    optimizer = torch.optim.SGD(model.trainable_parameters(), lr=args.lr, momentum=args.momentum,
+    parameter_groups = model.trainable_parameter_groups(
+        base_lr=args.lr,
+        prompt_lr=args.prompt_lr,
+        visual_adapter_lr=args.visual_adapter_lr,
+        visual_class_prompt_lr=args.visual_class_prompt_lr,
+        score_fusion_lr=args.score_fusion_lr,
+        cnn_mamba_lr=args.cnn_mamba_lr,
+        visual_lora_lr=args.visual_lora_lr,
+    )
+    optimizer = torch.optim.SGD(parameter_groups, lr=args.lr, momentum=args.momentum,
                                 weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.Epoch, eta_min=1e-5)
     train_one_epoch.optimizer = optimizer

@@ -1304,8 +1304,19 @@ class DSSSCLAHEChannels:
 
 
 class ResidualVisualAdapter(nn.Module):
+    """残差式视觉特征 adapter（对应 --visual-adapter）。
+
+    设计目的：
+    冻结 CLIP 主干以后，仅训练一个轻量瓶颈 MLP，把视觉特征加上一个小幅度的残差修正：
+        adapted = feature + alpha * MLP(feature)
+
+    最后一层权重和 bias 初始化为 0，因此训练初期 adapter 输出近似于恒等映射，
+    保证早期不会破坏 CLIP 自带的视觉表征，再随梯度逐步学习与频谱任务对齐的修正项。
+    """
+
     def __init__(self, dim, bottleneck_ratio=0.25, alpha=0.2):
         super().__init__()
+        # 瓶颈维度：dim * bottleneck_ratio，控制 adapter 容量，默认 1/4。
         hidden_dim = max(1, int(dim * bottleneck_ratio))
         self.alpha = alpha
         self.net = nn.Sequential(
@@ -1313,22 +1324,35 @@ class ResidualVisualAdapter(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim, dim),
         )
+        # 把最后一层置零 → adapter 初始为零映射，等价于不影响原 CLIP 特征。
         nn.init.zeros_(self.net[-1].weight)
         nn.init.zeros_(self.net[-1].bias)
 
     def forward(self, feature):
+        # CLIP 默认 fp16，但 adapter 为了数值稳定使用 fp32 运算，最后再转回原 dtype。
         original_dtype = feature.dtype
         adapted = feature.float() + self.alpha * self.net(feature.float())
         return adapted.to(original_dtype)
 
 
 class VisualClassPromptAdapter(nn.Module):
+    """VCPA：把正常视觉原型映射成软 class prompt token（对应 --visual-class-prompt）。
+
+    PromptAD 原始 prompt 中的“class name”是固定的英文单词（例如 "Playground_spectrum"），
+    它对 RF 频谱任务并不天然合适。VCPA 的做法是：
+        正常视觉原型 (visual_dim) -> bottleneck MLP -> token_num × text_dim 的软 token
+    然后把这些软 token 拼接到 prompt 的 class name 位置，让“类别词”也能被视觉信号驱动。
+
+    最后一层权重置零，初始时输出全 0，软 token 不会扰动现有 prompt，再逐渐学习。
+    """
+
     def __init__(self, visual_dim, text_dim, token_num=2, bottleneck_ratio=0.25, alpha=0.2):
         super().__init__()
         self.token_num = int(token_num)
         self.text_dim = int(text_dim)
         self.alpha = float(alpha)
         hidden_dim = max(1, int(visual_dim * bottleneck_ratio))
+        # LayerNorm 让正常原型的尺度稳定，再走瓶颈 MLP 投到文本 embedding 维度。
         self.net = nn.Sequential(
             nn.LayerNorm(visual_dim),
             nn.Linear(visual_dim, hidden_dim),
@@ -1339,9 +1363,12 @@ class VisualClassPromptAdapter(nn.Module):
         nn.init.zeros_(self.net[-1].bias)
 
     def forward(self, prototype, dtype=None):
+        # prototype 形状 (P, visual_dim)；P 为正常原型数（默认 1，diverse 模式下 >1）。
         if prototype.ndim == 1:
             prototype = prototype.unsqueeze(0)
+        # 投影输出 reshape 成 (P, token_num, text_dim)，作为 prompt 的软 class token。
         tokens = self.net(prototype.float()).reshape(prototype.shape[0], self.token_num, self.text_dim)
+        # alpha 控制 VCPA 注入到 prompt 的强度。
         tokens = self.alpha * tokens
         if dtype is not None:
             tokens = tokens.to(dtype)
@@ -1349,7 +1376,15 @@ class VisualClassPromptAdapter(nn.Module):
 
 
 class LearnableScoreFusionHead(nn.Module):
-    """A tiny residual head that predicts a correction to the text score."""
+    """轻量可学习融合头（对应 --learnable-score-fusion）。
+
+    输入是 4 个标量统计量（textual 分数 + visual top-k mean / max / gap），
+    输出一个对 textual 分数的残差 logit 修正：
+        final_logit = logit(textual) + alpha * Head(features)
+
+    最后一层置零 → 训练初期不改变 textual 分数；之后 BCE 监督使头部学到把
+    textual 不显著但视觉显著的图像往“异常”侧推。
+    """
 
     def __init__(self, input_dim=4, hidden_dim=4):
         super().__init__()
@@ -1367,16 +1402,28 @@ class LearnableScoreFusionHead(nn.Module):
 
 
 class TinyMambaFusionBlock(nn.Module):
-    """Lightweight Mamba-inspired token mixer implemented locally."""
+    """Mamba 风格的轻量 token mixer（CNN-Mamba 局部分支组件）。
+
+    本地实现的极简 Mamba 风：
+        x -> LayerNorm -> 双路投影 (u, v)
+        u 走 depthwise conv1d 在 token 维度做长程上下文聚合
+        融合：u * sigmoid(v) （门控）
+        out_proj -> 残差相加
+
+    out_proj 权重置零，整块初始时近似恒等映射，叠多层不会破坏前面 CNN encoder 的特征。
+    """
 
     def __init__(self, dim, expansion=2, kernel_size=3, dropout=0.0):
         super().__init__()
         inner_dim = max(1, int(dim * expansion))
         kernel_size = max(1, int(kernel_size))
+        # depthwise conv1d 需要奇数 kernel 才能保证 same-padding。
         if kernel_size % 2 == 0:
             kernel_size += 1
         self.norm = nn.LayerNorm(dim)
+        # 把 dim 投到 2 * inner_dim，再 chunk 成 (u, v)，u 走卷积、v 做门控。
         self.in_proj = nn.Linear(dim, inner_dim * 2)
+        # depthwise：每个通道一个独立 1D conv，参数量 = inner_dim * kernel_size。
         self.dwconv = nn.Conv1d(inner_dim, inner_dim, kernel_size, padding=kernel_size // 2, groups=inner_dim)
         self.out_proj = nn.Linear(inner_dim, dim)
         self.dropout = nn.Dropout(dropout) if dropout > 0 else nn.Identity()
@@ -1387,17 +1434,26 @@ class TinyMambaFusionBlock(nn.Module):
         residual = x
         x = self.norm(x)
         u, v = self.in_proj(x).chunk(2, dim=-1)
+        # Conv1d 期望 (B, C, L)，所以先转置再做完卷积转回 (B, L, C)。
         u = self.dwconv(u.transpose(1, 2)).transpose(1, 2)
         u = F.gelu(u)
+        # u 提供局部上下文；sigmoid(v) 提供门控权重。
         x = self.out_proj(self.dropout(u * torch.sigmoid(v)))
         return residual + x
 
 
 class TinyCNNPatchEncoder(nn.Module):
+    """3 层 CNN，把原始图像编码成 grid_size × grid_size 的 patch token 序列。
+
+    最后通过 AdaptiveAvgPool2d 强制下采样到目标网格大小，
+    保证输出 token 数和 ViT 主干的 patch 网格一致，可以直接对齐分数图。
+    """
+
     def __init__(self, dim, grid_size):
         super().__init__()
         hidden1 = max(32, dim // 2)
         hidden2 = max(32, dim)
+        # stem：两次下采样 + 三次卷积，输出通道数与 ViT 特征维度对齐。
         self.stem = nn.Sequential(
             nn.Conv2d(3, hidden1, kernel_size=3, padding=1),
             nn.GroupNorm(1, hidden1),
@@ -1409,19 +1465,31 @@ class TinyCNNPatchEncoder(nn.Module):
             nn.GroupNorm(1, dim),
             nn.GELU(),
         )
+        # 自适应池化到目标 grid，使不同输入分辨率最终都得到同样数量的 token。
         self.pool = nn.AdaptiveAvgPool2d(grid_size)
 
     def forward(self, image):
         feat = self.stem(image.float())
+        # (B, C, H, W) -> (B, H*W, C)，与 transformer token 序列布局一致。
         tokens = self.pool(feat).flatten(2).transpose(1, 2)
         return tokens
 
 
 class CNNMambaLocalBranch(nn.Module):
+    """CNN + ViT + Mamba 混合的局部异常分支（对应 --cnn-vit-mamba-fusion）。
+
+    流程：image → TinyCNNPatchEncoder → 多层 TinyMambaFusionBlock → LayerNorm → L2 归一化。
+
+    输出 token 用于：
+    1. 与正常样本的 cnn_mamba_gallery 做最近邻距离 → 局部异常 patch map / image score；
+    2. 训练阶段聚合后与 CLIP-ViT 全局特征做对齐损失（cnn_mamba_align_lambda）。
+    """
+
     def __init__(self, dim, grid_size, num_blocks=1, dropout=0.0):
         super().__init__()
         self.grid_size = tuple(grid_size)
         self.cnn_encoder = TinyCNNPatchEncoder(dim=dim, grid_size=self.grid_size)
+        # 多层 Mamba block 串联，扩大 token 之间的有效感受野。
         self.mamba_blocks = nn.ModuleList([
             TinyMambaFusionBlock(dim=dim, dropout=dropout)
             for _ in range(max(1, int(num_blocks)))
@@ -1432,6 +1500,7 @@ class CNNMambaLocalBranch(nn.Module):
         tokens = self.cnn_encoder(image)
         for block in self.mamba_blocks:
             tokens = block(tokens)
+        # 输出统一 L2 归一化，之后与 gallery 做余弦相似度等价于内积。
         return F.normalize(self.out_norm(tokens), dim=-1)
 
 
@@ -1604,7 +1673,10 @@ class PromptLearner(nn.Module):
         ):
             return None
         prototype = self.visual_class_prompt_prototype.to(device=suffix.device)
-        return self.visual_class_prompt_adapter(prototype, dtype=suffix.dtype)
+        tokens = self.visual_class_prompt_adapter(prototype, dtype=suffix.dtype)
+        if tokens.shape[0] > 1:
+            tokens = tokens.mean(dim=0, keepdim=True)
+        return tokens
 
     def _apply_visual_class_prompt(self, suffix, repeat_count=1):
         tokens = self._get_visual_class_prompt_tokens(suffix)
@@ -1768,6 +1840,8 @@ class PromptAD(torch.nn.Module):
         self.visual_class_token_num = kwargs.get('visual_class_token_num', 2)
         self.visual_class_prompt_bottleneck_ratio = kwargs.get('visual_class_prompt_bottleneck_ratio', 0.25)
         self.visual_class_prompt_alpha = kwargs.get('visual_class_prompt_alpha', 0.2)
+        self.visual_class_prototype_mode = kwargs.get('visual_class_prototype_mode', 'mean')
+        self.visual_class_prototype_num = kwargs.get('visual_class_prototype_num', 1)
         self.use_visual_lora = kwargs.get('visual_lora', False)
         self.visual_lora_rank = kwargs.get('visual_lora_rank', 4)
         self.visual_lora_alpha = kwargs.get('visual_lora_alpha', 8.0)
@@ -2178,12 +2252,49 @@ class PromptAD(torch.nn.Module):
         self.tokenized_abnormal_prompts = torch.cat([self.tokenized_abnormal_prompts_handle, self.tokenized_abnormal_prompts_learned], dim=0)
 
     def set_visual_class_prototype(self, global_features):
+        # 给 VCPA 准备“正常视觉原型”。
+        # 来源：所有正常训练样本的 cls_feature（已归一化）。
+        # 两种模式：
+        # - mean：直接平均成一个原型，等价于正常类别中心；
+        # - diverse：farthest-point sampling 选 prototype_num 个互相远离的正常样本，
+        #   保留场景内多样性，避免单一中心丢掉子分布信息。
         if self.visual_class_prompt_adapter is None:
             return
-        prototype = F.normalize(global_features.float(), dim=-1).mean(dim=0, keepdim=True)
+        normal_features = F.normalize(global_features.float(), dim=-1)
+        mode = self.visual_class_prototype_mode
+        prototype_num = max(1, int(self.visual_class_prototype_num))
+        if mode == 'mean' or prototype_num == 1 or normal_features.shape[0] == 1:
+            # 正常样本只有一张或显式要求 mean → 直接平均。
+            prototype = normal_features.mean(dim=0, keepdim=True)
+        elif mode == 'diverse':
+            # diverse：贪心 farthest-point sampling。
+            k = min(prototype_num, normal_features.shape[0])
+            # 第一个原型选离全体均值最近的样本（相对“典型”的正常样本）。
+            center = F.normalize(normal_features.mean(dim=0, keepdim=True), dim=-1)
+            first_idx = (1.0 - normal_features @ center.t()).argmin()
+            selected = [int(first_idx.item())]
+            # min_dist[i] = 当前已选集合中样本到 i 的最小余弦距离。
+            min_dist = 1.0 - normal_features @ normal_features[first_idx:first_idx + 1].t()
+            min_dist = min_dist.squeeze(1)
+            for _ in range(1, k):
+                # 已选样本距离自己置 -1，避免重复选中。
+                min_dist[selected] = -1.0
+                # 选取离已选集合最远的样本。
+                next_idx = min_dist.argmax()
+                selected.append(int(next_idx.item()))
+                # 更新到所有已选样本的最小距离。
+                dist_to_next = 1.0 - normal_features @ normal_features[next_idx:next_idx + 1].t()
+                min_dist = torch.minimum(min_dist, dist_to_next.squeeze(1))
+            prototype = normal_features[selected]
+        else:
+            raise ValueError(f'Unsupported visual_class_prototype_mode: {mode}')
+        # 把原型交给 PromptLearner，由 PromptLearner.forward() 时通过 VCPA 注入软 class token。
         self.prompt_learner.set_visual_class_prompt_prototype(prototype.detach())
 
     def trainable_parameters(self):
+        # 收集所有需要梯度更新的参数。
+        # 注意：CLIP 主干（model.visual / model.transformer）默认不在内，因此处于冻结状态；
+        # 仅 PromptLearner 与各个可选 adapter 模块参与训练。
         params = list(self.prompt_learner.parameters())
         if self.visual_adapters is not None:
             params.extend(self.visual_adapters.parameters())
@@ -2194,13 +2305,49 @@ class PromptAD(torch.nn.Module):
         if self.cnn_mamba_local_branch is not None:
             params.extend(self.cnn_mamba_local_branch.parameters())
         if self.use_visual_lora:
+            # LoRA：CLIP 视觉 transformer attention 中名字含 'lora_' 的低秩矩阵。
+            # 主干其它参数仍冻结。
             params.extend(
                 p for name, p in self.model.visual.named_parameters()
                 if 'lora_' in name and p.requires_grad
             )
         return params
 
+    def trainable_parameter_groups(self, base_lr, prompt_lr=None, visual_adapter_lr=None,
+                                   visual_class_prompt_lr=None, score_fusion_lr=None,
+                                   cnn_mamba_lr=None, visual_lora_lr=None):
+        # 给优化器按模块切分参数组，便于为不同模块设置不同学习率。
+        # 任意 *_lr 为 None 时，该组使用 base_lr。
+        groups = []
+
+        def add_group(params, lr):
+            params = list(params)
+            if params:
+                groups.append({'params': params, 'lr': base_lr if lr is None else lr})
+
+        add_group(self.prompt_learner.parameters(), prompt_lr)
+        if self.visual_adapters is not None:
+            add_group(self.visual_adapters.parameters(), visual_adapter_lr)
+        if self.visual_class_prompt_adapter is not None:
+            add_group(self.visual_class_prompt_adapter.parameters(), visual_class_prompt_lr)
+        if self.score_fusion_head is not None:
+            add_group(self.score_fusion_head.parameters(), score_fusion_lr)
+        if self.cnn_mamba_local_branch is not None:
+            add_group(self.cnn_mamba_local_branch.parameters(), cnn_mamba_lr)
+        if self.use_visual_lora:
+            add_group(
+                (p for name, p in self.model.visual.named_parameters() if 'lora_' in name and p.requires_grad),
+                visual_lora_lr,
+            )
+        return groups
+
     def build_learnable_fusion_features(self, textual_anomaly, visual_anomaly_map):
+        # 为可学习融合头构造 4 维输入特征：
+        # 1) textual_anomaly：CLIP 文本分支给出的图像级异常分数；
+        # 2) mean_topk：visual anomaly map 中 top-k patch 的均值（视觉显著程度）；
+        # 3) max_score：visual anomaly map 的最大值（最尖锐的异常 patch 强度）；
+        # 4) gap = max - mean_topk：分数“尖锐度”，越大说明只有少量 patch 被点亮。
+        # 这 4 个标量信息互补：让融合头判断“文本和视觉是否一致地认为异常”。
         patch_scores = visual_anomaly_map.squeeze(1)
         n, h, w = patch_scores.shape
         flat_scores = patch_scores.reshape(n, -1)
@@ -2212,6 +2359,9 @@ class PromptAD(torch.nn.Module):
         return torch.stack([textual_anomaly, mean_topk, max_score, gap], dim=-1)
 
     def calculate_learnable_fusion_logit(self, textual_anomaly, visual_anomaly_map):
+        # 在 textual 分数的 logit 上做残差校正：
+        #   final_logit = logit(textual_anomaly) + alpha * Head(features)
+        # 用 sigmoid 还原成 [0,1] 概率作为图像级最终分数。
         if self.score_fusion_head is None:
             raise RuntimeError('calculate_learnable_fusion_logit requires --learnable-score-fusion True')
         head_device = next(self.score_fusion_head.parameters()).device
@@ -2222,17 +2372,31 @@ class PromptAD(torch.nn.Module):
         visual_anomaly_map = visual_anomaly_map.to(head_device)
         features = self.build_learnable_fusion_features(textual_anomaly, visual_anomaly_map)
         delta = self.score_fusion_head(features).squeeze(-1)
+        # logit 在 textual 端做残差，避免 textual_anomaly 已经接近 0/1 时数值溢出。
         base_logit = torch.logit(textual_anomaly.clamp(1e-4, 1.0 - 1e-4))
         return base_logit + float(self.learnable_score_fusion_alpha) * delta
 
     def encode_rn50_image(self, image):
+        # ── RN50 视觉分支（对应 --rn50-visual-fusion） ──────────────────────────
+        # 结构：冻结的 CLIP-RN50 + memory-bank 距离打分。
+        # 与 ViT 主干互补：RN50 的局部归纳偏置不同，能在主干失误的样本上提供独立证据。
+        #
+        # 子函数分工：
+        #   encode_rn50_image     : 取 RN50 全局 embedding（已 L2 归一化）
+        #   encode_rn50_local     : 取 RN50 layer4 局部 token map（未做 attention pool）
+        #   build_rn50_gallery    : 用全部正常样本特征构建距离 gallery
+        #   calculate_rn50_global_score / local_score / guided_vit_score : 三种打分模式
+        # ───────────────────────────────────────────────────────────────────
         if self.rn50_model is None:
             raise RuntimeError('encode_rn50_image requires --rn50-visual-fusion True')
+        # CLIP-RN50 训练分辨率 224，做线性插值统一尺寸。
         image = F.interpolate(image.float(), size=(224, 224), mode='bilinear', align_corners=False)
         if self.precision == 'fp16':
             image = image.half()
+        # RN50 主干完全冻结，仅推理。
         with torch.no_grad():
             rn50_features = self.rn50_model.encode_image(image)
+        # OpenCLIP 不同版本返回值结构不一，这里统一压成 (B, dim) 张量。
         if isinstance(rn50_features, (list, tuple)):
             if len(rn50_features) == 1 and rn50_features[0].dim() == 2:
                 rn50_features = rn50_features[0]
@@ -2243,6 +2407,8 @@ class PromptAD(torch.nn.Module):
         return F.normalize(rn50_features, dim=-1)
 
     def encode_rn50_local(self, image):
+        # 直接取 layer4 的空间特征图（不经过 attention pool），
+        # reshape 成 (B, num_patch, dim) 的 token 序列，用于 local_topk / guided_vit 模式。
         if self.rn50_model is None:
             raise RuntimeError('encode_rn50_local requires --rn50-visual-fusion True')
         image = F.interpolate(image.float(), size=(224, 224), mode='bilinear', align_corners=False)
@@ -2259,11 +2425,14 @@ class PromptAD(torch.nn.Module):
         return F.normalize(tokens, dim=-1)
 
     def build_rn50_gallery(self, rn50_features, rn50_local_features=None):
+        # 把所有正常样本的 RN50 特征拼成 memory bank。
+        # 测试时计算 1 - cosine 距离的最小值作为异常分数（PatchCore 风格）。
         gallery = F.normalize(rn50_features, dim=-1)
         if self.rn50_gallery.shape[0] != gallery.shape[0] or self.rn50_gallery.shape[1] != gallery.shape[1]:
             self.rn50_gallery = gallery.new_zeros(gallery.shape)
         self.rn50_gallery.copy_(gallery.to(self.rn50_gallery.dtype))
         if rn50_local_features is not None:
+            # 局部 token gallery：所有正常样本的 patch 全部拉平，便于 patch 级最近邻搜索。
             b, n, d = rn50_local_features.shape
             local_gallery = F.normalize(rn50_local_features.reshape(-1, d), dim=-1)
             if (self.rn50_local_gallery.shape[0] != local_gallery.shape[0]
@@ -2272,11 +2441,13 @@ class PromptAD(torch.nn.Module):
             self.rn50_local_gallery.copy_(local_gallery.to(self.rn50_local_gallery.dtype))
 
     def calculate_rn50_global_score(self, image):
+        # 全局打分：测试图 RN50 embedding 到正常 gallery 的最近余弦距离。
         rn50_features = self.encode_rn50_image(image)
         score, _ = (1.0 - rn50_features @ self.rn50_gallery.t()).min(dim=-1)
-        return score / 2.0
+        return score / 2.0  # 缩放到大致 [0, 1] 区间。
 
     def calculate_rn50_local_map(self, image):
+        # 局部 patch 距离图：每个 RN50 patch 找最近的正常 patch，得到 (B, 1, side, side) 的距离图。
         local_features = self.encode_rn50_local(image)
         score, _ = (1.0 - local_features @ self.rn50_local_gallery.t()).min(dim=-1)
         score = score / 2.0
@@ -2284,32 +2455,40 @@ class PromptAD(torch.nn.Module):
         return score.reshape((image.shape[0], side, side)).unsqueeze(1)
 
     def calculate_rn50_local_score(self, image):
+        # 取 patch 距离图 top-k 均值作为图像级 RN50 分数。
         local_map = self.calculate_rn50_local_map(image)
         flat = local_map.flatten(1)
         topk = max(1, int(flat.shape[1] * float(self.rn50_local_topk_ratio)))
         return torch.topk(flat, k=topk, dim=1).values.mean(dim=1)
 
     def calculate_rn50_guided_vit_score(self, image, visual_anomaly_map):
+        # guided_vit 模式：用 RN50 的局部异常图当 attention 权重，对 ViT 的 patch map 做加权聚合。
+        # 思路：RN50 作为“注意力路标”，把 ViT 已经计算好的更细致的 patch 分数集中到高响应区域。
         rn50_map = self.calculate_rn50_local_map(image).to(
             device=visual_anomaly_map.device,
             dtype=visual_anomaly_map.dtype,
         )
+        # 上采样到 ViT patch map 的网格。
         rn50_map = F.interpolate(
             rn50_map,
             size=visual_anomaly_map.shape[-2:],
             mode='bilinear',
             align_corners=False,
         )
+        # 减去最小值 + 归一化到 [0,1]，再走 softmax 形成 attention 权重。
         weights = rn50_map.flatten(1).float()
         weights = weights - weights.amin(dim=1, keepdim=True)
         scale = weights.amax(dim=1, keepdim=True).clamp_min(1e-6)
         weights = weights / scale
+        # 温度越小越集中关注高分 patch。
         temperature = max(1e-4, float(self.rn50_guidance_temperature))
         weights = torch.softmax(weights / temperature, dim=1).to(visual_anomaly_map.dtype)
         vit_scores = visual_anomaly_map.flatten(1)
+        # 加权求和：RN50 高响应位置贡献的 ViT 分数权重大。
         return (weights * vit_scores).sum(dim=1)
 
     def calculate_rn50_visual_score(self, image):
+        # 按 --rn50-score-mode 分发到 global / local_topk / both。
         if self.rn50_score_mode == 'global':
             return self.calculate_rn50_global_score(image)
         if self.rn50_score_mode == 'local_topk':
@@ -2319,17 +2498,25 @@ class PromptAD(torch.nn.Module):
         raise ValueError(f'Unknown rn50_score_mode: {self.rn50_score_mode}')
 
     def encode_cnn_mamba_local(self, image):
+        # ── CNN-Mamba 局部分支（对应 --cnn-vit-mamba-fusion） ──────────────────
+        # 结构：可训练 CNN encoder + 多层 Mamba block。
+        # 与冻结的 RN50 不同，这里参数参与训练，可被 cnn_mamba_align 损失驱动向 ViT 全局特征对齐。
+        # 输出已 L2 归一化的 token 序列 (B, N, dim)。
+        # ───────────────────────────────────────────────────────────────────
         if self.cnn_mamba_local_branch is None:
             raise RuntimeError('encode_cnn_mamba_local requires --cnn-vit-mamba-fusion True')
         return self.cnn_mamba_local_branch(image)
 
     def build_cnn_mamba_gallery(self, cnn_mamba_features):
+        # 同时维护 patch 级 gallery 和 image 级 gallery，分别支持 patch-NN 和聚合后图像分数。
         b, n, d = cnn_mamba_features.shape
+        # patch 级：所有正常样本的所有 patch 拉平。
         gallery = F.normalize(cnn_mamba_features.reshape(-1, d), dim=-1)
         if self.cnn_mamba_gallery.shape[0] != gallery.shape[0] or self.cnn_mamba_gallery.shape[1] != gallery.shape[1]:
             self.cnn_mamba_gallery = gallery.new_zeros(gallery.shape)
         self.cnn_mamba_gallery.copy_(gallery.to(self.cnn_mamba_gallery.dtype))
 
+        # 全局级：每张图的 token 平均，再做 L2 归一化。
         global_gallery = F.normalize(cnn_mamba_features.mean(dim=1), dim=-1)
         if (self.cnn_mamba_global_gallery.shape[0] != global_gallery.shape[0]
                 or self.cnn_mamba_global_gallery.shape[1] != global_gallery.shape[1]):
@@ -2337,6 +2524,10 @@ class PromptAD(torch.nn.Module):
         self.cnn_mamba_global_gallery.copy_(global_gallery.to(self.cnn_mamba_global_gallery.dtype))
 
     def aggregate_cnn_mamba_by_anomaly(self, local_features, patch_score):
+        # 关注高异常 patch 的加权聚合：
+        # 1. 只保留 patch_score 排名前 topk 比例的 token，其余 mask 成 -∞；
+        # 2. softmax 形成权重（温度越小越集中），与 token 加权求和。
+        # 这样得到的“图像特征”聚焦于异常区域，而非整张图均值，便于和 cnn_mamba_global_gallery 比较。
         b, n, _ = local_features.shape
         ratio = min(1.0, max(1.0 / float(n), float(self.cnn_mamba_pool_topk_ratio)))
         topk = max(1, int(n * ratio))
@@ -2350,6 +2541,10 @@ class PromptAD(torch.nn.Module):
         return F.normalize(pooled, dim=-1), weights
 
     def calculate_cnn_mamba_local_score(self, image):
+        # CNN-Mamba 分支的两个输出：
+        # 1) patch_map：每个 patch 到 cnn_mamba_gallery 的最近距离图，可与 ViT patch map 融合；
+        # 2) image_score：先按 patch_map 做异常加权聚合得到 pooled 特征，
+        #                 再到 cnn_mamba_global_gallery 找最近距离作为图像级分数。
         local_features = self.encode_cnn_mamba_local(image)
         score, _ = (1.0 - local_features @ self.cnn_mamba_gallery.t()).min(dim=-1)
         score = score / 2.0
@@ -2360,6 +2555,10 @@ class PromptAD(torch.nn.Module):
         return image_score, patch_map
 
     def _adapt_visual_features(self, image_features):
+        # 把每路视觉特征通过对应维度的 ResidualVisualAdapter。
+        # CLIP encode_image 返回多路特征（cls / token / 两路 patch map），
+        # 不同路维度不一定相同，因此 visual_adapters 是一个按 dim 索引的 ModuleDict。
+        # 没有匹配 adapter 的路直接保持不变。
         if self.visual_adapters is None:
             return image_features
         adapted_features = []
@@ -2487,6 +2686,11 @@ class PromptAD(torch.nn.Module):
             self.build_global_normal_distribution(global_features)
 
     def build_global_normal_distribution(self, global_features):
+        # 把所有正常样本的全局特征拟合成一个对角高斯：
+        # - normal_global_mean   : 各维度均值（未归一化）；
+        # - normal_global_center : 均值再 L2 归一化，便于与单位向量做余弦距离；
+        # - normal_global_var    : 各维度方差，clamp 到 ridge 之上避免除零。
+        # 用于 cls_score_mode = normal_center / normal_mahalanobis 等模式。
         normal_features = F.normalize(global_features.float(), dim=-1)
         mean = normal_features.mean(dim=0)
         center = F.normalize(mean, dim=0)
@@ -2627,6 +2831,9 @@ class PromptAD(torch.nn.Module):
         return score.reshape((N, self.grid_size[0], self.grid_size[1])).unsqueeze(1)
 
     def calculate_normal_distribution_score(self, visual_features, mode):
+        # 基于正常分布的图像级异常分数。
+        # mode = 'center'      ：到正常类别中心的余弦距离；
+        # mode = 'mahalanobis' ：标准化后的简化马氏距离（对角协方差）。
         global_feature = F.normalize(visual_features[0].float(), dim=-1)
         if mode == 'center':
             center = F.normalize(self.normal_global_center.float(), dim=0)
@@ -2640,6 +2847,12 @@ class PromptAD(torch.nn.Module):
         return score.detach().cpu().numpy()
 
     def aggregate_visual_image_score(self, visual_anomaly_map):
+        # 把视觉 patch 异常图聚合成图像级 visual 分数。
+        # 关键步骤：
+        # 1. flatten 后取 top-k 个最高 patch 的均值（mean_topk），抑制极端单点噪声；
+        # 2. 也保留全图最大值 max_score，给 visual_topk_max / visual_topk_freq 模式用。
+        # 频率位置加权（visual_freq_position_weight）：
+        #   把频率轴 |y - 0.5| 当成位置先验，强调远离中心频率的位置（边带异常）。
         patch_scores = visual_anomaly_map.squeeze(1)
         n, h, w = patch_scores.shape
         flat_scores = patch_scores.reshape(n, -1)
@@ -2650,6 +2863,7 @@ class PromptAD(torch.nn.Module):
         max_score = flat_scores.max(dim=1).values
 
         if self.visual_freq_position_weight > 0:
+            # 频率位置先验：离 0.5（中心频率）越远权重越大。
             freq_axis = torch.linspace(0.0, 1.0, steps=h, device=patch_scores.device, dtype=patch_scores.dtype)
             freq_weights = 1.0 + self.visual_freq_position_weight * (freq_axis - 0.5).abs() * 2.0
             weighted_map = patch_scores * freq_weights.view(1, h, 1)
@@ -2658,6 +2872,7 @@ class PromptAD(torch.nn.Module):
             mean_topk = weighted_topk.mean(dim=1)
             max_score = weighted_flat.max(dim=1).values
 
+        # 模式选择：单纯 top-k 还是 top-k + max 加权。
         if self.cls_score_mode == 'visual_topk':
             visual_score = mean_topk
         elif self.cls_score_mode == 'visual_topk_max':
@@ -2668,11 +2883,20 @@ class PromptAD(torch.nn.Module):
         return visual_score.detach().cpu().numpy()
 
     def fuse_cls_scores(self, textual_anomaly, visual_anomaly_map, visual_features=None):
+        # 图像级最终分数融合的总入口（不包括 RN50 / CNN-Mamba / 可学习融合头三种特殊路径，
+        # 那三种在 score_cached 中独立处理）。
+        # 各 cls_score_mode 行为：
+        #   text_only                : 直接返回文本异常分数（主方案）；
+        #   normal_center / mahala.. : 仅用正常分布距离作为分数；
+        #   text_normal_*            : α·文本 + β·正常分布距离；
+        #   visual_topk              : α·文本 + β·visual top-k 均值；
+        #   visual_topk_max / freq   : α·文本 + β·top-k + γ·max。
         if self.cls_score_mode == 'text_only':
             return textual_anomaly
 
         if self.cls_score_mode in {'normal_center', 'normal_mahalanobis', 'text_normal_center', 'text_normal_mahalanobis'}:
             if visual_features is None:
+                # 没有视觉特征（缓存路径未传）时回退到文本分数。
                 return textual_anomaly
             dist_mode = 'center' if 'center' in self.cls_score_mode else 'mahalanobis'
             normal_score = self.calculate_normal_distribution_score(visual_features, dist_mode)
@@ -2680,12 +2904,14 @@ class PromptAD(torch.nn.Module):
                 return self.visual_score_alpha * textual_anomaly + self.visual_score_beta * normal_score
             return normal_score
 
+        # 其余模式都基于 visual top-k 聚合。
         visual_score = self.aggregate_visual_image_score(visual_anomaly_map)
 
         if self.cls_score_mode == 'visual_topk':
             return self.visual_score_alpha * textual_anomaly + self.visual_score_beta * visual_score
 
         if self.cls_score_mode in {'visual_topk_max', 'visual_topk_freq'}:
+            # 这里直接重新算一遍 max（aggregate_visual_image_score 内部已用过，但只返回 top-k 聚合）。
             max_score = visual_anomaly_map.squeeze(1).reshape(visual_anomaly_map.shape[0], -1).max(dim=1).values
             max_score = max_score.detach().cpu().numpy()
             return (

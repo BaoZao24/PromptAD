@@ -409,7 +409,16 @@ def fit(model,
             })
         # ─────────────────────────────────────────────────────────────────────────────
 
-    optimizer = torch.optim.SGD(model.trainable_parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+    parameter_groups = model.trainable_parameter_groups(
+        base_lr=args.lr,
+        prompt_lr=args.prompt_lr,
+        visual_adapter_lr=args.visual_adapter_lr,
+        visual_class_prompt_lr=args.visual_class_prompt_lr,
+        score_fusion_lr=args.score_fusion_lr,
+        cnn_mamba_lr=args.cnn_mamba_lr,
+        visual_lora_lr=args.visual_lora_lr,
+    )
+    optimizer = torch.optim.SGD(parameter_groups, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.Epoch, eta_min=1e-5)
     criterion = nn.CrossEntropyLoss().to(device)
     criterion_tip = TripletLoss(margin=0.0)
@@ -481,12 +490,7 @@ def fit(model,
                 loss = loss + args.cnn_mamba_align_lambda * loss_cnn_align
 
             if args.learnable_score_fusion:
-                with torch.no_grad():
-                    textual_anomaly = torch.as_tensor(
-                        model.calculate_textual_anomaly_score(visual_features, 'cls'),
-                        device=device,
-                        dtype=visual_features[0].dtype,
-                    )
+                textual_anomaly = 1.0 - logits_v2t.softmax(dim=-1)[:, 0]
                 visual_anomaly_map = model.calculate_visual_anomaly_score(visual_features)
                 fusion_logits = model.calculate_learnable_fusion_logit(textual_anomaly, visual_anomaly_map)
                 fusion_targets = label.float().to(device).view(-1)
@@ -744,6 +748,11 @@ def get_args():
                         help="VCPA 的瓶颈维度比例")
     parser.add_argument("--visual-class-prompt-alpha", type=float, default=0.2,
                         help="VCPA 残差分支权重")
+    parser.add_argument("--visual-class-prototype-mode", type=str, default="mean",
+                        choices=["mean", "diverse"],
+                        help="VCPA 使用的正常视觉原型构造方式：mean 为单均值；diverse 为从正常特征中选多个多样原型")
+    parser.add_argument("--visual-class-prototype-num", type=int, default=1,
+                        help="visual-class-prototype-mode=diverse 时使用的正常原型数量")
     parser.add_argument("--visual-adapter", type=str2bool, choices=[True, False], default=False,
                         help="是否在冻结 CLIP 视觉特征后训练轻量残差 visual adapter")
     parser.add_argument("--adapter-bottleneck-ratio", type=float, default=0.25,
@@ -800,6 +809,18 @@ def get_args():
                         help="CNN+ViT+Mamba token mixer 堆叠层数")
     parser.add_argument("--cnn-vit-mamba-dropout", type=float, default=0.0,
                         help="CNN+ViT+Mamba token mixer dropout")
+    parser.add_argument("--prompt-lr", type=float, default=None,
+                        help="prompt learner 的单独学习率；默认使用 --lr")
+    parser.add_argument("--visual-class-prompt-lr", type=float, default=None,
+                        help="VCPA 的单独学习率；默认使用 --lr")
+    parser.add_argument("--visual-adapter-lr", type=float, default=None,
+                        help="visual adapter 的单独学习率；默认使用 --lr")
+    parser.add_argument("--score-fusion-lr", type=float, default=None,
+                        help="score_img 融合头的单独学习率；默认使用 --lr")
+    parser.add_argument("--cnn-mamba-lr", type=float, default=None,
+                        help="CNN-Mamba 分支的单独学习率；默认使用 --lr")
+    parser.add_argument("--visual-lora-lr", type=float, default=None,
+                        help="visual LoRA 的单独学习率；默认使用 --lr")
     parser.add_argument("--split-mode", type=str, default="legacy", choices=["legacy", "normal_75_25"],
                         help="legacy 使用原始 few-shot 切分；normal_75_25 使用 3/4 normal 训练、1/4 normal 测试")
     parser.add_argument("--normal-train-ratio", type=float, default=0.75,
