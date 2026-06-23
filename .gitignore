@@ -108,3 +108,6 @@ analysis_outputs/*
 !analysis_outputs/ppt_assets/*.png
 archive_results/2026_06_01_workspace_cleanup/
 
+# Third-party reference repositories cloned for code reading
+# (See docs/research/clip_fsad_survey_2023_2026.md for the list)
+references/

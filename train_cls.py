@@ -273,7 +273,7 @@ def save_check_point(model, path):
     state_dict = model.state_dict()
     selected_state_dict = {
         k: v for k, v in state_dict.items()
-        if k in selected_keys or k.startswith('prompt_learner.') or k.startswith('visual_adapters.') or k.startswith('visual_class_prompt_adapter.') or k.startswith('score_fusion_head.') or k.startswith('cnn_mamba_local_branch.') or '.lora_' in k
+        if k in selected_keys or k.startswith('prompt_learner.') or k.startswith('visual_adapters.') or k.startswith('visual_class_prompt_adapter.') or k.startswith('score_fusion_head.') or k.startswith('dense_mask_head.') or k.startswith('cnn_mamba_local_branch.') or '.lora_' in k
     }
 
     torch.save(selected_state_dict, path)
@@ -666,7 +666,7 @@ def str2bool(v):
 
 def get_args():
     parser = argparse.ArgumentParser(description='Anomaly detection')
-    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa', 'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal', 'wideband_pulse', 'wideband_pulse_png', 'rf_spe_png'])
+    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa', 'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal', 'wideband_pulse', 'wideband_pulse_png', 'rf_spe_png', 'rf_public_pooled_smoke', 'rf_target_test_pool'])
     parser.add_argument('--class_name', type=str, default='carpet')
 
     parser.add_argument('--img-resize', type=int, default=240)
@@ -713,7 +713,8 @@ def get_args():
                         help="morph_fusion*、morph_fusion_balanced、morph_fusion_gray_resgrad、morph_fusion_gray_contrast_resgrad、morph_fusion_gray_resenergy 与 morph_fusion_gray_resband 为通用多视图融合输入；signal_adaptive 对 burst/chirp 使用频谱梯度、对 dsss 使用 RGB；signal_adaptive_v2 对 dsss 使用 weak residual；log_power 使用灰度 log-power 压缩")
     parser.add_argument("--cls-score-mode", type=str, default="text_only",
                         choices=["text_only", "visual_topk", "visual_topk_max", "visual_topk_freq",
-                                 "normal_center", "normal_mahalanobis", "text_normal_center", "text_normal_mahalanobis"],
+                                 "normal_center", "normal_mahalanobis", "text_normal_center", "text_normal_mahalanobis",
+                                 "dense_only", "dense_fusion", "dense_map_only"],
                         help="图像级分数融合方式")
     parser.add_argument("--visual-topk-ratio", type=float, default=0.05,
                         help="visual patch score 聚合时使用的 top-k 比例")

@@ -273,19 +273,14 @@ python plot_scoremap.py --dataset burst_signal --scene Playground_spectrum --noi
 `tools/` also hosts numerous offline analysis scripts (PR curves, feature-map exporters, ablation plots). The most-used ones:
 
 - `tools/export_morph_fusion_featuremaps.py` — input feature comparison for the morph_fusion family;
-- `tools/run_full_band_analysis.py` — full-band PR analysis;
 - `tools/plot_rf_ablation_heatmap.py` — RF ablation heatmap;
-- `tools/extract_normal_maps.py` — sample anomaly maps on normal patches;
-- `tools/vae_fusion_experiment.py` — offline VAE-fusion experiment.
+- `tools/extract_normal_maps.py` — sample anomaly maps on normal patches.
 
 ---
 
 ## 9. Recorded Experiments
 
 - [`experiments/baseline_redefinition/`](./experiments/baseline_redefinition/) — Original PromptAD (`legacy` prompt + RGB) vs. the current RF pipeline; clarifies that "RGB baseline ≠ original PromptAD".
-- [`experiments/band_aware_scoring/`](./experiments/band_aware_scoring/) — Band-aware patch scoring.
-- [`experiments/normal_bg_deviation/`](./experiments/normal_bg_deviation/) — Ablation of `NormalBgDeviationChannels`.
-- [`experiments/vae_fusion/`](./experiments/vae_fusion/) — VAE-fusion branch.
 - [`experiments/failed_directions_summary.md`](./experiments/failed_directions_summary.md) — Summary of directions that did **not** work.
 - [`docs/PromptAD_adapter_experiment_plan.md`](./docs/PromptAD_adapter_experiment_plan.md) — RF cross-library adapter experiment plan.
 

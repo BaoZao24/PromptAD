@@ -1,3 +1,31 @@
+"""PromptAD 的核心模型文件。
+
+> 通俗导读：见 `docs/model_walkthrough.md`，第一次读这份文件强烈建议先看那份。
+
+文件章节地图（按行号粗略给出，最好结合代码当前实际位置看）：
+
+  §1  约   1– 36 : 顶部导入 + CLIP 归一化常量
+  §2  约  38–1304: 一堆 `*Channels` 类。每个类把"灰度频谱图"按一种规则
+                   变成 3 通道张量，给 CLIP 当 RGB 输入用。主方案是
+                   `MorphFusionGrayResidualChannels`。
+  §3  约 1306–1538: 可学习的轻量小模块——CLIP 主干冻结时只训练它们。
+                   ResidualVisualAdapter / VisualClassPromptAdapter /
+                   LearnableScoreFusionHead / DenseMaskHead /
+                   TinyMambaFusionBlock + TinyCNNPatchEncoder +
+                   CNNMambaLocalBranch。每个模块最后一层都置零，初始
+                   输出为 0，相当于"训练初期不影响 CLIP"。
+  §4  约 1541– …: 核心两个类。
+                   - PromptLearner: 生成"正常 / 异常"两类 prompt embedding。
+                     里面的 normal_ctx 和 abnormal_ctx 是这份代码真正训练
+                     的两组可学习向量。
+                   - PromptAD:     把 CLIP + PromptLearner + 各种 gallery
+                     缓存装在一起；forward/score_cached 出最终异常分数。
+
+两条打分主腿（在 PromptAD 里）：
+  文本腿 → calculate_textual_anomaly_score : 图像特征和文本原型比相似度
+  视觉腿 → calculate_visual_anomaly_score  : 每个 patch 去正常 gallery 找最近邻
+"""
+
 import torch
 import random
 import torch.nn as nn
@@ -36,6 +64,8 @@ def _convert_to_rgb(image):
 
 
 class SpectrogramGradientChannels:
+    """灰度 + 时间方向梯度 + 频率方向梯度。最早期的频谱 → 3 通道方案。"""
+
     def __init__(self):
         self.to_tensor = transforms.ToTensor()
 
@@ -151,6 +181,8 @@ class GradMagnitudeOnlyChannels:
 
 
 class MorphFusionChannels:
+    """灰度 + 梯度幅值 + 弱残差。最早把"边缘特征 + 偏离背景"组合到一起的方案。"""
+
     def __init__(self, sigma=1.0, percentile=0.995, alpha=0.2):
         self.sigma = sigma
         self.percentile = percentile
@@ -551,6 +583,13 @@ class MorphFusionGaborDirectionalResidualChannels:
 
 
 class MorphFusionGrayResidualChannels:
+    """🌟 当前主方案：CLAHE 对比度增强灰度 + 弱残差(alpha=0.1) + 原始灰度。
+
+    对应 ``input_mode=morph_fusion_gray_residual_a01``。
+    思路：CLAHE 把暗弱信号拉亮，残差凸显偏离背景的位置，再补一通道原始灰度
+    保住未失真的能量信息。
+    """
+
     def __init__(self, alpha=0.1, clahe_clip_limit=2.0, clahe_tile_grid_size=8):
         self.alpha = alpha
         self.to_tensor = transforms.ToTensor()
@@ -1401,6 +1440,40 @@ class LearnableScoreFusionHead(nn.Module):
         return self.net(x)
 
 
+class DenseMaskHead(nn.Module):
+    """Small pixel-supervised head over frozen CLIP patch tokens.
+
+    This is the first implementation step for RF cross-library dense mask
+    supervision. It keeps the existing PromptAD branches intact and learns two
+    patch-level anomaly maps from the two CLIP patch feature streams.
+    """
+
+    def __init__(self, dim1, dim2, hidden_ratio=0.25):
+        super().__init__()
+
+        def make_head(dim):
+            hidden_dim = max(32, int(dim * hidden_ratio))
+            return nn.Sequential(
+                nn.LayerNorm(dim),
+                nn.Linear(dim, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, 1),
+            )
+
+        self.raw_head = make_head(dim1)
+        self.post_head = make_head(dim2)
+
+    def forward(self, feature_map1, feature_map2, grid_size):
+        b, _, _ = feature_map1.shape
+        h, w = grid_size
+        head_dtype = self.raw_head[0].weight.dtype
+        feature_map1 = feature_map1.to(dtype=head_dtype)
+        feature_map2 = feature_map2.to(dtype=head_dtype)
+        raw_logits = self.raw_head(feature_map1).transpose(1, 2).reshape(b, 1, h, w)
+        post_logits = self.post_head(feature_map2).transpose(1, 2).reshape(b, 1, h, w)
+        return raw_logits.float(), post_logits.float()
+
+
 class TinyMambaFusionBlock(nn.Module):
     """Mamba 风格的轻量 token mixer（CNN-Mamba 局部分支组件）。
 
@@ -1813,6 +1886,9 @@ class PromptAD(torch.nn.Module):
         self.visual_freq_position_weight = kwargs.get('visual_freq_position_weight', 0.0)
         self.normal_dist_ridge = kwargs.get('normal_dist_ridge', 1e-4)
         self.use_learnable_score_fusion = kwargs.get('learnable_score_fusion', False)
+        self.use_dense_mask_branch = kwargs.get('dense_mask_branch', False)
+        self.dense_mask_hidden_ratio = kwargs.get('dense_mask_hidden_ratio', 0.25)
+        self.dense_mask_score_alpha = kwargs.get('dense_mask_score_alpha', 1.0)
         self.use_cnn_vit_mamba_fusion = kwargs.get('cnn_vit_mamba_fusion', False)
         self.use_rn50_visual_fusion = kwargs.get('rn50_visual_fusion', False)
         self.rn50_pretrained = kwargs.get('rn50_pretrained', 'openai')
@@ -2177,6 +2253,14 @@ class PromptAD(torch.nn.Module):
                 hidden_dim=self.learnable_score_fusion_hidden_dim,
             ).to(self.device)
 
+        self.dense_mask_head = None
+        if self.use_dense_mask_branch:
+            self.dense_mask_head = DenseMaskHead(
+                dim1=self.model.visual.embed_dim,
+                dim2=self.model.visual.embed_dim,
+                hidden_ratio=self.dense_mask_hidden_ratio,
+            ).to(self.device)
+
         self.tokenizer = tokenizer
         self.normal_text_features = None
         self.abnormal_text_features = None
@@ -2302,6 +2386,8 @@ class PromptAD(torch.nn.Module):
             params.extend(self.visual_class_prompt_adapter.parameters())
         if self.score_fusion_head is not None:
             params.extend(self.score_fusion_head.parameters())
+        if self.dense_mask_head is not None:
+            params.extend(self.dense_mask_head.parameters())
         if self.cnn_mamba_local_branch is not None:
             params.extend(self.cnn_mamba_local_branch.parameters())
         if self.use_visual_lora:
@@ -2315,7 +2401,8 @@ class PromptAD(torch.nn.Module):
 
     def trainable_parameter_groups(self, base_lr, prompt_lr=None, visual_adapter_lr=None,
                                    visual_class_prompt_lr=None, score_fusion_lr=None,
-                                   cnn_mamba_lr=None, visual_lora_lr=None):
+                                   cnn_mamba_lr=None, visual_lora_lr=None,
+                                   dense_mask_lr=None):
         # 给优化器按模块切分参数组，便于为不同模块设置不同学习率。
         # 任意 *_lr 为 None 时，该组使用 base_lr。
         groups = []
@@ -2332,6 +2419,8 @@ class PromptAD(torch.nn.Module):
             add_group(self.visual_class_prompt_adapter.parameters(), visual_class_prompt_lr)
         if self.score_fusion_head is not None:
             add_group(self.score_fusion_head.parameters(), score_fusion_lr)
+        if self.dense_mask_head is not None:
+            add_group(self.dense_mask_head.parameters(), dense_mask_lr)
         if self.cnn_mamba_local_branch is not None:
             add_group(self.cnn_mamba_local_branch.parameters(), cnn_mamba_lr)
         if self.use_visual_lora:
@@ -2830,6 +2919,19 @@ class PromptAD(torch.nn.Module):
         # (N, grid_h * grid_w) -> (N, 1, grid_h, grid_w)
         return score.reshape((N, self.grid_size[0], self.grid_size[1])).unsqueeze(1)
 
+    def calculate_dense_mask_logits(self, visual_features):
+        if self.dense_mask_head is None:
+            raise RuntimeError('calculate_dense_mask_logits requires --dense-mask-branch True')
+        return self.dense_mask_head(visual_features[2], visual_features[3], self.grid_size)
+
+    def calculate_dense_mask_score(self, visual_features):
+        raw_logits, post_logits = self.calculate_dense_mask_logits(visual_features)
+        dense_map = 0.5 * (torch.sigmoid(raw_logits) + torch.sigmoid(post_logits))
+        flat = dense_map.flatten(1)
+        topk = max(1, int(flat.shape[1] * self.visual_topk_ratio))
+        image_score = torch.topk(flat, k=topk, dim=1).values.mean(dim=1)
+        return image_score, dense_map
+
     def calculate_normal_distribution_score(self, visual_features, mode):
         # 基于正常分布的图像级异常分数。
         # mode = 'center'      ：到正常类别中心的余弦距离；
@@ -2931,14 +3033,27 @@ class PromptAD(torch.nn.Module):
         if task != 'cls':
             raise ValueError(f"score_cached only supports 'cls', got {task!r}")
 
-        # cls 的图像级分数来自文本异常分数。
+        # cls 的图像级分数先按原 PromptAD 路径计算。
         textual_anomaly = self.calculate_textual_anomaly_score(visual_features, 'cls')
 
-        # 视觉分支仍然会生成 patch 级异常图，用于 score map / 可视化。
-        # 注意：当前 cls 的 Image-AUROC 主要使用 textual_anomaly，
-        # 没有把 visual_anomaly_map 聚合后与 textual_anomaly 加权求和。
+        # 原视觉分支生成 patch 级异常图，用于 score map / 可视化 / 原有 score fusion。
         visual_anomaly_map = self.calculate_visual_anomaly_score(visual_features)
-        image_scores = np.asarray(textual_anomaly, dtype=np.float32)
+        image_scores = np.asarray(
+            self.fuse_cls_scores(textual_anomaly, visual_anomaly_map, visual_features),
+            dtype=np.float32,
+        )
+        if self.dense_mask_head is not None:
+            dense_image_score, dense_map = self.calculate_dense_mask_score(visual_features)
+            dense_image_score_np = dense_image_score.detach().cpu().numpy()
+            if self.cls_score_mode == 'dense_only':
+                image_scores = dense_image_score_np
+                visual_anomaly_map = dense_map.to(visual_anomaly_map.device, dtype=visual_anomaly_map.dtype)
+            elif self.cls_score_mode == 'dense_fusion':
+                image_scores = image_scores + float(self.dense_mask_score_alpha) * dense_image_score_np
+                visual_anomaly_map = dense_map.to(visual_anomaly_map.device, dtype=visual_anomaly_map.dtype)
+            elif self.cls_score_mode == 'dense_map_only':
+                # Keep the original PromptAD image score, but use the VCP/dense map for pixel metrics.
+                visual_anomaly_map = dense_map.to(visual_anomaly_map.device, dtype=visual_anomaly_map.dtype)
         if self.rn50_model is not None:
             if image is None:
                 raise ValueError('score_cached requires image tensors when --rn50-visual-fusion is enabled')
@@ -2958,8 +3073,6 @@ class PromptAD(torch.nn.Module):
             textual_anomaly_t = torch.as_tensor(textual_anomaly, device=visual_anomaly_map.device, dtype=visual_anomaly_map.dtype)
             image_scores = torch.sigmoid(self.calculate_learnable_fusion_logit(textual_anomaly_t, visual_anomaly_map))
             image_scores = image_scores.detach().cpu().numpy()
-        elif self.rn50_model is None:
-            image_scores = self.fuse_cls_scores(textual_anomaly, visual_anomaly_map, visual_features)
         anomaly_map = F.interpolate(visual_anomaly_map, size=(self.out_size_h, self.out_size_w),
                                     mode='bilinear', align_corners=False)
 

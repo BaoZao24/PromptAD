@@ -1,206 +1,181 @@
-# PromptAD RF 跨库 Adapter 实验计划
+# PromptAD RF 跨库 Dense Mask Supervision 实验计划
 
-本文档只描述 **PromptAD 仓库中后续要实现的正式 RF 跨库实验**。全程按下面的数据流定义实验：公开 RF_SPE_PNG 作为 source 训练库，项目 RF 数据作为 target 测试库，不引入其他项目的训练入口或提示学习参数。
+本文档替代旧的 A-F score-fusion / VCPA adapter 消融计划。当前主线是在 PromptAD 上新增
+**dense mask supervision** 分支，并按“public source 监督训练 + target 正常样本适配 + target test
+评估”的协议做跨库实验。
 
-## 1. 这个“跨库”到底怎么跨
+## 1. 这次跨库到底怎么跨
 
-这里的跨库不是 `burst -> chirp`、`dsss -> burst` 这种同一项目内部信号类型互转。
-
-正式 RF 跨库指的是两个数据来源不同的数据集之间迁移：
+正式协议固定为：
 
 ```text
-源库 source library:
+source 训练库:
   /mnt/data/wangbei/data/RF_SPE_PNG
-  公开 RF 频谱数据集
-  用于训练
+  public RF source normal + abnormal + mask
+  用途: 训练 dense mask 分支，让模型学异常区域长什么样。
 
-目标库 target library:
+target 适配库:
   /mnt/data/wangbei/data/datasets/{burst, chirp, dsss}
-  项目原始 RF 数据集
-  只用于测试
+  project RF target train normal only
+  用途: 建 target-domain 正常特征库，也就是 PromptAD 原本需要的正常 gallery。
+
+target 测试库:
+  /mnt/data/wangbei/data/datasets/{burst, chirp, dsss}
+  project RF target test normal + abnormal + mask
+  用途: 最终评估 image AUROC / pixel AUROC / pixel AP。
 ```
 
-也就是固定做：
+这不是单库作弊，因为：
 
 ```text
-训练：公开 RF_SPE_PNG
-测试：项目原始 RF 数据集
+不会使用 target train abnormal
+不会使用 target train mask
+不会使用 target test 参与训练或建库
+target train normal 只用于正常库/normal adaptation
 ```
 
-这才是“跨库”。它检验的是：在公开 RF 数据上学到的 prompt / adapter，能不能泛化到项目原始 RF 数据。
-
-具体评估对象是三个 target test：
+也就是说，方法不是 `public source -> target test` 的纯 zero-shot，也不是
+`target dsss train abnormal -> target dsss test` 的单库监督训练，而是：
 
 ```text
-RF_SPE_PNG train -> burst test
-RF_SPE_PNG train -> chirp test
-RF_SPE_PNG train -> dsss test
+source 学异常形态
+target train normal 学目标域正常背景
+target test 检验是否能在目标域发现异常
 ```
 
-这里 source 始终是 `RF_SPE_PNG`，target 始终只取项目数据的 `test` split。
+## 2. 当前架构
 
-## 2. 正确的数据 split
-
-源库 meta 文件：
+PromptAD 主干保留，新增一个 source-mask-supervised dense 分支：
 
 ```text
-dataset/rf_signal_public_train_smoke/meta_rf_signal_public_train.json
+source/target spectrogram
+  -> CLIP visual encoder
+  -> multi-layer patch tokens
+       ├─ Existing PromptAD branch
+       │    -> text/image anomaly score
+       │    -> target train normal gallery
+       └─ New Dense Mask Branch
+            -> raw dense map
+            -> post dense map
+            -> BCE + Dice mask supervision on public source masks
+  -> final anomaly map / score
 ```
 
-只使用：
+架构图：
 
 ```text
-meta["train"]
+analysis_outputs/dense_mask_supervision_architecture/promptad_dense_mask_supervision_architecture.png
 ```
 
-目标库由：
+## 3. 已实施代码
+
+新增/修改：
+
+- `PromptAD/model.py`
+  - 新增 `DenseMaskHead`
+  - 新增 `dense_mask_branch` 开关
+  - 新增 `calculate_dense_mask_logits`
+  - 新增 `calculate_dense_mask_score`
+  - `score_cached` 在开启 dense 分支时可使用 dense map 作为像素图和图像分数
+
+- `train_rf_public_to_target_dense.py`
+  - 当前唯一正式 dense 跨库入口
+  - source 读取 `rf_public_pooled_smoke`
+  - target 读取 `rf_target_test_pool`
+  - 训练 dense 分支时只用 public source mask
+  - 评估每个 target 类别和 JSR 前，先用对应 target train normal 建正常 gallery
+  - dense loss = BCEWithLogits + Dice
+  - source mask 下采样使用 adaptive max-pooling，避免小异常区域在 15x15 patch 网格中被 nearest 采样丢掉
+
+- `datasets/rf_public_pooled_smoke.py`
+  - public source pooled loader
+  - train split: public normal gallery
+  - test split: public normal + abnormal + mask，用作 dense 监督训练 query
+
+- `datasets/rf_target_test_pool.py`
+  - project target pooled loader
+  - train split: target train normal only，用于 normal adaptation
+  - test split: target test normal + abnormal + mask，用于最终评估
+
+- `datasets/dataset.py`
+  - GT 兼容解析
+  - 旧 mask：yellow anomaly
+  - 新 mask：white-on-black binary anomaly
+
+旧 score-only/cross-only 入口已移除，正式实验只保留 dense 入口。
+
+## 4. Smoke 验证
+
+这个命令只验证代码链路，不作为正式效果：
+
+```bash
+python train_rf_public_to_target_dense.py \
+  --method-tag dense_adapt_smoke \
+  --cross-root-dir analysis_outputs/promptad_rf_cross_public_dense_adapt_smoke \
+  --results-csv analysis_outputs/promptad_rf_cross_public_dense_adapt_smoke/results.csv \
+  --source-noise-level m10db --eval-jsrs m10db \
+  --pool-classes burst,dsss --target-classes dsss \
+  --max-normal-per-class 2 --max-abnormal-per-class 2 \
+  --Epoch 1 --batch-size 16 --gpu-id 0 --seed 111 \
+  --prompt-mode rf --input-mode morph_fusion_gray_residual_a01 \
+  --cls-score-mode text_only --vis False \
+  --dense-lr 0.001 \
+  --results-notes smoke_tiny_source_target_normal_adapt_not_for_quality
+```
+
+说明：
 
 ```text
-dataset/rf_signal/meta_rf_signal.json
+source 每类只有 2 normal + 2 abnormal，不能用于论文结论。
+target train normal 会被读取，但只用于建正常 gallery。
+target test 才参与评估。
 ```
 
-只使用：
+## 5. 正式实验建议
+
+### 5.1 Universal dense source + target normal adaptation
+
+```bash
+python train_rf_public_to_target_dense.py \
+  --method-tag dense_adapt_universal_A \
+  --cross-root-dir analysis_outputs/promptad_rf_cross_public_dense_adapt \
+  --results-csv analysis_outputs/promptad_rf_cross_public_dense_adapt/results.csv \
+  --source-noise-level m10db --eval-jsrs m10db,m20db,m30db \
+  --pool-classes burst,chirp,dsss --target-classes burst,chirp,dsss \
+  --max-normal-per-class 300 --max-abnormal-per-class 300 \
+  --Epoch 50 --batch-size 64 --gpu-id 0 --seed 111 \
+  --prompt-mode rf --input-mode morph_fusion_gray_residual_a01 \
+  --cls-score-mode text_only --vis False \
+  --dense-lr 0.001 \
+  --results-notes dense_public_source_supervision_target_train_normal_gallery
+```
+
+评估粒度：
 
 ```text
-meta["test"]
+burst/chirp/dsss 分开报
+m10db/m20db/m30db 分开报
+avg 行表示同一类别跨 JSR 宏平均
+class=all, jsr=avg 表示所有类别 × 所有 JSR 的总宏平均
 ```
 
-目标域的：
+checkpoint 保存规则：
 
 ```text
-meta["train"]
+每个异常类型保存一个 best checkpoint:
+  按该类型跨 JSR 平均 image ROC 选 best epoch
+
+额外保存一个 all overall-best checkpoint:
+  按所有类型 × 所有 JSR 的总平均 image ROC 选 best epoch
 ```
 
-不参与训练，也不用于建 gallery。目标异常样本更不能参与训练。
+## 6. 当前不做的方向
 
-完整数据流是：
+以下方向已经移出正式主线：
 
-```text
-RF_SPE_PNG public train split
-  -> 训练 PromptAD 的 prompt / VCPA / visual adapter / score_img fusion head
-
-rf_signal test split
-  -> 只做最终评估
-```
-
-## 3. 当前 PromptAD 还缺什么
-
-当前 PromptAD 已经有这些模型模块：
-
-- `VCPA`
-- `visual adapter`
-- `score_img fusion head`
-- 分模块学习率
-
-但当前 PromptAD 还没有正式 RF 跨库所需的数据入口：
-
-1. 读取 `rf_signal_public_train_smoke/meta_rf_signal_public_train.json` 的 source loader；
-2. 读取 `rf_signal/meta_rf_signal.json` 且只使用 `test` split 的 target loader；
-3. 一个不读取 target train、不构造 target gallery 的正式跨库训练入口。
-
-所以当前状态是：
-
-```text
-模型模块：已有
-正式 RF 跨库数据入口：未完成
-正式 RF 跨库实验：暂不能直接跑
-```
-
-## 4. 实验边界
-
-PromptAD 的 RF 跨库实验只使用 PromptAD 自己的模型模块、数据 loader 和训练入口。其他仓库的训练命令、参数体系和实验脚本不能直接写进本文档，也不能作为 PromptAD 的可运行命令。
-
-## 5. 需要新增的 PromptAD 跨库入口
-
-建议新增一个明确的入口，例如：
-
-```text
-train_rf_public_to_target_cls.py
-```
-
-它必须满足：
-
-```text
-source_train = rf_signal_public_train_smoke/meta["train"]
-target_test  = rf_signal/meta["test"]
-```
-
-它不能做：
-
-```text
-target_train gallery
-target_train validation
-target abnormal training
-burst/chirp/dsss 互相作为 source-target
-```
-
-## 6. 正式实验的 ablation
-
-等 PromptAD 的正式跨库入口实现后，再跑以下消融：
-
-| ID | VCPA | Prototype | Visual adapter | Fusion head | 目的 |
-|---|---|---|---|---|---|
-| A | 否 | - | 否 | 否 | 跨库 baseline |
-| B | 否 | - | 否 | 是 | 验证 `score_img` 融合头 |
-| C | 是 | mean | 否 | 是 | 验证 VCPA 单均值原型 |
-| D | 是 | diverse-4 | 否 | 是 | 验证多正常原型 |
-| E | 是 | diverse-4 | 是 | 是 | 验证 visual adapter 是否通过 final score 起作用 |
-| F | 是 | diverse-4 | 是 | 是 + 分模块 lr | 验证学习率细分 |
-
-所有实验都必须使用同一个跨库数据流：
-
-```text
-train = RF_SPE_PNG public train
-test  = project rf_signal test
-```
-
-## 7. 指标记录
-
-正式结果至少记录：
-
-- overall pixel-level 指标；
-- overall sample/image-level 指标；
-- burst / chirp / dsss 三类分项；
-- checkpoint path；
-- seed；
-- method ID；
-- 是否开启 VCPA / visual adapter / fusion head；
-- 关键超参。
-
-建议结果表：
-
-```text
-analysis_outputs/promptad_rf_cross_public_adapter/results.csv
-```
-
-字段：
-
-```text
-method,seed,checkpoint,overall_px,overall_sp,burst_px,chirp_px,dsss_px,burst_sp,chirp_sp,dsss_sp,notes
-```
-
-## 8. 判断标准
-
-推进标准：
-
-- B 相比 A 提升或至少不下降，说明融合头值得保留；
-- C/D 相比 B 提升，说明 VCPA 正常原型有价值；
-- E 相比 D 提升，说明 visual adapter 在 final score 路径中有效；
-- F 相比 E 提升，说明分模块学习率有价值。
-
-回滚标准：
-
-- B 明显低于 A：融合头过强或训练不稳定；
-- D 不如 C：多正常原型引入噪声；
-- E 不如 D：visual adapter 过强或过拟合源库；
-- 三类分项只提升某一类且牺牲其他类：不能作为主方法。
-
-## 9. 下一步开发任务
-
-下一步是补齐 PromptAD 正式 RF 跨库入口：
-
-1. 实现 public source meta loader；
-2. 实现 target test meta loader；
-3. 新增正式训练入口；
-4. 确认训练全程不读取目标域 train split；
-5. 再运行 A-F 消融。
+- 使用 target abnormal/mask 的监督训练
+- public source 训练后直接评估 target test 的纯 cross-only 路径
+- 项目内信号类型互转的 pairwise 训练
+- VAE reconstruction fusion
+- 手工压制正常信号 / local variance / frequency z-score
+- A-F score-fusion adapter 消融

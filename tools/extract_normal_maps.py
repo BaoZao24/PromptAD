@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Extract normal visual maps for band-aware calibration."""
+"""Extract normal visual anomaly maps for offline diagnostics."""
 import os, sys
 sys.path.insert(0, '.')
 import torch, numpy as np
@@ -59,6 +59,8 @@ with torch.no_grad():
         vm = model.calculate_visual_anomaly_score(vf)
         all_maps.append(vm.cpu().numpy())
 maps = np.concatenate(all_maps, axis=0)
-base = os.path.basename(DS).replace('_signal', '')
-np.save(f'experiments/band_aware_scoring/normal_maps_{DS}_Playground_m30db.npy', maps)
-print(f'{DS}: {maps.shape[0]} normal maps saved.')
+out_dir = 'analysis_outputs/normal_maps'
+os.makedirs(out_dir, exist_ok=True)
+out_path = os.path.join(out_dir, f'normal_maps_{DS}_Playground_m30db.npy')
+np.save(out_path, maps)
+print(f'{DS}: {maps.shape[0]} normal maps saved to {out_path}.')

@@ -273,19 +273,14 @@ python plot_scoremap.py --dataset burst_signal --scene Playground_spectrum --noi
 `tools/` 下还有大量离线分析脚本（PR 曲线、特征图导出、消融对比等），常用的有：
 
 - `tools/export_morph_fusion_featuremaps.py` — morph_fusion 系列的输入特征对比；
-- `tools/run_full_band_analysis.py` — 全频带 PR 分析；
 - `tools/plot_rf_ablation_heatmap.py` — RF 消融热力图；
-- `tools/extract_normal_maps.py` — 正常样本的 anomaly map 抽样；
-- `tools/vae_fusion_experiment.py` — VAE 融合分支离线实验。
+- `tools/extract_normal_maps.py` — 正常样本的 anomaly map 抽样。
 
 ---
 
 ## 9. 实验沉淀
 
 - [`experiments/baseline_redefinition/`](./experiments/baseline_redefinition/) — Original PromptAD（`legacy` prompt + RGB）vs 当前 RF 方案；澄清“RGB baseline ≠ original PromptAD”。
-- [`experiments/band_aware_scoring/`](./experiments/band_aware_scoring/) — 频带感知的 patch 分数实验。
-- [`experiments/normal_bg_deviation/`](./experiments/normal_bg_deviation/) — `NormalBgDeviationChannels` 输入的消融。
-- [`experiments/vae_fusion/`](./experiments/vae_fusion/) — VAE 融合分支记录。
 - [`experiments/failed_directions_summary.md`](./experiments/failed_directions_summary.md) — 已验证不奏效的方向汇总。
 - [`docs/PromptAD_adapter_experiment_plan.md`](./docs/PromptAD_adapter_experiment_plan.md) — RF 跨库 Adapter 实验计划。
 
