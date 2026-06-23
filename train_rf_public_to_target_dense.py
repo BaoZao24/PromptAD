@@ -83,9 +83,17 @@ def parse_args():
     parser.add_argument('--dense-bce-weight', type=float, default=1.0)
     parser.add_argument('--dense-dice-weight', type=float, default=1.0)
     parser.add_argument('--dense-score-alpha', type=float, default=0.05)
+    parser.add_argument('--text-aligned-dense', type=str2bool, choices=[True, False], default=False,
+                        help='启用 APRIL-GAN 风格 visual->text 投影 dense 分支; ta_* eval mode 会自动启用')
+    parser.add_argument('--ta-lr', type=float, default=1e-3)
+    parser.add_argument('--ta-loss-weight', type=float, default=1.0)
+    parser.add_argument('--ta-image-loss-weight', type=float, default=0.1)
+    parser.add_argument('--ta-score-beta', type=float, default=1.0,
+                        help='ta_topk 中 text-aligned top-k image score 的融合权重')
     parser.add_argument('--dense-eval-mode', type=str, default='dense_fusion',
-                        choices=['dense_fusion', 'dense_only', 'dense_map_only', 'text_only'],
-                        help='dense 分支评估模式: dense_map_only 表示 image 分数用原 PromptAD, pixel map 用 dense')
+                        choices=['dense_fusion', 'dense_only', 'dense_map_only', 'text_only',
+                                 'ta_map_only', 'ta_image_only', 'ta_topk', 'ta_harmonic'],
+                        help='dense/TA 分支评估模式; ta_topk 表示 image score 加上 text-aligned map top-k 分数')
     parser.add_argument('--image-roc-source', type=str, default='harmonic', choices=['harmonic', 'raw'],
                         help='harmonic 使用旧 metric_cal_img(img,map); raw 直接用 image score 算 Image ROC')
     parser.add_argument('--freeze-prompt', type=str2bool, choices=[True, False], default=True)
@@ -122,6 +130,11 @@ def parse_args():
     args.dense_bce_weight = dense_args.dense_bce_weight
     args.dense_dice_weight = dense_args.dense_dice_weight
     args.dense_score_alpha = dense_args.dense_score_alpha
+    args.text_aligned_dense = dense_args.text_aligned_dense or dense_args.dense_eval_mode.startswith('ta_')
+    args.ta_lr = dense_args.ta_lr
+    args.ta_loss_weight = dense_args.ta_loss_weight
+    args.ta_image_loss_weight = dense_args.ta_image_loss_weight
+    args.ta_score_beta = dense_args.ta_score_beta
     args.dense_eval_mode = dense_args.dense_eval_mode
     args.image_roc_source = dense_args.image_roc_source
     args.freeze_prompt = dense_args.freeze_prompt
@@ -131,6 +144,7 @@ def parse_args():
     args.split_mode = 'normal_75_25'
     args.dense_mask_branch = True
     args.dense_mask_score_alpha = dense_args.dense_score_alpha
+    args.text_aligned_dense_score_beta = dense_args.ta_score_beta
     return args
 
 
@@ -233,6 +247,7 @@ def save_dense_checkpoint(model, path):
     keep = {
         k: v for k, v in state.items()
         if k.startswith('dense_mask_head.')
+        or k.startswith('text_aligned_dense_head.')
         or k.startswith('prompt_learner.')
     }
     torch.save(keep, path)
@@ -254,6 +269,19 @@ def build_normal_gallery(model, loader, device, desc='Target normal gallery'):
     model.set_visual_class_prototype(torch.cat(global_features, dim=0))
 
 
+def text_aligned_dense_loss(raw_logits, post_logits, target, label, image_loss_weight, topk_ratio):
+    map_loss = dense_mask_loss(raw_logits, post_logits, target, bce_weight=1.0, dice_weight=1.0)
+    if image_loss_weight <= 0:
+        return map_loss
+    logits = 0.5 * (raw_logits + post_logits)
+    flat = logits.flatten(1)
+    topk = max(1, int(flat.shape[1] * float(topk_ratio)))
+    image_logits = torch.topk(flat, k=topk, dim=1).values.mean(dim=1)
+    image_target = label.float().to(image_logits.device)
+    image_loss = F.binary_cross_entropy_with_logits(image_logits, image_target)
+    return map_loss + image_loss_weight * image_loss
+
+
 def train_one_epoch(model, loader, optimizer, args, device, epoch_idx):
     model.train()
     total_loss = 0.0
@@ -270,6 +298,16 @@ def train_one_epoch(model, loader, optimizer, args, device, epoch_idx):
             args.dense_bce_weight,
             args.dense_dice_weight,
         )
+        if model.text_aligned_dense_head is not None:
+            ta_raw_logits, ta_post_logits = model.calculate_text_aligned_dense_logits(visual_features)
+            loss = loss + args.ta_loss_weight * text_aligned_dense_loss(
+                ta_raw_logits,
+                ta_post_logits,
+                target,
+                label.to(device),
+                args.ta_image_loss_weight,
+                args.visual_topk_ratio,
+            )
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -370,7 +408,10 @@ def fit(model, args, source_query_loader, target_adapt_loaders, target_test_load
     if args.freeze_prompt:
         for p in model.prompt_learner.parameters():
             p.requires_grad_(False)
-    optimizer = torch.optim.AdamW(model.dense_mask_head.parameters(), lr=args.dense_lr, weight_decay=args.weight_decay)
+    param_groups = [{'params': model.dense_mask_head.parameters(), 'lr': args.dense_lr}]
+    if model.text_aligned_dense_head is not None:
+        param_groups.append({'params': model.text_aligned_dense_head.parameters(), 'lr': args.ta_lr})
+    optimizer = torch.optim.AdamW(param_groups, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.Epoch, eta_min=max(args.dense_lr * 0.01, 1e-6))
 
     best = {cls: {'avg_iroc': -1.0, 'epoch': -1, 'per_jsr': None} for cls in args.target_classes}
@@ -511,6 +552,8 @@ def main(args):
     model_kwargs['noise_level'] = args.source_noise_level
     model_kwargs['dense_mask_branch'] = True
     model_kwargs['dense_mask_score_alpha'] = args.dense_score_alpha
+    model_kwargs['text_aligned_dense'] = args.text_aligned_dense
+    model_kwargs['text_aligned_dense_score_beta'] = args.ta_score_beta
     model = PromptAD(**model_kwargs).to(device)
     if args.eval_only:
         if not args.dense_checkpoint:
@@ -562,8 +605,9 @@ def main(args):
     elapsed = time.time() - started
 
     notes = args.results_notes or (
-        f'dense_mask_source_supervision+target_train_normal_gallery+dense_fusion;'
-        f'epoch={"loaded" if args.eval_only else args.Epoch};mode={args.dense_eval_mode};image_roc={args.image_roc_source};alpha={args.dense_score_alpha};elapsed={elapsed:.0f}s'
+        f'dense_mask_source_supervision+text_aligned_topk+target_train_normal_gallery;'
+        f'epoch={"loaded" if args.eval_only else args.Epoch};mode={args.dense_eval_mode};image_roc={args.image_roc_source};'
+        f'alpha={args.dense_score_alpha};ta_beta={args.ta_score_beta};ta_loss={args.ta_loss_weight};elapsed={elapsed:.0f}s'
     )
 
     def _fmt(v):

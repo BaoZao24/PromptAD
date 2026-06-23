@@ -273,7 +273,7 @@ def save_check_point(model, path):
     state_dict = model.state_dict()
     selected_state_dict = {
         k: v for k, v in state_dict.items()
-        if k in selected_keys or k.startswith('prompt_learner.') or k.startswith('visual_adapters.') or k.startswith('visual_class_prompt_adapter.') or k.startswith('score_fusion_head.') or k.startswith('dense_mask_head.') or k.startswith('cnn_mamba_local_branch.') or '.lora_' in k
+        if k in selected_keys or k.startswith('prompt_learner.') or k.startswith('visual_adapters.') or k.startswith('visual_class_prompt_adapter.') or k.startswith('score_fusion_head.') or k.startswith('dense_mask_head.') or k.startswith('text_aligned_dense_head.') or k.startswith('cnn_mamba_local_branch.') or '.lora_' in k
     }
 
     torch.save(selected_state_dict, path)
@@ -417,6 +417,7 @@ def fit(model,
         score_fusion_lr=args.score_fusion_lr,
         cnn_mamba_lr=args.cnn_mamba_lr,
         visual_lora_lr=args.visual_lora_lr,
+        text_aligned_dense_lr=args.text_aligned_dense_lr,
     )
     optimizer = torch.optim.SGD(parameter_groups, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.Epoch, eta_min=1e-5)
@@ -714,7 +715,8 @@ def get_args():
     parser.add_argument("--cls-score-mode", type=str, default="text_only",
                         choices=["text_only", "visual_topk", "visual_topk_max", "visual_topk_freq",
                                  "normal_center", "normal_mahalanobis", "text_normal_center", "text_normal_mahalanobis",
-                                 "dense_only", "dense_fusion", "dense_map_only"],
+                                 "dense_only", "dense_fusion", "dense_map_only",
+                                 "ta_map_only", "ta_image_only", "ta_topk", "ta_harmonic"],
                         help="图像级分数融合方式")
     parser.add_argument("--visual-topk-ratio", type=float, default=0.05,
                         help="visual patch score 聚合时使用的 top-k 比例")
@@ -776,6 +778,10 @@ def get_args():
                         help="轻量融合头残差项的缩放系数")
     parser.add_argument("--learnable-score-fusion-lambda", type=float, default=0.5,
                         help="轻量融合头辅助 BCE 损失的权重")
+    parser.add_argument("--text-aligned-dense", type=str2bool, choices=[True, False], default=False,
+                        help="是否启用 APRIL-GAN 风格 visual->text projection dense 分支")
+    parser.add_argument("--text-aligned-dense-score-beta", type=float, default=1.0,
+                        help="ta_topk 模式下 text-aligned dense top-k 图像分数的融合权重")
     parser.add_argument("--rn50-visual-fusion", type=str2bool, choices=[True, False], default=False,
                         help="是否启用冻结 CLIP-RN50 视觉距离分支，与主 ViT/prompt 分数保守融合")
     parser.add_argument("--rn50-pretrained", type=str, default="openai",
@@ -822,6 +828,8 @@ def get_args():
                         help="CNN-Mamba 分支的单独学习率；默认使用 --lr")
     parser.add_argument("--visual-lora-lr", type=float, default=None,
                         help="visual LoRA 的单独学习率；默认使用 --lr")
+    parser.add_argument("--text-aligned-dense-lr", type=float, default=None,
+                        help="text-aligned dense projection 分支的单独学习率；默认使用 --lr")
     parser.add_argument("--split-mode", type=str, default="legacy", choices=["legacy", "normal_75_25"],
                         help="legacy 使用原始 few-shot 切分；normal_75_25 使用 3/4 normal 训练、1/4 normal 测试")
     parser.add_argument("--normal-train-ratio", type=float, default=0.75,

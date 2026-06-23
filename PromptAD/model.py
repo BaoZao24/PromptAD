@@ -1474,6 +1474,42 @@ class DenseMaskHead(nn.Module):
         return raw_logits.float(), post_logits.float()
 
 
+class TextAlignedDenseProjectionHead(nn.Module):
+    """APRIL-GAN style visual-to-text projection over CLIP patch tokens.
+
+    DenseMaskHead learns a free binary map. This head instead projects patch
+    features into CLIP text space and scores each patch by its abnormal-vs-normal
+    text margin. The image score is later obtained by top-k pooling this map.
+    """
+
+    def __init__(self, dim1, dim2, text_dim):
+        super().__init__()
+        self.raw_proj = nn.Sequential(nn.LayerNorm(dim1), nn.Linear(dim1, text_dim))
+        self.post_proj = nn.Sequential(nn.LayerNorm(dim2), nn.Linear(dim2, text_dim))
+
+    @staticmethod
+    def _margin_logits(projected_tokens, text_features, logit_scale):
+        projected_tokens = F.normalize(projected_tokens.float(), dim=-1)
+        text_features = F.normalize(text_features.float(), dim=-1)
+        logits = logit_scale.float() * projected_tokens @ text_features.T
+        normal_logit = logits[..., 0:1]
+        if logits.shape[-1] == 2:
+            return logits[..., 1:2] - normal_logit
+        return (logits[..., 1:] - normal_logit).max(dim=-1, keepdim=True).values
+
+    def forward(self, feature_map1, feature_map2, text_features, grid_size, logit_scale):
+        b, _, _ = feature_map1.shape
+        h, w = grid_size
+        head_dtype = self.raw_proj[0].weight.dtype
+        raw_tokens = self.raw_proj(feature_map1.to(dtype=head_dtype))
+        post_tokens = self.post_proj(feature_map2.to(dtype=head_dtype))
+        raw_logits = self._margin_logits(raw_tokens, text_features, logit_scale)
+        post_logits = self._margin_logits(post_tokens, text_features, logit_scale)
+        raw_logits = raw_logits.transpose(1, 2).reshape(b, 1, h, w)
+        post_logits = post_logits.transpose(1, 2).reshape(b, 1, h, w)
+        return raw_logits.float(), post_logits.float()
+
+
 class TinyMambaFusionBlock(nn.Module):
     """Mamba 风格的轻量 token mixer（CNN-Mamba 局部分支组件）。
 
@@ -1889,6 +1925,8 @@ class PromptAD(torch.nn.Module):
         self.use_dense_mask_branch = kwargs.get('dense_mask_branch', False)
         self.dense_mask_hidden_ratio = kwargs.get('dense_mask_hidden_ratio', 0.25)
         self.dense_mask_score_alpha = kwargs.get('dense_mask_score_alpha', 1.0)
+        self.use_text_aligned_dense = kwargs.get('text_aligned_dense', False)
+        self.text_aligned_dense_score_beta = kwargs.get('text_aligned_dense_score_beta', 1.0)
         self.use_cnn_vit_mamba_fusion = kwargs.get('cnn_vit_mamba_fusion', False)
         self.use_rn50_visual_fusion = kwargs.get('rn50_visual_fusion', False)
         self.rn50_pretrained = kwargs.get('rn50_pretrained', 'openai')
@@ -2261,6 +2299,14 @@ class PromptAD(torch.nn.Module):
                 hidden_ratio=self.dense_mask_hidden_ratio,
             ).to(self.device)
 
+        self.text_aligned_dense_head = None
+        if self.use_text_aligned_dense:
+            self.text_aligned_dense_head = TextAlignedDenseProjectionHead(
+                dim1=self.model.visual.embed_dim,
+                dim2=self.model.visual.embed_dim,
+                text_dim=self.model.visual.output_dim,
+            ).to(self.device)
+
         self.tokenizer = tokenizer
         self.normal_text_features = None
         self.abnormal_text_features = None
@@ -2388,6 +2434,8 @@ class PromptAD(torch.nn.Module):
             params.extend(self.score_fusion_head.parameters())
         if self.dense_mask_head is not None:
             params.extend(self.dense_mask_head.parameters())
+        if self.text_aligned_dense_head is not None:
+            params.extend(self.text_aligned_dense_head.parameters())
         if self.cnn_mamba_local_branch is not None:
             params.extend(self.cnn_mamba_local_branch.parameters())
         if self.use_visual_lora:
@@ -2402,7 +2450,7 @@ class PromptAD(torch.nn.Module):
     def trainable_parameter_groups(self, base_lr, prompt_lr=None, visual_adapter_lr=None,
                                    visual_class_prompt_lr=None, score_fusion_lr=None,
                                    cnn_mamba_lr=None, visual_lora_lr=None,
-                                   dense_mask_lr=None):
+                                   dense_mask_lr=None, text_aligned_dense_lr=None):
         # 给优化器按模块切分参数组，便于为不同模块设置不同学习率。
         # 任意 *_lr 为 None 时，该组使用 base_lr。
         groups = []
@@ -2421,6 +2469,8 @@ class PromptAD(torch.nn.Module):
             add_group(self.score_fusion_head.parameters(), score_fusion_lr)
         if self.dense_mask_head is not None:
             add_group(self.dense_mask_head.parameters(), dense_mask_lr)
+        if self.text_aligned_dense_head is not None:
+            add_group(self.text_aligned_dense_head.parameters(), text_aligned_dense_lr)
         if self.cnn_mamba_local_branch is not None:
             add_group(self.cnn_mamba_local_branch.parameters(), cnn_mamba_lr)
         if self.use_visual_lora:
@@ -2932,6 +2982,31 @@ class PromptAD(torch.nn.Module):
         image_score = torch.topk(flat, k=topk, dim=1).values.mean(dim=1)
         return image_score, dense_map
 
+    def calculate_text_aligned_dense_logits(self, visual_features):
+        if self.text_aligned_dense_head is None:
+            raise RuntimeError('calculate_text_aligned_dense_logits requires --text-aligned-dense True')
+        return self.text_aligned_dense_head(
+            visual_features[2],
+            visual_features[3],
+            self.text_features,
+            self.grid_size,
+            self.model.logit_scale,
+        )
+
+    def calculate_text_aligned_dense_score(self, visual_features):
+        raw_logits, post_logits = self.calculate_text_aligned_dense_logits(visual_features)
+        ta_map = 0.5 * (torch.sigmoid(raw_logits) + torch.sigmoid(post_logits))
+        flat = ta_map.flatten(1)
+        topk = max(1, int(flat.shape[1] * self.visual_topk_ratio))
+        image_score = torch.topk(flat, k=topk, dim=1).values.mean(dim=1)
+        return image_score, ta_map
+
+    @staticmethod
+    def harmonic_score_tensors(*scores, eps=1e-6):
+        safe = [s.float().clamp_min(eps) for s in scores]
+        denom = sum(1.0 / s for s in safe)
+        return float(len(safe)) / denom
+
     def calculate_normal_distribution_score(self, visual_features, mode):
         # 基于正常分布的图像级异常分数。
         # mode = 'center'      ：到正常类别中心的余弦距离；
@@ -3054,6 +3129,23 @@ class PromptAD(torch.nn.Module):
             elif self.cls_score_mode == 'dense_map_only':
                 # Keep the original PromptAD image score, but use the VCP/dense map for pixel metrics.
                 visual_anomaly_map = dense_map.to(visual_anomaly_map.device, dtype=visual_anomaly_map.dtype)
+        if self.text_aligned_dense_head is not None:
+            ta_image_score, ta_map = self.calculate_text_aligned_dense_score(visual_features)
+            ta_image_score_np = ta_image_score.detach().cpu().numpy()
+            ta_map_for_eval = ta_map.to(visual_anomaly_map.device, dtype=visual_anomaly_map.dtype)
+            if self.cls_score_mode == 'ta_map_only':
+                visual_anomaly_map = ta_map_for_eval
+            elif self.cls_score_mode == 'ta_image_only':
+                image_scores = ta_image_score_np
+                visual_anomaly_map = ta_map_for_eval
+            elif self.cls_score_mode == 'ta_topk':
+                image_scores = image_scores + float(self.text_aligned_dense_score_beta) * ta_image_score_np
+                visual_anomaly_map = ta_map_for_eval
+            elif self.cls_score_mode == 'ta_harmonic':
+                textual_t = torch.as_tensor(image_scores, device=ta_image_score.device, dtype=ta_image_score.dtype)
+                max_map = ta_map.flatten(1).max(dim=1).values
+                image_scores = self.harmonic_score_tensors(textual_t, ta_image_score, max_map).detach().cpu().numpy()
+                visual_anomaly_map = ta_map_for_eval
         if self.rn50_model is not None:
             if image is None:
                 raise ValueError('score_cached requires image tensors when --rn50-visual-fusion is enabled')
