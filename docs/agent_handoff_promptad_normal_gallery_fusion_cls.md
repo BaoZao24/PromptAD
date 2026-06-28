@@ -90,10 +90,19 @@ Per-class comparison for selected settings:
 
 | class | current baseline | normal top50 | raw lambda=1.0 | raw lambda=1.5 | raw lambda=2.0 |
 |---|---:|---:|---:|---:|---:|
-| burst | 82.16 | 91.20 | 91.52 | 91.80 | 91.93 |
-| chirp | 89.37 | 89.76 | 92.33 | 92.24 | 91.95 |
-| dsss | 61.43 | 95.36 | 93.74 | 94.65 | 95.09 |
-| pulse | 80.67 | 78.26 | 82.97 | 82.22 | 81.69 |
+| burst | 82.16 | 91.20 | 91.52 | 91.77 | 91.93 |
+| chirp | 89.37 | 89.76 | 92.33 | 92.16 | 91.95 |
+| dsss | 61.43 | 95.36 | 93.74 | 94.68 | 95.09 |
+| pulse | 80.67 | 78.26 | 82.97 | 82.29 | 81.69 |
+
+Per-class improvement for the selected best setting:
+
+| class | raw lambda=1.5 | delta vs current PromptAD | delta vs normal top50 |
+|---|---:|---:|---:|
+| burst | 91.77 | +9.61 | +0.58 |
+| chirp | 92.16 | +2.79 | +2.40 |
+| dsss | 94.68 | +33.26 | -0.67 |
+| pulse | 82.29 | +1.62 | +4.03 |
 
 Conclusion:
 

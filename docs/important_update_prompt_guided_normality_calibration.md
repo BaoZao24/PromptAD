@@ -46,6 +46,15 @@ Best observed improvement:
 +11.82 image AUROC
 ```
 
+Per-class image AUROC:
+
+| class | PromptAD baseline | normal top50 | fusion lambda=1.5 | delta vs PromptAD | delta vs normal |
+|---|---:|---:|---:|---:|---:|
+| burst | 82.16 | 91.20 | 91.77 | +9.61 | +0.58 |
+| chirp | 89.37 | 89.76 | 92.16 | +2.79 | +2.40 |
+| dsss | 61.43 | 95.36 | 94.68 | +33.26 | -0.67 |
+| pulse | 80.67 | 78.26 | 82.29 | +1.62 | +4.03 |
+
 Result files:
 
 ```bash
