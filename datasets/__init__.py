@@ -11,6 +11,7 @@ from .deceptive_signal import load_deceptive_signal, deceptive_signal_classes
 from .burst_signal import load_burst_signal, burst_signal_classes
 from .dsss_signal import load_dsss_signal, dsss_classes
 from .chirp_signal import load_chirp_signal, chirp_signal_classes
+from .pulse_signal import load_pulse_signal, pulse_signal_classes
 from .wideband_pulse import load_wideband_pulse, wideband_pulse_classes
 from .wideband_pulse_png import load_wideband_pulse_png, wideband_pulse_png_classes
 from .rf_spe_png import load_rf_spe_png, rf_spe_png_classes
@@ -30,6 +31,7 @@ load_function_dict = {
     'burst_signal': load_burst_signal,
     'dsss_signal': load_dsss_signal,
     'chirp_signal': load_chirp_signal,
+    'pulse_signal': load_pulse_signal,
     'wideband_pulse': load_wideband_pulse,
     'wideband_pulse_png': load_wideband_pulse_png,
     'rf_spe_png': load_rf_spe_png,
@@ -46,6 +48,7 @@ dataset_classes = {
     'burst_signal': burst_signal_classes,
     'dsss_signal': dsss_classes,
     'chirp_signal': chirp_signal_classes,
+    'pulse_signal': pulse_signal_classes,
     'wideband_pulse': wideband_pulse_classes,
     'wideband_pulse_png': wideband_pulse_png_classes,
     'rf_spe_png': rf_spe_png_classes,
@@ -71,6 +74,10 @@ def get_dataloader_from_args(phase, **kwargs):
         extra_kwargs['normal_train_ratio'] = kwargs.get('normal_train_ratio', 0.75)
     elif kwargs.get('dataset') == 'chirp_signal':
         extra_kwargs['noise_level'] = kwargs.get('noise_level', 'm10db')
+        extra_kwargs['split_mode'] = kwargs.get('split_mode', 'legacy')
+        extra_kwargs['normal_train_ratio'] = kwargs.get('normal_train_ratio', 0.75)
+    elif kwargs.get('dataset') == 'pulse_signal':
+        extra_kwargs['noise_level'] = kwargs.get('noise_level', 'm20db')
         extra_kwargs['split_mode'] = kwargs.get('split_mode', 'legacy')
         extra_kwargs['normal_train_ratio'] = kwargs.get('normal_train_ratio', 0.75)
     elif kwargs.get('dataset') == 'wideband_pulse':
@@ -99,6 +106,10 @@ def get_dataloader_from_args(phase, **kwargs):
             extra_kwargs['max_abnormal_per_class'] = kwargs['max_abnormal_per_class']
         if 'pool_classes' in kwargs:
             extra_kwargs['pool_classes'] = kwargs['pool_classes']
+        if 'source_jsr_policy' in kwargs:
+            extra_kwargs['source_jsr_policy'] = kwargs['source_jsr_policy']
+        if 'source_noise_levels' in kwargs:
+            extra_kwargs['source_noise_levels'] = kwargs['source_noise_levels']
     elif kwargs.get('dataset') == 'deceptive_signal':
         extra_kwargs['freq'] = kwargs.get('freq', None)
 

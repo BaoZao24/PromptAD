@@ -18,7 +18,11 @@ rf_signal_dataset_mapping = {
     "chirp_signal": "chirp",
     "dsss_signal": "dsss",
     "deceptive_signal": "deceptive",
-    "wideband_pulse": "wideband",
+    "pulse_signal": "pulse",
+}
+
+rf_general_dataset_names = {
+    "rf_target_test_pool",
 }
 
 rf_state_anomaly = [
@@ -53,7 +57,7 @@ rf_signal_structured_classname = {
     "chirp": "chirp signal radio frequency spectrogram",
     "dsss": "DSSS spread-spectrum radio frequency spectrogram",
     "deceptive": "deceptive signal radio frequency spectrogram",
-    "wideband": "wideband pulse radio frequency spectrogram",
+    "pulse": "pulse signal radio frequency spectrogram",
 }
 
 rf_signal_structured_state_anomaly = {
@@ -87,17 +91,17 @@ rf_signal_structured_state_anomaly = {
         "{} with deceptive RF emission mimicking normal activity",
         "{} with counterfeit spectrum occupancy",
     ],
-    "wideband": [
-        "{} with abnormal rectangular wideband occupancy block",
-        "{} with block-like broadband energy patch inconsistent with background",
-        "{} with unexpected filled-in wideband time-frequency rectangle",
-        "{} with truncated rectangular spectrum occupancy region",
-        "{} with anomalous broad block-shaped RF emission",
-        "{} with low-power wideband occupancy block embedded in background",
+    "pulse": [
+        "{} with abnormal pulse energy",
+        "{} with unexpected pulse-like interference",
+        "{} with missing or distorted pulse structure",
+        "{} with anomalous time-localized pulse emission",
+        "{} with pulse energy inconsistent with normal background",
+        "{} with weak pulse trace embedded in background",
     ],
 }
 
-rf_grouped_abnormal_signal_keys = ("burst", "chirp", "dsss")
+rf_grouped_abnormal_signal_keys = ("burst", "chirp", "dsss", "pulse")
 
 rf_scene_background_mapping = {
     "WeaponMuseum_spectrum": "an indoor spectrum scene with relatively stable background activity",
@@ -112,7 +116,9 @@ def get_rf_signal_key(classname, dataset_name=None):
         return rf_signal_dataset_mapping[dataset_name]
 
     name = classname.lower()
-    for signal_key in ("burst", "chirp", "dsss", "deceptive", "wideband"):
+    if "pulse" in name:
+        return "pulse"
+    for signal_key in ("burst", "chirp", "dsss", "deceptive"):
         if signal_key in name:
             return signal_key
 
@@ -120,7 +126,7 @@ def get_rf_signal_key(classname, dataset_name=None):
 
 
 def is_rf_prompt_class(classname, dataset_name=None):
-    return get_rf_signal_key(classname, dataset_name) is not None
+    return dataset_name in rf_general_dataset_names or get_rf_signal_key(classname, dataset_name) is not None
 
 
 def get_rf_scene_background(classname=None):
@@ -141,7 +147,7 @@ def get_prompt_classname(classname, dataset_name=None, prompt_mode="rf"):
         return class_mapping.get(classname, classname)
 
     signal_key = get_rf_signal_key(classname, dataset_name)
-    if signal_key is not None:
+    if signal_key is not None or dataset_name in rf_general_dataset_names:
         if prompt_mode == "generic":
             return "image"
         prompt_classname = "radio frequency spectrogram"
