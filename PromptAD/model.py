@@ -35,7 +35,7 @@ from . import CLIPAD
 from torch.nn import functional as F
 from .ad_prompts import *
 from PIL import Image
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, median_filter
 from tqdm import tqdm
 
 from .CLIPAD import SimpleTokenizer as _Tokenizer
@@ -63,522 +63,54 @@ def _convert_to_rgb(image):
     return image.convert('RGB')
 
 
-class SpectrogramGradientChannels:
-    """灰度 + 时间方向梯度 + 频率方向梯度。最早期的频谱 → 3 通道方案。"""
+class Gray3Channels:
+    """Pure grayscale spectrogram repeated as 3 channels.
+
+    Corresponds to ``input_mode=gray3``. This is the conservative black/white
+    input baseline: no false color, no morphology enhancement, no residual map.
+    """
 
     def __init__(self):
         self.to_tensor = transforms.ToTensor()
 
-    @staticmethod
-    def _safe_normalize(channel):
-        scale = channel.amax(dim=(-2, -1), keepdim=True).clamp_min(1e-6)
-        return channel / scale
-
     def __call__(self, image):
         gray = self.to_tensor(image.convert('L'))
-
-        time_grad = torch.zeros_like(gray)
-        time_grad[:, :, 1:] = (gray[:, :, 1:] - gray[:, :, :-1]).abs()
-
-        freq_grad = torch.zeros_like(gray)
-        freq_grad[:, 1:, :] = (gray[:, 1:, :] - gray[:, :-1, :]).abs()
-
-        return torch.cat([
-            gray,
-            self._safe_normalize(time_grad),
-            self._safe_normalize(freq_grad),
-        ], dim=0)
+        return torch.cat([gray, gray, gray], dim=0)
 
 
-class SpectrogramGradientChannelsV2:
-    def __init__(self, sigma=1.0, percentile=0.995):
-        self.sigma = sigma
-        self.percentile = percentile
-        self.to_tensor = transforms.ToTensor()
+class GrayLocal2DEdgeChannels:
+    """Gray + local 2D residual + edge gradient.
 
-    def _robust_normalize(self, channel):
-        flat = channel.flatten()
-        if flat.numel() == 0:
-            return channel
-        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
-        return (channel / scale).clamp(0.0, 1.0)
+    Corresponds to ``input_mode=gray_local2d_edge``.
+    C1 keeps the raw grayscale spectrogram, C2 highlights local deviation from
+    a 2D median background, and C3 highlights abrupt edges or chirp-like slopes.
+    """
 
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        gray_np = gray.squeeze(0).numpy()
-
-        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
-        time_grad = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
-        freq_grad = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
-
-        time_grad = torch.from_numpy(np.abs(time_grad)).unsqueeze(0)
-        freq_grad = torch.from_numpy(np.abs(freq_grad)).unsqueeze(0)
-
-        return torch.cat([
-            gray,
-            self._robust_normalize(time_grad),
-            self._robust_normalize(freq_grad),
-        ], dim=0)
-
-
-
-class GrayContrastOnlyChannels:
-    def __init__(self, clip_limit=2.0, tile_grid_size=(8, 8)):
-        self.clip_limit = clip_limit
-        self.tile_grid_size = tile_grid_size
-        self.to_tensor = transforms.ToTensor()
-
-    def __call__(self, image):
-        gray_pil = image.convert('L')
-        gray_np = np.array(gray_pil)
-        clahe = cv2.createCLAHE(clipLimit=self.clip_limit, tileGridSize=self.tile_grid_size)
-        enhanced = clahe.apply(gray_np)
-        enhanced = self.to_tensor(Image.fromarray(enhanced))
-        return torch.cat([enhanced, enhanced, enhanced], dim=0)
-
-
-class WeakResidualOnlyChannels:
-    def __init__(self, alpha=0.2):
-        self.alpha = alpha
+    def __init__(self, win=15):
+        self.win = win
         self.to_tensor = transforms.ToTensor()
 
     @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        freq_background = gray.median(dim=-1, keepdim=True).values
-        residual = (gray - freq_background).abs()
-        weak_residual = self._minmax(gray + self.alpha * residual)
-        return torch.cat([weak_residual, weak_residual, weak_residual], dim=0)
-
-
-class GradMagnitudeOnlyChannels:
-    def __init__(self, sigma=1.0, percentile=0.995):
-        self.sigma = sigma
-        self.percentile = percentile
-        self.to_tensor = transforms.ToTensor()
-
-    def _robust_normalize(self, channel):
-        flat = channel.flatten()
-        if flat.numel() == 0:
-            return channel
-        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
-        return (channel / scale).clamp(0.0, 1.0)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        gray_np = gray.squeeze(0).numpy()
-        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
-        time_grad = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
-        freq_grad = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
-        grad_mag = np.sqrt(time_grad * time_grad + freq_grad * freq_grad)
-        grad_mag = self._robust_normalize(torch.from_numpy(np.abs(grad_mag)).unsqueeze(0))
-        return torch.cat([grad_mag, grad_mag, grad_mag], dim=0)
-
-
-class MorphFusionChannels:
-    """灰度 + 梯度幅值 + 弱残差。最早把"边缘特征 + 偏离背景"组合到一起的方案。"""
-
-    def __init__(self, sigma=1.0, percentile=0.995, alpha=0.2):
-        self.sigma = sigma
-        self.percentile = percentile
-        self.alpha = alpha
-        self.to_tensor = transforms.ToTensor()
-
-    def _robust_normalize(self, channel):
-        flat = channel.flatten()
-        if flat.numel() == 0:
-            return channel
-        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
-        return (channel / scale).clamp(0.0, 1.0)
-
-    @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        gray_np = gray.squeeze(0).numpy()
-
-        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
-        time_grad = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
-        freq_grad = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
-        grad_mag = np.sqrt(time_grad * time_grad + freq_grad * freq_grad)
-
-        freq_background = gray.median(dim=-1, keepdim=True).values
-        residual = (gray - freq_background).abs()
-        weak_residual = self._minmax(gray + self.alpha * residual)
-
-        grad_mag = torch.from_numpy(grad_mag).unsqueeze(0)
-        return torch.cat([
-            gray,
-            self._robust_normalize(grad_mag),
-            weak_residual,
-        ], dim=0)
-
-
-class MorphFusionPlusChannels:
-    def __init__(self, sigma=1.0, percentile=0.995, alpha=0.2, grad_weight=0.35):
-        self.sigma = sigma
-        self.percentile = percentile
-        self.alpha = alpha
-        self.grad_weight = grad_weight
-        self.to_tensor = transforms.ToTensor()
-
-    def _robust_normalize(self, channel):
-        flat = channel.flatten()
-        if flat.numel() == 0:
-            return channel
-        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
-        return (channel / scale).clamp(0.0, 1.0)
-
-    @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        gray_np = gray.squeeze(0).numpy()
-
-        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
-        time_grad = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
-        freq_grad = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
-        grad_mag = np.sqrt(time_grad * time_grad + freq_grad * freq_grad)
-        grad_mag = self._robust_normalize(torch.from_numpy(np.abs(grad_mag)).unsqueeze(0))
-
-        freq_background = gray.median(dim=-1, keepdim=True).values
-        residual = (gray - freq_background).abs()
-        weak_residual = self._minmax(gray + self.alpha * residual)
-
-        return torch.cat([
-            gray,
-            self._minmax(gray + self.grad_weight * grad_mag),
-            weak_residual,
-        ], dim=0)
-
-
-class MorphFusionDualGradChannels:
-    def __init__(self, sigma=1.0, percentile=0.995, alpha=0.2):
-        self.sigma = sigma
-        self.percentile = percentile
-        self.alpha = alpha
-        self.to_tensor = transforms.ToTensor()
-
-    def _robust_normalize(self, channel):
-        flat = channel.flatten()
-        if flat.numel() == 0:
-            return channel
-        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
-        return (channel / scale).clamp(0.0, 1.0)
-
-    @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        gray_np = gray.squeeze(0).numpy()
-
-        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
-        time_grad = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
-        freq_grad = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
-
-        freq_background = gray.median(dim=-1, keepdim=True).values
-        residual = (gray - freq_background).abs()
-        weak_residual = self._minmax(gray + self.alpha * residual)
-
-        return torch.cat([
-            weak_residual,
-            self._robust_normalize(torch.from_numpy(np.abs(time_grad)).unsqueeze(0)),
-            self._robust_normalize(torch.from_numpy(np.abs(freq_grad)).unsqueeze(0)),
-        ], dim=0)
-
-
-
-class MorphFusionBalancedChannels:
-    def __init__(self, sigma=1.0, percentile=0.995, alpha=0.2, grad_weight=0.2):
-        self.sigma = sigma
-        self.percentile = percentile
-        self.alpha = alpha
-        self.grad_weight = grad_weight
-        self.to_tensor = transforms.ToTensor()
-
-    def _robust_normalize(self, channel):
-        flat = channel.flatten()
-        if flat.numel() == 0:
-            return channel
-        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
-        return (channel / scale).clamp(0.0, 1.0)
-
-    @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        gray_np = gray.squeeze(0).numpy()
-
-        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
-        time_grad = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
-        freq_grad = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
-        grad_mag = np.sqrt(time_grad * time_grad + freq_grad * freq_grad)
-        grad_mag = self._robust_normalize(torch.from_numpy(np.abs(grad_mag)).unsqueeze(0))
-
-        freq_background = gray.median(dim=-1, keepdim=True).values
-        residual = (gray - freq_background).abs()
-        weak_residual = self._minmax(gray + self.alpha * residual)
-        structure_blend = self._minmax(gray + self.grad_weight * grad_mag)
-
-        return torch.cat([
-            gray,
-            weak_residual,
-            structure_blend,
-        ], dim=0)
-
-
-class MorphFusionGrayResGradChannels:
-    def __init__(self, sigma=1.0, percentile=0.995, alpha=0.2):
-        self.sigma = sigma
-        self.percentile = percentile
-        self.alpha = alpha
-        self.to_tensor = transforms.ToTensor()
-
-    def _robust_normalize(self, channel):
-        flat = channel.flatten()
-        if flat.numel() == 0:
-            return channel
-        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
-        return (channel / scale).clamp(0.0, 1.0)
-
-    @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        gray_np = gray.squeeze(0).numpy()
-
-        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
-        time_grad = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
-        freq_grad = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
-        grad_mag = np.sqrt(time_grad * time_grad + freq_grad * freq_grad)
-
-        freq_background = gray.median(dim=-1, keepdim=True).values
-        residual = (gray - freq_background).abs()
-        weak_residual = self._minmax(gray + self.alpha * residual)
-
-        return torch.cat([
-            gray,
-            weak_residual,
-            self._robust_normalize(torch.from_numpy(np.abs(grad_mag)).unsqueeze(0)),
-        ], dim=0)
-
-
-
-
-class MorphFusionGrayContrastResGradChannels:
-    def __init__(self, sigma=1.0, percentile=0.995, alpha=0.2, clahe_clip_limit=2.0, clahe_tile_grid_size=8):
-        self.sigma = sigma
-        self.percentile = percentile
-        self.alpha = alpha
-        self.clahe_clip_limit = clahe_clip_limit
-        self.clahe_tile_grid_size = clahe_tile_grid_size
-        self.to_tensor = transforms.ToTensor()
-        self.clahe = cv2.createCLAHE(
-            clipLimit=self.clahe_clip_limit,
-            tileGridSize=(self.clahe_tile_grid_size, self.clahe_tile_grid_size),
-        )
-
-    def _robust_normalize(self, channel):
-        flat = channel.flatten()
-        if flat.numel() == 0:
-            return channel
-        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
-        return (channel / scale).clamp(0.0, 1.0)
-
-    @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        gray_np = gray.squeeze(0).numpy()
-
-        gray_u8 = np.clip(gray_np * 255.0, 0, 255).astype(np.uint8)
-        gray_contrast = self.clahe.apply(gray_u8).astype(np.float32) / 255.0
-        gray_contrast = torch.from_numpy(gray_contrast).unsqueeze(0)
-
-        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
-        time_grad = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
-        freq_grad = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
-        grad_mag = np.sqrt(time_grad * time_grad + freq_grad * freq_grad)
-
-        freq_background = gray.median(dim=-1, keepdim=True).values
-        residual = (gray - freq_background).abs()
-        weak_residual = self._minmax(gray + self.alpha * residual)
-
-        return torch.cat([
-            gray_contrast,
-            weak_residual,
-            self._robust_normalize(torch.from_numpy(np.abs(grad_mag)).unsqueeze(0)),
-        ], dim=0)
-
-
-class MorphFusionGaborResidualChannels:
-    def __init__(self, alpha=0.2, clahe_clip_limit=2.0, clahe_tile_grid_size=8,
-                 gabor_kernel_size=31, gabor_sigma=6.0, gabor_lambda=18.0, gabor_gamma=0.5,
-                 percentile=0.995):
-        self.alpha = alpha
-        self.percentile = percentile
-        self.to_tensor = transforms.ToTensor()
-        self.clahe = cv2.createCLAHE(
-            clipLimit=clahe_clip_limit,
-            tileGridSize=(clahe_tile_grid_size, clahe_tile_grid_size),
-        )
-        self.gabor_kernels = [
-            cv2.getGaborKernel(
-                (gabor_kernel_size, gabor_kernel_size),
-                gabor_sigma,
-                theta,
-                gabor_lambda,
-                gabor_gamma,
-                0,
-                ktype=cv2.CV_32F,
-            )
-            for theta in (0, np.pi / 4, np.pi / 2, 3 * np.pi / 4)
-        ]
-
-    def _robust_normalize(self, channel):
-        flat = channel.flatten()
-        if flat.numel() == 0:
-            return channel
-        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
-        return (channel / scale).clamp(0.0, 1.0)
-
-    @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
+    def _minmax_np(arr):
+        lo, hi = arr.min(), arr.max()
+        return (arr - lo) / max(hi - lo, 1e-6)
 
     def __call__(self, image):
         gray = self.to_tensor(image.convert('L'))
         gray_np = gray.squeeze(0).numpy()
         gray_u8 = np.clip(gray_np * 255.0, 0, 255).astype(np.uint8)
 
-        gray_contrast = self.clahe.apply(gray_u8).astype(np.float32) / 255.0
-        gray_contrast = torch.from_numpy(gray_contrast).unsqueeze(0)
+        local_median = cv2.medianBlur(gray_u8, self.win).astype(np.float32) / 255.0
+        local_residual = self._minmax_np(np.abs(gray_np - local_median)).astype(np.float32)
 
-        freq_background = gray.median(dim=-1, keepdim=True).values
-        residual = (gray - freq_background).abs()
-        weak_residual = self._minmax(gray + self.alpha * residual)
-
-        gabor_responses = [
-            np.abs(cv2.filter2D(gray_np, cv2.CV_32F, kernel))
-            for kernel in self.gabor_kernels
-        ]
-        gabor_broad = np.max(np.stack(gabor_responses, axis=0), axis=0)
-        gabor_broad = self._robust_normalize(torch.from_numpy(gabor_broad).unsqueeze(0))
+        grad_x = cv2.Sobel(gray_np, cv2.CV_32F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(gray_np, cv2.CV_32F, 0, 1, ksize=3)
+        edge_grad = self._minmax_np(np.sqrt(grad_x * grad_x + grad_y * grad_y)).astype(np.float32)
 
         return torch.cat([
-            gray_contrast,
-            weak_residual,
-            gabor_broad,
-        ], dim=0)
-
-
-class MorphFusionGaborDirectionalResidualChannels:
-    def __init__(self, row_weight=0.25, col_weight=0.45, clahe_clip_limit=2.0, clahe_tile_grid_size=8,
-                 gabor_kernel_size=31, gabor_sigma=6.0, gabor_lambda=18.0, gabor_gamma=0.5,
-                 percentile=0.995, residual_percentile=0.99):
-        self.row_weight = row_weight
-        self.col_weight = col_weight
-        self.percentile = percentile
-        self.residual_percentile = residual_percentile
-        self.to_tensor = transforms.ToTensor()
-        self.clahe = cv2.createCLAHE(
-            clipLimit=clahe_clip_limit,
-            tileGridSize=(clahe_tile_grid_size, clahe_tile_grid_size),
-        )
-        self.gabor_kernels = [
-            cv2.getGaborKernel(
-                (gabor_kernel_size, gabor_kernel_size),
-                gabor_sigma,
-                theta,
-                gabor_lambda,
-                gabor_gamma,
-                0,
-                ktype=cv2.CV_32F,
-            )
-            for theta in (0, np.pi / 4, np.pi / 2, 3 * np.pi / 4)
-        ]
-
-    def _robust_normalize(self, channel, percentile=None):
-        percentile = self.percentile if percentile is None else percentile
-        flat = channel.flatten()
-        if flat.numel() == 0:
-            return channel
-        scale = torch.quantile(flat, percentile).clamp_min(1e-6)
-        return (channel / scale).clamp(0.0, 1.0)
-
-    @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        gray_np = gray.squeeze(0).numpy()
-        gray_u8 = np.clip(gray_np * 255.0, 0, 255).astype(np.uint8)
-
-        gray_contrast = self.clahe.apply(gray_u8).astype(np.float32) / 255.0
-        gray_contrast = torch.from_numpy(gray_contrast).unsqueeze(0)
-
-        row_background = np.median(gray_np, axis=1, keepdims=True)
-        row_residual = np.abs(gray_np - row_background)
-
-        col_background = np.median(gray_np, axis=0, keepdims=True)
-        col_background = cv2.GaussianBlur(col_background.astype(np.float32), (31, 1), 0)
-        col_residual = np.maximum(gray_np - col_background, 0.0)
-
-        row_residual = self._robust_normalize(
-            torch.from_numpy(row_residual).unsqueeze(0),
-            self.residual_percentile,
-        )
-        col_residual = self._robust_normalize(
-            torch.from_numpy(col_residual).unsqueeze(0),
-            self.residual_percentile,
-        )
-        directional_residual = self._minmax(gray + self.row_weight * row_residual + self.col_weight * col_residual)
-
-        gabor_responses = [
-            np.abs(cv2.filter2D(gray_np, cv2.CV_32F, kernel))
-            for kernel in self.gabor_kernels
-        ]
-        gabor_broad = np.max(np.stack(gabor_responses, axis=0), axis=0)
-        gabor_broad = self._robust_normalize(torch.from_numpy(gabor_broad).unsqueeze(0))
-
-        return torch.cat([
-            gray_contrast,
-            directional_residual,
-            gabor_broad,
+            gray,
+            torch.from_numpy(local_residual).unsqueeze(0),
+            torch.from_numpy(edge_grad).unsqueeze(0),
         ], dim=0)
 
 
@@ -623,6 +155,172 @@ class MorphFusionGrayResidualChannels:
         ], dim=0)
 
 
+class MorphFusionClaheGrayChannels:
+    """新变体：CLAHE + gray + gray，去掉残差通道。
+
+    对应 ``input_mode=morph_fusion_clahe_gray``。
+    设计意图：测试"去掉残差通道"是否伤害判别能力。如果掉得少，说明 weak_residual
+    本来就帮不上忙；如果掉得多，说明 weak_residual 的贡献被低估。
+    通道布局：
+      C1: CLAHE(gray)
+      C2: gray (原本是 weak_residual)
+      C3: gray
+    """
+
+    def __init__(self, clahe_clip_limit=2.0, clahe_tile_grid_size=8):
+        self.to_tensor = transforms.ToTensor()
+        self.clahe = cv2.createCLAHE(
+            clipLimit=clahe_clip_limit,
+            tileGridSize=(clahe_tile_grid_size, clahe_tile_grid_size),
+        )
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        gray_np = gray.squeeze(0).numpy()
+        gray_u8 = np.clip(gray_np * 255.0, 0, 255).astype(np.uint8)
+        gray_contrast = self.clahe.apply(gray_u8).astype(np.float32) / 255.0
+        gray_contrast = torch.from_numpy(gray_contrast).unsqueeze(0)
+        return torch.cat([gray_contrast, gray, gray], dim=0)
+
+
+class MorphFusionLocal2DResidualChannels:
+    """🌟 新方案：CLAHE 对比度增强灰度 + 局部 2D 残差 + 原始灰度。
+
+    对应 ``input_mode=morph_fusion_local2d_residual_a01``。
+    与旧 morph_fusion_gray_residual_a01 的区别：把 weak_residual (按频率行的
+    时间方向中位数残差) 换成 local 2D residual (2D 邻域中位数残差)。
+
+    原因：weak_residual 假设异常只在时间方向偏离，对 chirp 跨频扫频和 pulse
+    宽频突发都不友好；local 2D residual 用真正的二维局部邻域，对 burst/chirp/
+    pulse 三种异常都能提取出清晰的偏离结构。
+
+    通道设计：
+      C1: CLAHE(gray) 对比度增强 (chirp/burst 友好)
+      C2: |gray - median_filter_2d(gray, win)| min-max 归一化 (任意 2D 异常均凸显)
+      C3: gray 原始灰度 (保真兜底)
+    """
+
+    def __init__(self, win=15, clahe_clip_limit=2.0, clahe_tile_grid_size=8):
+        self.win = win
+        self.to_tensor = transforms.ToTensor()
+        self.clahe = cv2.createCLAHE(
+            clipLimit=clahe_clip_limit,
+            tileGridSize=(clahe_tile_grid_size, clahe_tile_grid_size),
+        )
+
+    @staticmethod
+    def _minmax_np(arr):
+        lo, hi = arr.min(), arr.max()
+        return (arr - lo) / max(hi - lo, 1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))      # (1, H, W) in [0,1]
+        gray_np = gray.squeeze(0).numpy()
+        gray_u8 = np.clip(gray_np * 255.0, 0, 255).astype(np.uint8)
+
+        # C1: CLAHE 增强
+        gray_contrast = self.clahe.apply(gray_u8).astype(np.float32) / 255.0
+        gray_contrast = torch.from_numpy(gray_contrast).unsqueeze(0)
+
+        # C2: 2D 局部中位数残差
+        local_median = median_filter(gray_np, size=self.win)
+        residual = np.abs(gray_np - local_median)
+        residual = self._minmax_np(residual).astype(np.float32)
+        local_2d_residual = torch.from_numpy(residual).unsqueeze(0)
+
+        # C3: 原始灰度
+        return torch.cat([
+            gray_contrast,
+            local_2d_residual,
+            gray,
+        ], dim=0)
+
+
+class MorphFusionTopHatChannels:
+    """CLAHE 对比度增强灰度 + top-hat 局部显著性 + 原始灰度。
+
+    对应 ``input_mode=morph_fusion_tophat_a01``。
+    中间通道使用 white/black top-hat 的最大响应，目标是突出局部亮/暗小结构，
+    同时比 local std / local residual 更少放大整片背景纹理。
+    """
+
+    def __init__(self, kernel_size=13, clahe_clip_limit=2.0, clahe_tile_grid_size=8):
+        self.kernel_size = kernel_size
+        self.to_tensor = transforms.ToTensor()
+        self.clahe = cv2.createCLAHE(
+            clipLimit=clahe_clip_limit,
+            tileGridSize=(clahe_tile_grid_size, clahe_tile_grid_size),
+        )
+        self.kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_size, kernel_size))
+
+    @staticmethod
+    def _minmax_np(arr):
+        lo, hi = arr.min(), arr.max()
+        return (arr - lo) / max(hi - lo, 1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        gray_np = gray.squeeze(0).numpy()
+        gray_u8 = np.clip(gray_np * 255.0, 0, 255).astype(np.uint8)
+
+        gray_contrast = self.clahe.apply(gray_u8).astype(np.float32) / 255.0
+        gray_contrast = torch.from_numpy(gray_contrast).unsqueeze(0)
+
+        white_hat = cv2.morphologyEx(gray_u8, cv2.MORPH_TOPHAT, self.kernel).astype(np.float32)
+        black_hat = cv2.morphologyEx(gray_u8, cv2.MORPH_BLACKHAT, self.kernel).astype(np.float32)
+        top_hat = self._minmax_np(np.maximum(white_hat, black_hat)).astype(np.float32)
+        top_hat = torch.from_numpy(top_hat).unsqueeze(0)
+
+        return torch.cat([
+            gray_contrast,
+            top_hat,
+            gray,
+        ], dim=0)
+
+
+class MorphFusionMultiScaleResidualChannels:
+    """CLAHE 对比度增强灰度 + 多尺度背景残差 + 原始灰度。
+
+    对应 ``input_mode=morph_fusion_multiscale_residual_a01``。
+    中间通道用多个 Gaussian 平滑尺度的背景差分取最大值，避免旧 row residual
+    只偏向某一种信号形态。
+    """
+
+    def __init__(self, kernel_sizes=(7, 15, 31), clahe_clip_limit=2.0, clahe_tile_grid_size=8):
+        self.kernel_sizes = kernel_sizes
+        self.to_tensor = transforms.ToTensor()
+        self.clahe = cv2.createCLAHE(
+            clipLimit=clahe_clip_limit,
+            tileGridSize=(clahe_tile_grid_size, clahe_tile_grid_size),
+        )
+
+    @staticmethod
+    def _minmax_np(arr):
+        lo, hi = arr.min(), arr.max()
+        return (arr - lo) / max(hi - lo, 1e-6)
+
+    def __call__(self, image):
+        gray = self.to_tensor(image.convert('L'))
+        gray_np = gray.squeeze(0).numpy()
+        gray_u8 = np.clip(gray_np * 255.0, 0, 255).astype(np.uint8)
+
+        gray_contrast = self.clahe.apply(gray_u8).astype(np.float32) / 255.0
+        gray_contrast = torch.from_numpy(gray_contrast).unsqueeze(0)
+
+        residuals = []
+        for kernel_size in self.kernel_sizes:
+            background = cv2.GaussianBlur(gray_np, (kernel_size, kernel_size), 0)
+            residuals.append(np.abs(gray_np - background))
+        residual = self._minmax_np(np.maximum.reduce(residuals)).astype(np.float32)
+        residual = torch.from_numpy(residual).unsqueeze(0)
+
+        return torch.cat([
+            gray_contrast,
+            residual,
+            gray,
+        ], dim=0)
+
+
 class MorphFusionGrayResidualNoContrastChannels:
     def __init__(self, alpha=0.1):
         self.alpha = alpha
@@ -645,701 +343,6 @@ class MorphFusionGrayResidualNoContrastChannels:
             weak_residual,
             gray,
         ], dim=0)
-
-
-class NormalBgDeviationChannels:
-    """Compute pixel-wise deviation from training normal background distribution.
-
-    Uses robust statistics (median + MAD) estimated from training normal samples only.
-    Can be used standalone or as a channel in morph_fusion variants.
-
-    Formula:
-      median_normal[f,t] = median over N training normal images at pixel (f,t)
-      MAD_normal[f,t]    = median(|I_i[f,t] - median[f,t]|) over training images
-      deviation[f,t]     = |I[f,t] - median[f,t]| / (1.4826 * MAD[f,t] + eps)
-    """
-    def __init__(self):
-        self.to_tensor = transforms.ToTensor()
-        self.median = None
-        self.mad = None
-        self.eps = 1e-6
-
-    def set_stats(self, median_np, mad_np):
-        self.median = torch.from_numpy(median_np.astype(np.float32))
-        self.mad = torch.from_numpy(mad_np.astype(np.float32))
-
-    @staticmethod
-    def compute_normal_bg_stats_from_dataloader(train_dataloader, img_resize=240, img_cropsize=240):
-        """Compute pixel-wise median and MAD from training normal images.
-
-        Only uses training normal samples (label==0), consistent with normal-only training.
-        Images are preprocessed identically to the model transform pipeline:
-        BGR numpy -> RGB -> PIL -> Resize -> CenterCrop -> convert('L') -> grayscale.
-
-        Returns:
-            median: (H, W) numpy float32, pixel-wise median over training normals
-            mad:    (H, W) numpy float32, pixel-wise median absolute deviation
-        """
-        all_gray = []
-        print(f'Computing normal background stats from training data '
-              f'(resize={img_resize}, crop={img_cropsize})...')
-        for (data, mask, label, name, img_type) in tqdm(
-                train_dataloader, desc='Normal bg stats', leave=False):
-            for i in range(len(data)):
-                if int(label[i]) != 0:
-                    continue
-                img_bgr = data[i].numpy()
-                img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-                pil_img = Image.fromarray(img_rgb)
-                pil_img = TF.resize(pil_img, (img_resize, img_resize), Image.BICUBIC)
-                pil_img = TF.center_crop(pil_img, img_cropsize)
-                gray_pil = pil_img.convert('L')
-                gray = np.array(gray_pil, dtype=np.float32)
-                if gray.max() > 1.5:
-                    gray /= 255.0
-                all_gray.append(gray)
-
-        if not all_gray:
-            raise RuntimeError(
-                'No training normal images found for normal_bg_deviation stats computation. '
-                'Check dataset and split_mode.'
-            )
-
-        stack = np.stack(all_gray, axis=0)
-        median = np.median(stack, axis=0).astype(np.float32)
-        mad = np.median(np.abs(stack - median), axis=0).astype(np.float32)
-
-        print(f'  Normal bg stats computed: {len(all_gray)} images, '
-              f'shape=({median.shape[0]}, {median.shape[1]}), '
-              f'median(MAD)={mad.mean():.4f}')
-        return median, mad
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        if self.median is None or self.mad is None:
-            raise RuntimeError(
-                'NormalBgDeviationChannels: stats not set. '
-                'Call set_stats() before using the transform.'
-            )
-        median = self.median.to(gray.device)
-        mad = self.mad.to(gray.device)
-
-        abs_dev = (gray - median).abs()
-        deviation = abs_dev / (1.4826 * mad + self.eps)
-
-        deviation_np = deviation.squeeze(0).cpu().numpy()
-        p2 = np.percentile(deviation_np, 2)
-        p98 = np.percentile(deviation_np, 98)
-        deviation = torch.clamp(deviation, float(p2), float(p98))
-        deviation = (deviation - float(p2)) / max(float(p98 - p2), self.eps)
-
-        return torch.cat([deviation, deviation, deviation], dim=0)
-
-
-class MorphFusionNormalBgResidualChannels:
-    """方案A: original_gray + weak_residual(alpha=0.1) + normal_bg_deviation
-
-    Replaces gray_contrast with normal_bg_deviation as the third channel.
-    """
-    def __init__(self, alpha=0.1):
-        self.alpha = alpha
-        self.to_tensor = transforms.ToTensor()
-        self.bg_deviation = NormalBgDeviationChannels()
-
-    def set_bg_stats(self, median_np, mad_np):
-        self.bg_deviation.set_stats(median_np, mad_np)
-
-    @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-
-        freq_background = gray.median(dim=-1, keepdim=True).values
-        residual = (gray - freq_background).abs()
-        weak_residual = self._minmax(gray + self.alpha * residual)
-
-        deviation_3ch = self.bg_deviation(image)
-        deviation = deviation_3ch[0:1, :, :]
-
-        return torch.cat([
-            gray,           # channel 1: original_gray
-            weak_residual,  # channel 2: weak_residual
-            deviation,      # channel 3: normal_bg_deviation
-        ], dim=0)
-
-
-class MorphFusionContrastResidualNormalBgChannels:
-    """方案B: gray_contrast + weak_residual(alpha=0.1) + normal_bg_deviation
-
-    Keeps gray_contrast, replaces original_gray with normal_bg_deviation.
-    """
-    def __init__(self, alpha=0.1, clahe_clip_limit=2.0, clahe_tile_grid_size=8):
-        self.alpha = alpha
-        self.to_tensor = transforms.ToTensor()
-        self.clahe = cv2.createCLAHE(
-            clipLimit=clahe_clip_limit,
-            tileGridSize=(clahe_tile_grid_size, clahe_tile_grid_size),
-        )
-        self.bg_deviation = NormalBgDeviationChannels()
-
-    def set_bg_stats(self, median_np, mad_np):
-        self.bg_deviation.set_stats(median_np, mad_np)
-
-    @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        gray_np = gray.squeeze(0).numpy()
-        gray_u8 = np.clip(gray_np * 255.0, 0, 255).astype(np.uint8)
-
-        gray_contrast = self.clahe.apply(gray_u8).astype(np.float32) / 255.0
-        gray_contrast = torch.from_numpy(gray_contrast).unsqueeze(0)
-
-        freq_background = gray.median(dim=-1, keepdim=True).values
-        residual = (gray - freq_background).abs()
-        weak_residual = self._minmax(gray + self.alpha * residual)
-
-        deviation_3ch = self.bg_deviation(image)
-        deviation = deviation_3ch[0:1, :, :]
-
-        return torch.cat([
-            gray_contrast,  # channel 1: gray_contrast
-            weak_residual,  # channel 2: weak_residual
-            deviation,      # channel 3: normal_bg_deviation
-        ], dim=0)
-
-
-class MorphFusionGaborTextureChannels:
-    def __init__(self, alpha=0.2, clahe_clip_limit=2.0, clahe_tile_grid_size=8,
-                 gabor_kernel_size=31, gabor_sigma=6.0, gabor_lambda=18.0, gabor_gamma=0.5,
-                 texture_kernel_size=15, percentile=0.995):
-        self.alpha = alpha
-        self.percentile = percentile
-        self.texture_kernel_size = texture_kernel_size
-        self.to_tensor = transforms.ToTensor()
-        self.clahe = cv2.createCLAHE(
-            clipLimit=clahe_clip_limit,
-            tileGridSize=(clahe_tile_grid_size, clahe_tile_grid_size),
-        )
-        self.gabor_kernels = [
-            cv2.getGaborKernel(
-                (gabor_kernel_size, gabor_kernel_size),
-                gabor_sigma,
-                theta,
-                gabor_lambda,
-                gabor_gamma,
-                0,
-                ktype=cv2.CV_32F,
-            )
-            for theta in (0, np.pi / 4, np.pi / 2, 3 * np.pi / 4)
-        ]
-
-    def _robust_normalize(self, channel):
-        flat = channel.flatten()
-        if flat.numel() == 0:
-            return channel
-        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
-        return (channel / scale).clamp(0.0, 1.0)
-
-    @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
-
-    def _local_std(self, gray):
-        pad = self.texture_kernel_size // 2
-        gray_b = gray.unsqueeze(0)
-        mean = F.avg_pool2d(gray_b, self.texture_kernel_size, stride=1, padding=pad)
-        mean_sq = F.avg_pool2d(gray_b * gray_b, self.texture_kernel_size, stride=1, padding=pad)
-        var = (mean_sq - mean * mean).clamp_min(0.0)
-        return torch.sqrt(var).squeeze(0)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        gray_np = gray.squeeze(0).numpy()
-        gray_u8 = np.clip(gray_np * 255.0, 0, 255).astype(np.uint8)
-
-        gray_contrast = self.clahe.apply(gray_u8).astype(np.float32) / 255.0
-        gray_contrast = torch.from_numpy(gray_contrast).unsqueeze(0)
-
-        freq_background = gray.median(dim=-1, keepdim=True).values
-        residual = (gray - freq_background).abs()
-        weak_residual = self._minmax(gray + self.alpha * residual)
-
-        gabor_responses = [
-            np.abs(cv2.filter2D(gray_np, cv2.CV_32F, kernel))
-            for kernel in self.gabor_kernels
-        ]
-        gabor_broad = np.max(np.stack(gabor_responses, axis=0), axis=0)
-        gabor_broad = self._robust_normalize(torch.from_numpy(gabor_broad).unsqueeze(0))
-
-        local_std = self._robust_normalize(self._local_std(gray))
-        texture_mix = torch.maximum(gabor_broad, local_std)
-
-        return torch.cat([
-            gray_contrast,
-            weak_residual,
-            texture_mix,
-        ], dim=0)
-
-
-class MorphFusionGrayResEnergyChannels:
-    def __init__(self, alpha=0.2, kernel_size=15):
-        self.alpha = alpha
-        self.kernel_size = kernel_size
-        self.to_tensor = transforms.ToTensor()
-
-    @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-
-        freq_background = gray.median(dim=-1, keepdim=True).values
-        residual = (gray - freq_background).abs()
-        weak_residual = self._minmax(gray + self.alpha * residual)
-
-        pad = self.kernel_size // 2
-        local_sq_mean = F.avg_pool2d((gray * gray).unsqueeze(0), self.kernel_size, stride=1, padding=pad).squeeze(0)
-        local_energy = torch.sqrt(local_sq_mean.clamp_min(0.0))
-
-        return torch.cat([
-            gray,
-            weak_residual,
-            self._minmax(local_energy),
-        ], dim=0)
-
-
-class MorphFusionGrayResBandChannels:
-    def __init__(self, alpha=0.2, kernel_size=15, smooth_mix=0.5, profile_mix=0.5):
-        self.alpha = alpha
-        self.kernel_size = kernel_size
-        self.smooth_mix = smooth_mix
-        self.profile_mix = profile_mix
-        self.to_tensor = transforms.ToTensor()
-
-    @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-
-        freq_background = gray.median(dim=-1, keepdim=True).values
-        residual = (gray - freq_background).abs()
-        weak_residual = self._minmax(gray + self.alpha * residual)
-
-        pad = self.kernel_size // 2
-        local_smooth = F.avg_pool2d(gray.unsqueeze(0), self.kernel_size, stride=1, padding=pad).squeeze(0)
-        row_band_profile = local_smooth.mean(dim=-1, keepdim=True).expand_as(gray)
-        band_response = self.smooth_mix * local_smooth + self.profile_mix * row_band_profile
-
-        return torch.cat([
-            gray,
-            weak_residual,
-            self._minmax(band_response),
-        ], dim=0)
-
-
-class ChirpDirectionalChannels:
-    def __init__(self, sigma=1.0, percentile=0.995):
-        self.sigma = sigma
-        self.percentile = percentile
-        self.to_tensor = transforms.ToTensor()
-
-    def _robust_normalize(self, channel):
-        flat = channel.flatten()
-        if flat.numel() == 0:
-            return channel
-        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
-        return (channel / scale).clamp(0.0, 1.0)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        gray_np = gray.squeeze(0).numpy()
-
-        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
-        grad_x = cv2.Sobel(smoothed, cv2.CV_32F, 1, 0, ksize=3)
-        grad_y = cv2.Sobel(smoothed, cv2.CV_32F, 0, 1, ksize=3)
-        grad_mag = np.sqrt(grad_x * grad_x + grad_y * grad_y)
-
-        kernel_45 = np.array([[2, 1, 0], [1, 0, -1], [0, -1, -2]], dtype=np.float32)
-        kernel_135 = np.array([[0, 1, 2], [-1, 0, 1], [-2, -1, 0]], dtype=np.float32)
-        resp_45 = np.abs(cv2.filter2D(smoothed, cv2.CV_32F, kernel_45))
-        resp_135 = np.abs(cv2.filter2D(smoothed, cv2.CV_32F, kernel_135))
-        diagonal_resp = np.maximum(resp_45, resp_135)
-        diagonal_resp = gaussian_filter(diagonal_resp, sigma=1.0)
-
-        grad_mag = torch.from_numpy(grad_mag).unsqueeze(0)
-        diagonal_resp = torch.from_numpy(diagonal_resp).unsqueeze(0)
-
-        return torch.cat([
-            gray,
-            self._robust_normalize(grad_mag),
-            self._robust_normalize(diagonal_resp),
-        ], dim=0)
-
-
-class ChirpRidgeChannels:
-    def __init__(self, sigma=1.0, percentile=0.995):
-        self.sigma = sigma
-        self.percentile = percentile
-        self.to_tensor = transforms.ToTensor()
-
-    def _robust_normalize(self, channel):
-        flat = channel.flatten()
-        if flat.numel() == 0:
-            return channel
-        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
-        return (channel / scale).clamp(0.0, 1.0)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        gray_np = gray.squeeze(0).numpy()
-
-        smoothed = gaussian_filter(gray_np, sigma=self.sigma)
-        kernel_45 = np.array([
-            [0, 0, 1, 0, 0],
-            [0, 1, 2, 1, 0],
-            [1, 2, 3, 2, 1],
-            [0, 1, 2, 1, 0],
-            [0, 0, 1, 0, 0],
-        ], dtype=np.float32)
-        kernel_135 = np.fliplr(kernel_45)
-        kernel_45 = kernel_45 / kernel_45.sum()
-        kernel_135 = kernel_135 / kernel_135.sum()
-
-        ridge_45 = cv2.filter2D(smoothed, cv2.CV_32F, kernel_45)
-        ridge_135 = cv2.filter2D(smoothed, cv2.CV_32F, kernel_135)
-        ridge_resp = np.maximum(ridge_45, ridge_135)
-        ridge_resp = np.maximum(ridge_resp - smoothed, 0.0)
-
-        continuity_45 = cv2.filter2D(ridge_resp, cv2.CV_32F, kernel_45)
-        continuity_135 = cv2.filter2D(ridge_resp, cv2.CV_32F, kernel_135)
-        continuity = np.maximum(continuity_45, continuity_135)
-
-        ridge_resp = torch.from_numpy(ridge_resp).unsqueeze(0)
-        continuity = torch.from_numpy(continuity).unsqueeze(0)
-
-        return torch.cat([
-            gray,
-            self._robust_normalize(ridge_resp),
-            self._robust_normalize(continuity),
-        ], dim=0)
-
-
-class ChirpTrackEnhanceChannels:
-    def __init__(self, img_resize=240, img_cropsize=240, sigma_small=0.8, sigma_large=3.0, percentile=0.995, kernel_size=11, angles=(-60, -45, -30, 30, 45, 60)):
-        self.img_resize = img_resize
-        self.img_cropsize = img_cropsize
-        self.sigma_small = sigma_small
-        self.sigma_large = sigma_large
-        self.percentile = percentile
-        self.kernel_size = kernel_size
-        self.angles = angles
-        self.to_tensor = transforms.ToTensor()
-        self.kernels = [self._make_line_kernel(kernel_size, angle) for angle in angles]
-
-    @staticmethod
-    def _make_line_kernel(kernel_size, angle_deg):
-        kernel = np.zeros((kernel_size, kernel_size), dtype=np.uint8)
-        center = kernel_size // 2
-        radius = kernel_size // 2
-        theta = np.deg2rad(angle_deg)
-        dx = int(round(radius * np.cos(theta)))
-        dy = int(round(radius * np.sin(theta)))
-        pt1 = (center - dx, center - dy)
-        pt2 = (center + dx, center + dy)
-        cv2.line(kernel, pt1, pt2, color=1, thickness=1)
-        kernel = kernel.astype(np.float32)
-        s = kernel.sum()
-        if s > 0:
-            kernel /= s
-        return kernel
-
-    def _robust_normalize(self, channel):
-        flat = channel.flatten()
-        if flat.numel() == 0:
-            return channel
-        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
-        return (channel / scale).clamp(0.0, 1.0)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        gray_np = gray.squeeze(0).numpy().astype(np.float32)
-
-        fine = gaussian_filter(gray_np, sigma=self.sigma_small)
-        coarse = gaussian_filter(gray_np, sigma=self.sigma_large)
-        local_bright = np.maximum(fine - coarse, 0.0)
-
-        track_resp = []
-        continuity_resp = []
-        for kernel in self.kernels:
-            track = cv2.filter2D(local_bright, cv2.CV_32F, kernel)
-            continuity = cv2.filter2D(track, cv2.CV_32F, kernel)
-            track_resp.append(track)
-            continuity_resp.append(continuity)
-
-        track_map = np.max(np.stack(track_resp, axis=0), axis=0)
-        continuity_map = np.max(np.stack(continuity_resp, axis=0), axis=0)
-        continuity_map = np.maximum(continuity_map - 0.25 * track_map, 0.0)
-
-        feature = torch.cat([
-            gray,
-            self._robust_normalize(torch.from_numpy(track_map).unsqueeze(0)),
-            self._robust_normalize(torch.from_numpy(continuity_map).unsqueeze(0)),
-        ], dim=0)
-
-        feature = TF.resize(feature, [self.img_resize, self.img_resize], interpolation=transforms.InterpolationMode.BICUBIC)
-        feature = TF.center_crop(feature, [self.img_cropsize, self.img_cropsize])
-        return feature
-
-
-class ChirpRGBTrackChannels:
-    def __init__(self, sigma_small=0.8, sigma_large=2.5, percentile=0.995, kernel_size=9, alpha=0.35, angles=(-60, -45, -30, 30, 45, 60)):
-        self.sigma_small = sigma_small
-        self.sigma_large = sigma_large
-        self.percentile = percentile
-        self.kernel_size = kernel_size
-        self.alpha = alpha
-        self.angles = angles
-        self.to_tensor = transforms.ToTensor()
-        self.kernels = [self._make_line_kernel(kernel_size, angle) for angle in angles]
-
-    @staticmethod
-    def _make_line_kernel(kernel_size, angle_deg):
-        kernel = np.zeros((kernel_size, kernel_size), dtype=np.uint8)
-        center = kernel_size // 2
-        radius = kernel_size // 2
-        theta = np.deg2rad(angle_deg)
-        dx = int(round(radius * np.cos(theta)))
-        dy = int(round(radius * np.sin(theta)))
-        pt1 = (center - dx, center - dy)
-        pt2 = (center + dx, center + dy)
-        cv2.line(kernel, pt1, pt2, color=1, thickness=1)
-        kernel = kernel.astype(np.float32)
-        s = kernel.sum()
-        if s > 0:
-            kernel /= s
-        return kernel
-
-    def _robust_normalize(self, channel):
-        flat = channel.flatten()
-        if flat.numel() == 0:
-            return channel
-        scale = torch.quantile(flat, self.percentile).clamp_min(1e-6)
-        return (channel / scale).clamp(0.0, 1.0)
-
-    def __call__(self, image):
-        rgb = self.to_tensor(image.convert('RGB'))
-        gray = self.to_tensor(image.convert('L')).squeeze(0).numpy().astype(np.float32)
-
-        fine = gaussian_filter(gray, sigma=self.sigma_small)
-        coarse = gaussian_filter(gray, sigma=self.sigma_large)
-        local_bright = np.maximum(fine - coarse, 0.0)
-
-        track_resp = []
-        continuity_resp = []
-        for kernel in self.kernels:
-            track = cv2.filter2D(local_bright, cv2.CV_32F, kernel)
-            continuity = cv2.filter2D(track, cv2.CV_32F, kernel)
-            track_resp.append(track)
-            continuity_resp.append(continuity)
-
-        track_map = np.max(np.stack(track_resp, axis=0), axis=0)
-        continuity_map = np.max(np.stack(continuity_resp, axis=0), axis=0)
-        enhance = np.maximum(track_map, continuity_map)
-        enhance = self._robust_normalize(torch.from_numpy(enhance).unsqueeze(0))
-
-        return torch.clamp(rgb + self.alpha * enhance.repeat(3, 1, 1), 0.0, 1.0)
-
-
-class LogPowerChannels:
-    def __init__(self, gain=9.0):
-        self.gain = gain
-        self.to_tensor = transforms.ToTensor()
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        log_power = torch.log1p(self.gain * gray) / torch.log1p(torch.tensor(self.gain, dtype=gray.dtype))
-        return log_power.repeat(3, 1, 1)
-
-
-class DSSSStatisticalChannels:
-    def __init__(self, kernel_size=9):
-        self.kernel_size = kernel_size
-        self.to_tensor = transforms.ToTensor()
-
-    @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-
-        freq_background = gray.median(dim=-1, keepdim=True).values
-        residual = (gray - freq_background).abs()
-
-        pad = self.kernel_size // 2
-        local_mean = F.avg_pool2d(gray.unsqueeze(0), self.kernel_size, stride=1, padding=pad)
-        local_sq_mean = F.avg_pool2d((gray * gray).unsqueeze(0), self.kernel_size, stride=1, padding=pad)
-        local_var = (local_sq_mean - local_mean * local_mean).clamp_min(0).sqrt().squeeze(0)
-
-        return torch.cat([
-            gray,
-            self._minmax(residual),
-            self._minmax(local_var),
-        ], dim=0)
-
-
-class DSSSEnergySmoothChannels:
-    def __init__(self, gain=9.0, kernel_size=17):
-        self.gain = gain
-        self.kernel_size = kernel_size
-        self.to_tensor = transforms.ToTensor()
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        log_power = torch.log1p(self.gain * gray) / torch.log1p(torch.tensor(self.gain, dtype=gray.dtype))
-
-        pad = self.kernel_size // 2
-        smoothed = F.avg_pool2d(gray.unsqueeze(0), self.kernel_size, stride=1, padding=pad).squeeze(0)
-
-        return torch.cat([gray, log_power, smoothed], dim=0)
-
-
-class DSSSLowFreqBandChannels:
-    def __init__(self, kernel_size=21):
-        self.kernel_size = kernel_size
-        self.to_tensor = transforms.ToTensor()
-
-    @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-
-        pad = self.kernel_size // 2
-        low_freq_smooth = F.avg_pool2d(gray.unsqueeze(0), self.kernel_size, stride=1, padding=pad).squeeze(0)
-        band_energy = gray.mean(dim=-1, keepdim=True).expand_as(gray)
-
-        return torch.cat([
-            gray,
-            self._minmax(low_freq_smooth),
-            self._minmax(band_energy),
-        ], dim=0)
-
-
-class DSSSEnergyProfileChannels:
-    def __init__(self):
-        self.to_tensor = transforms.ToTensor()
-
-    @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        time_profile = gray.mean(dim=-2, keepdim=True).expand_as(gray)
-        freq_profile = gray.mean(dim=-1, keepdim=True).expand_as(gray)
-
-        return torch.cat([
-            gray,
-            self._minmax(time_profile),
-            self._minmax(freq_profile),
-        ], dim=0)
-
-
-class DSSSRGBResidualChannels:
-    def __init__(self):
-        self.to_tensor = transforms.ToTensor()
-
-    @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        freq_background = gray.median(dim=-1, keepdim=True).values
-        residual = (gray - freq_background).abs()
-        return torch.cat([gray, gray, self._minmax(residual)], dim=0)
-
-
-class DSSSWeakResidualChannels:
-    def __init__(self, alpha=0.2):
-        self.alpha = alpha
-        self.to_tensor = transforms.ToTensor()
-
-    @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        freq_background = gray.median(dim=-1, keepdim=True).values
-        residual = (gray - freq_background).abs()
-        weak_residual = self._minmax(gray + self.alpha * residual)
-        return torch.cat([gray, gray, weak_residual], dim=0)
-
-
-class DSSSGrayWeakResidualResidualChannels:
-    def __init__(self, alpha=0.2):
-        self.alpha = alpha
-        self.to_tensor = transforms.ToTensor()
-
-    @staticmethod
-    def _minmax(channel):
-        c_min = channel.amin(dim=(-2, -1), keepdim=True)
-        c_max = channel.amax(dim=(-2, -1), keepdim=True)
-        return (channel - c_min) / (c_max - c_min).clamp_min(1e-6)
-
-    def __call__(self, image):
-        gray = self.to_tensor(image.convert('L'))
-        freq_background = gray.median(dim=-1, keepdim=True).values
-        residual = (gray - freq_background).abs()
-        weak_residual = self._minmax(gray + self.alpha * residual)
-        return torch.cat([gray, weak_residual, weak_residual], dim=0)
-
-
-class DSSSCLAHEChannels:
-    def __init__(self, clip_limit=2.0, tile_grid_size=(8, 8)):
-        self.clip_limit = clip_limit
-        self.tile_grid_size = tile_grid_size
-        self.to_tensor = transforms.ToTensor()
-
-    def __call__(self, image):
-        gray_pil = image.convert('L')
-        gray = self.to_tensor(gray_pil)
-        gray_np = np.array(gray_pil)
-        clahe = cv2.createCLAHE(clipLimit=self.clip_limit, tileGridSize=self.tile_grid_size)
-        enhanced = clahe.apply(gray_np)
-        enhanced = self.to_tensor(Image.fromarray(enhanced))
-        return torch.cat([gray, gray, enhanced], dim=0)
 
 
 class ResidualVisualAdapter(nn.Module):
@@ -1916,6 +919,7 @@ class PromptAD(torch.nn.Module):
         self.input_mode = self._resolve_input_mode(kwargs.get('input_mode', 'auto'), self.dataset_name)
         self.cls_score_mode = kwargs.get('cls_score_mode', 'text_only')
         self.visual_topk_ratio = kwargs.get('visual_topk_ratio', 0.05)
+        self.visual_gallery_chunk_size = int(kwargs.get('visual_gallery_chunk_size', 1024))
         self.visual_score_alpha = kwargs.get('visual_score_alpha', 1.0)
         self.visual_score_beta = kwargs.get('visual_score_beta', 1.0)
         self.visual_score_gamma = kwargs.get('visual_score_gamma', 0.0)
@@ -1927,6 +931,12 @@ class PromptAD(torch.nn.Module):
         self.dense_mask_score_alpha = kwargs.get('dense_mask_score_alpha', 1.0)
         self.use_text_aligned_dense = kwargs.get('text_aligned_dense', False)
         self.text_aligned_dense_score_beta = kwargs.get('text_aligned_dense_score_beta', 1.0)
+        self.ta_normal_quantile = float(kwargs.get('ta_normal_quantile', 0.95))
+        self.ta_normal_excess_scale_floor = float(kwargs.get('ta_normal_excess_scale_floor', 1e-6))
+        self.ta_normal_topk_threshold = None
+        self.ta_normal_topk_scale = None
+        self.ta_normal_max_threshold = None
+        self.ta_normal_max_scale = None
         self.use_cnn_vit_mamba_fusion = kwargs.get('cnn_vit_mamba_fusion', False)
         self.use_rn50_visual_fusion = kwargs.get('rn50_visual_fusion', False)
         self.rn50_pretrained = kwargs.get('rn50_pretrained', 'openai')
@@ -1979,185 +989,37 @@ class PromptAD(torch.nn.Module):
             transforms.Resize((kwargs['img_resize'], kwargs['img_resize']), Image.BICUBIC),
             transforms.CenterCrop(kwargs['img_cropsize']),
         ]
-        if self.input_mode == 'spectral_gradient':
+        if self.input_mode == 'gray3':
             self.transform = transforms.Compose(pre_resize_crop + [
-                SpectrogramGradientChannels(),
+                Gray3Channels(),
                 transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'spectral_gradient_v2':
+        elif self.input_mode == 'gray_local2d_edge':
             self.transform = transforms.Compose(pre_resize_crop + [
-                SpectrogramGradientChannelsV2(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionChannels(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_plus':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionPlusChannels(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_dualgrad':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionDualGradChannels(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_balanced':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionBalancedChannels(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_gray_resgrad':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionGrayResGradChannels(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_gabor_residual':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionGaborResidualChannels(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_gabor_residual_a01':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionGaborResidualChannels(alpha=0.1),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_gabor_texture':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionGaborTextureChannels(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_gabor_directional_residual':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionGaborDirectionalResidualChannels(),
+                GrayLocal2DEdgeChannels(win=15),
                 transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
         elif self.input_mode == 'morph_fusion_gray_residual_a01':
             self.transform = transforms.Compose(pre_resize_crop + [
                 MorphFusionGrayResidualChannels(alpha=0.1),
                 transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_gray_residual_a01_clahe10':
+        elif self.input_mode == 'morph_fusion_local2d_residual_a01':
             self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=1.0),
+                MorphFusionLocal2DResidualChannels(win=15),
                 transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_gray_residual_a01_clahe15':
+        elif self.input_mode == 'morph_fusion_tophat_a01':
             self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=1.5),
+                MorphFusionTopHatChannels(kernel_size=13),
                 transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_gray_residual_a01_clahe30':
+        elif self.input_mode == 'morph_fusion_multiscale_residual_a01':
             self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=3.0),
+                MorphFusionMultiScaleResidualChannels(),
                 transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_gray_residual_a01_tile4':
+        elif self.input_mode == 'morph_fusion_clahe_gray':
             self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=2.0, clahe_tile_grid_size=4),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_gray_residual_a01_tile16':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=2.0, clahe_tile_grid_size=16),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_gray_residual_a01_clahe05':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=0.5),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_gray_residual_a01_clahe80':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=8.0),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_gray_residual_a01_clahe200':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=20.0),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_gray_residual_a01_c5t2':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=5.0, clahe_tile_grid_size=2),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_gray_residual_a01_tile2':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=2.0, clahe_tile_grid_size=2),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_gray_residual_a01_tile32':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionGrayResidualChannels(alpha=0.1, clahe_clip_limit=2.0, clahe_tile_grid_size=32),
+                MorphFusionClaheGrayChannels(),
                 transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
         elif self.input_mode == 'morph_fusion_gray_residual_no_contrast_a01':
             self.transform = transforms.Compose(pre_resize_crop + [
                 MorphFusionGrayResidualNoContrastChannels(alpha=0.1),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'gray_contrast_only':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                GrayContrastOnlyChannels(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_gray_resenergy':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionGrayResEnergyChannels(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_gray_resband':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                MorphFusionGrayResBandChannels(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'chirp_directional':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                ChirpDirectionalChannels(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'chirp_ridge':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                ChirpRidgeChannels(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'chirp_track_enhance':
-            self.transform = transforms.Compose([
-                ChirpTrackEnhanceChannels(
-                    img_resize=kwargs['img_resize'],
-                    img_cropsize=kwargs['img_cropsize']),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'chirp_rgb_track':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                ChirpRGBTrackChannels(),
-                transforms.Normalize(mean=mean_train, std=std_train)])
-        elif self.input_mode == 'log_power':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                LogPowerChannels(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'dsss_statistical':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                DSSSStatisticalChannels(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'dsss_energy_smooth':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                DSSSEnergySmoothChannels(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'dsss_lowfreq_band':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                DSSSLowFreqBandChannels(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'dsss_energy_profile':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                DSSSEnergyProfileChannels(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'dsss_rgb_residual':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                DSSSRGBResidualChannels(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'dsss_weak_residual':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                DSSSWeakResidualChannels(alpha=0.2),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'dsss_gray_weakresidual_weakresidual':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                DSSSGrayWeakResidualResidualChannels(alpha=0.2),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'dsss_weak_residual_only':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                WeakResidualOnlyChannels(alpha=0.2),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'dsss_weak_residual_only_a01':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                WeakResidualOnlyChannels(alpha=0.1),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'dsss_clahe':
-            self.transform = transforms.Compose(pre_resize_crop + [
-                DSSSCLAHEChannels(),
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_normal_bg_residual':
-            self._normal_bg_transform = MorphFusionNormalBgResidualChannels(alpha=0.1)
-            self.transform = transforms.Compose(pre_resize_crop + [
-                self._normal_bg_transform,
-                transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
-        elif self.input_mode == 'morph_fusion_contrast_residual_normal_bg':
-            self._normal_bg_transform = MorphFusionContrastResidualNormalBgChannels(alpha=0.1)
-            self.transform = transforms.Compose(pre_resize_crop + [
-                self._normal_bg_transform,
                 transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train)])
         else:
             self.transform = transforms.Compose(pre_resize_crop + [
@@ -2175,27 +1037,9 @@ class PromptAD(torch.nn.Module):
     @staticmethod
     def _resolve_input_mode(input_mode, dataset_name):
         if input_mode != 'auto':
-            if input_mode == 'signal_adaptive':
-                if dataset_name in {'burst_signal', 'chirp_signal', 'wideband_pulse'}:
-                    return 'spectral_gradient'
-                if dataset_name == 'dsss_signal':
-                    return 'rgb'
-                if dataset_name in {'spectrum', 'sample', 'deceptive_signal', 'rf_spe_png'}:
-                    return 'spectral_gradient'
-                return 'rgb'
-            if input_mode == 'signal_adaptive_v2':
-                if dataset_name in {'burst_signal', 'chirp_signal'}:
-                    return 'spectral_gradient'
-                if dataset_name == 'dsss_signal':
-                    return 'dsss_weak_residual'
-                if dataset_name == 'wideband_pulse':
-                    return 'rgb'
-                if dataset_name in {'spectrum', 'sample', 'deceptive_signal', 'rf_spe_png'}:
-                    return 'spectral_gradient'
-                return 'rgb'
             return input_mode
-        if dataset_name in {'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal', 'wideband_pulse', 'rf_spe_png'}:
-            return 'spectral_gradient'
+        if dataset_name in {'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal', 'pulse_signal', 'wideband_pulse', 'rf_spe_png'}:
+            return 'morph_fusion_gray_residual_a01'
         return 'rgb'
 
     def set_normal_bg_stats(self, median, mad):
@@ -2950,17 +1794,18 @@ class PromptAD(torch.nn.Module):
         # 所以矩阵乘法 visual_feature @ gallery.T 等价于余弦相似度。
         N = visual_features[1].shape[0]
 
-        # 第一路 patch 特征和 feature_gallery1 做余弦相似度。
-        # 1.0 - cosine_similarity 将“相似度”转成“距离”。
-        # min(dim=-1) 表示对每个测试 patch 找一个最相似的正常 patch。
-        score1, _ = (1.0 - visual_features[2] @ self.feature_gallery1.t()).min(dim=-1)
+        # 沿 gallery 维度分块计算，避免一次性物化 (B, P, N·P) 的中间张量。
+        # 最终结果和单次大矩阵乘相同：每个 probe patch 取与所有 gallery patch
+        # 的最小余弦距离。chunk_size 是经验值，单块矩阵控制在 ~1 GiB 以内。
+        score1 = self._min_cosine_dist_chunked(
+            visual_features[2], self.feature_gallery1, self.visual_gallery_chunk_size
+        )
+        score1 = score1 / 2.0
 
-        # 除以 2 是为了把余弦距离大致缩放到 [0, 1] 范围。
-        score1 /= 2.0
-
-        # 第二路 patch 特征同理。
-        score2, _ = (1.0 - visual_features[3] @ self.feature_gallery2.t()).min(dim=-1)
-        score2 /= 2.0
+        score2 = self._min_cosine_dist_chunked(
+            visual_features[3], self.feature_gallery2, self.visual_gallery_chunk_size
+        )
+        score2 = score2 / 2.0
 
         # 两路视觉异常分数取平均。
         score = torch.zeros((N, self.grid_size[0] * self.grid_size[1])) + 0.5 * (score1 + score2).cpu()
@@ -2968,6 +1813,26 @@ class PromptAD(torch.nn.Module):
         # reshape 成 patch 级异常图：
         # (N, grid_h * grid_w) -> (N, 1, grid_h, grid_w)
         return score.reshape((N, self.grid_size[0], self.grid_size[1])).unsqueeze(1)
+
+    @staticmethod
+    def _min_cosine_dist_chunked(probe, gallery, chunk_size=1024):
+        """对每个 probe patch 求与 gallery 中最相似 patch 的余弦距离。
+
+        probe   shape: (B, P, D)
+        gallery shape: (M, D)
+        return  shape: (B, P)
+        """
+        chunk_size = max(1, int(chunk_size))
+        if gallery.shape[0] <= chunk_size:
+            sim, _ = (probe @ gallery.t()).max(dim=-1)
+            return 1.0 - sim
+
+        best_sim = None
+        for start in range(0, gallery.shape[0], chunk_size):
+            chunk = gallery[start:start + chunk_size]
+            sim_chunk, _ = (probe @ chunk.t()).max(dim=-1)
+            best_sim = sim_chunk if best_sim is None else torch.maximum(best_sim, sim_chunk)
+        return 1.0 - best_sim
 
     def calculate_dense_mask_logits(self, visual_features):
         if self.dense_mask_head is None:
@@ -2993,13 +1858,50 @@ class PromptAD(torch.nn.Module):
             self.model.logit_scale,
         )
 
+    def summarize_text_aligned_map(self, ta_map):
+        flat = ta_map.flatten(1)
+        topk = max(1, int(flat.shape[1] * self.visual_topk_ratio))
+        topk_score = torch.topk(flat, k=topk, dim=1).values.mean(dim=1)
+        max_score = flat.max(dim=1).values
+        return topk_score, max_score
+
     def calculate_text_aligned_dense_score(self, visual_features):
         raw_logits, post_logits = self.calculate_text_aligned_dense_logits(visual_features)
         ta_map = 0.5 * (torch.sigmoid(raw_logits) + torch.sigmoid(post_logits))
-        flat = ta_map.flatten(1)
-        topk = max(1, int(flat.shape[1] * self.visual_topk_ratio))
-        image_score = torch.topk(flat, k=topk, dim=1).values.mean(dim=1)
+        image_score, _ = self.summarize_text_aligned_map(ta_map)
         return image_score, ta_map
+
+    def set_text_aligned_normal_calibration(self, visual_features):
+        if self.text_aligned_dense_head is None:
+            return
+        _, ta_map = self.calculate_text_aligned_dense_score(visual_features)
+        topk_score, max_score = self.summarize_text_aligned_map(ta_map)
+
+        def _stats(score):
+            score = score.detach().float().flatten()
+            q = torch.quantile(score, self.ta_normal_quantile)
+            median = torch.quantile(score, 0.5)
+            scale = (q - median).abs().clamp_min(self.ta_normal_excess_scale_floor)
+            return q.detach(), scale.detach()
+
+        self.ta_normal_topk_threshold, self.ta_normal_topk_scale = _stats(topk_score)
+        self.ta_normal_max_threshold, self.ta_normal_max_scale = _stats(max_score)
+
+    def calculate_text_aligned_normal_excess(self, ta_map, use_max=False):
+        topk_score, max_score = self.summarize_text_aligned_map(ta_map)
+        if use_max:
+            score = max_score
+            threshold = self.ta_normal_max_threshold
+            scale = self.ta_normal_max_scale
+        else:
+            score = topk_score
+            threshold = self.ta_normal_topk_threshold
+            scale = self.ta_normal_topk_scale
+        if threshold is None or scale is None:
+            return torch.zeros_like(score)
+        threshold = threshold.to(device=score.device, dtype=score.dtype)
+        scale = scale.to(device=score.device, dtype=score.dtype).clamp_min(self.ta_normal_excess_scale_floor)
+        return ((score - threshold) / scale).clamp(min=0.0, max=1.0)
 
     @staticmethod
     def harmonic_score_tensors(*scores, eps=1e-6):
@@ -3140,6 +2042,19 @@ class PromptAD(torch.nn.Module):
                 visual_anomaly_map = ta_map_for_eval
             elif self.cls_score_mode == 'ta_topk':
                 image_scores = image_scores + float(self.text_aligned_dense_score_beta) * ta_image_score_np
+                visual_anomaly_map = ta_map_for_eval
+            elif self.cls_score_mode in {'ta_max', 'ta_max_only'}:
+                ta_max_score_np = ta_map.flatten(1).max(dim=1).values.detach().cpu().numpy()
+                if self.cls_score_mode == 'ta_max_only':
+                    image_scores = ta_max_score_np
+                else:
+                    image_scores = image_scores + float(self.text_aligned_dense_score_beta) * ta_max_score_np
+                visual_anomaly_map = ta_map_for_eval
+            elif self.cls_score_mode in {'ta_norm_excess', 'ta_norm_max_excess'}:
+                excess = self.calculate_text_aligned_normal_excess(
+                    ta_map, use_max=self.cls_score_mode == 'ta_norm_max_excess'
+                )
+                image_scores = image_scores + float(self.text_aligned_dense_score_beta) * excess.detach().cpu().numpy()
                 visual_anomaly_map = ta_map_for_eval
             elif self.cls_score_mode == 'ta_harmonic':
                 textual_t = torch.as_tensor(image_scores, device=ta_image_score.device, dtype=ta_image_score.dtype)

@@ -62,6 +62,9 @@ LOADERS = {
 }
 METHOD_PRESETS = {
     "pooled_rf_rgb": {},
+    "pooled_rf_morph_gray_residual": {
+        "input_mode": "morph_fusion_gray_residual_a01",
+    },
     "pooled_rf_rgb_vcpa": {
         "visual_class_prompt": True,
         "visual_class_token_num": 2,

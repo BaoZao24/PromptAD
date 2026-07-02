@@ -27,7 +27,6 @@ from utils.csv_utils import *
 from utils.metrics import *
 from utils.training_utils import *
 from PromptAD import *
-from PromptAD.model import NormalBgDeviationChannels
 from utils.eval_utils import *
 from utils.visualization import plot_sample_cv2
 from torchvision import transforms
@@ -50,6 +49,16 @@ def build_input_transform(input_mode, img_resize, img_cropsize):
         transforms.Resize((img_resize, img_resize), Image.BICUBIC),
         transforms.CenterCrop(img_cropsize),
     ]
+    if input_mode == 'gray3':
+        return transforms.Compose(pre_resize_crop + [
+            Gray3Channels(),
+            transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train),
+        ])
+    if input_mode == 'gray_local2d_edge':
+        return transforms.Compose(pre_resize_crop + [
+            GrayLocal2DEdgeChannels(win=15),
+            transforms.Normalize(mean=spectrogram_mean_train, std=spectrogram_std_train),
+        ])
     if input_mode == 'spectral_gradient_v2':
         return transforms.Compose(pre_resize_crop + [
             SpectrogramGradientChannelsV2(),
@@ -353,10 +362,6 @@ def fit(model,
     rn50_features = []
     rn50_local_features = []
     print('Building image feature gallery...')
-    if 'normal_bg' in model.input_mode:
-        median, mad = NormalBgDeviationChannels.compute_normal_bg_stats_from_dataloader(
-            train_data, args.img_resize, args.img_cropsize)
-        model.set_normal_bg_stats(median, mad)
     for (data, mask, label, name, img_type) in tqdm(train_data, desc='Feature gallery', leave=False):
 
         data = [model.transform(Image.fromarray(cv2.cvtColor(f.numpy(), cv2.COLOR_BGR2RGB))) for f in data]
@@ -707,19 +712,19 @@ def get_args():
                         choices=["single", "grouped_max", "grouped_mean", "grouped_meanmax", "grouped_softmax"],
                         help="single 将所有异常 prompt 平均成一个原型；grouped_max 保留 burst/chirp/dsss 多异常原型并取最大异常分数；grouped_meanmax 使用 0.5*mean + 0.5*max 融合多异常原型分数")
     parser.add_argument("--input-mode", type=str, default="auto",
-                        choices=["auto", "rgb", "gray_contrast_only", "spectral_gradient", "spectral_gradient_v2", "morph_fusion", "morph_fusion_plus", "morph_fusion_dualgrad", "morph_fusion_balanced", "morph_fusion_gray_resgrad", "morph_fusion_gray_contrast_resgrad", "morph_fusion_gabor_residual", "morph_fusion_gabor_residual_a01", "morph_fusion_gabor_texture", "morph_fusion_gabor_directional_residual", "morph_fusion_gray_residual_a01", "morph_fusion_gray_residual_a01_clahe10", "morph_fusion_gray_residual_a01_clahe15", "morph_fusion_gray_residual_a01_clahe30", "morph_fusion_gray_residual_a01_clahe05", "morph_fusion_gray_residual_a01_clahe80", "morph_fusion_gray_residual_a01_clahe200", "morph_fusion_gray_residual_a01_c5t2", "morph_fusion_gray_residual_a01_tile2", "morph_fusion_gray_residual_a01_tile4", "morph_fusion_gray_residual_a01_tile16", "morph_fusion_gray_residual_a01_tile32", "morph_fusion_gray_residual_no_contrast_a01", "morph_fusion_gray_resenergy", "morph_fusion_gray_resband", "chirp_directional", "chirp_ridge", "chirp_track_enhance", "chirp_rgb_track", "signal_adaptive", "signal_adaptive_v2", "log_power",
-                                 "dsss_statistical", "dsss_energy_smooth", "dsss_lowfreq_band", "dsss_energy_profile",
-                                 "dsss_rgb_residual", "dsss_weak_residual", "dsss_gray_weakresidual_weakresidual", "dsss_weak_residual_only", "dsss_weak_residual_only_a01", "dsss_clahe",
-                                 "morph_fusion_normal_bg_residual", "morph_fusion_contrast_residual_normal_bg"],
-                        help="morph_fusion*、morph_fusion_balanced、morph_fusion_gray_resgrad、morph_fusion_gray_contrast_resgrad、morph_fusion_gray_resenergy 与 morph_fusion_gray_resband 为通用多视图融合输入；signal_adaptive 对 burst/chirp 使用频谱梯度、对 dsss 使用 RGB；signal_adaptive_v2 对 dsss 使用 weak residual；log_power 使用灰度 log-power 压缩")
+                        choices=["auto", "rgb", "gray3", "gray_local2d_edge", "morph_fusion_gray_residual_a01", "morph_fusion_local2d_residual_a01", "morph_fusion_tophat_a01", "morph_fusion_multiscale_residual_a01", "morph_fusion_gray_residual_no_contrast_a01", "morph_fusion_clahe_gray"],
+                        help="auto 在频谱类数据集上解析为 morph_fusion_gray_residual_a01，其余为 rgb；其它取值为消融/对照方案")
     parser.add_argument("--cls-score-mode", type=str, default="text_only",
                         choices=["text_only", "visual_topk", "visual_topk_max", "visual_topk_freq",
                                  "normal_center", "normal_mahalanobis", "text_normal_center", "text_normal_mahalanobis",
                                  "dense_only", "dense_fusion", "dense_map_only",
-                                 "ta_map_only", "ta_image_only", "ta_topk", "ta_harmonic"],
+                                 "ta_map_only", "ta_image_only", "ta_topk", "ta_max", "ta_max_only",
+                                 "ta_norm_excess", "ta_norm_max_excess", "ta_harmonic"],
                         help="图像级分数融合方式")
     parser.add_argument("--visual-topk-ratio", type=float, default=0.05,
                         help="visual patch score 聚合时使用的 top-k 比例")
+    parser.add_argument("--visual-gallery-chunk-size", type=int, default=1024,
+                        help="visual patch 到 normal gallery 最近邻计算的 gallery 分块大小，调小可降低 eval 显存")
     parser.add_argument("--visual-score-alpha", type=float, default=1.0,
                         help="textual score 融合权重")
     parser.add_argument("--visual-score-beta", type=float, default=1.0,
@@ -781,7 +786,11 @@ def get_args():
     parser.add_argument("--text-aligned-dense", type=str2bool, choices=[True, False], default=False,
                         help="是否启用 APRIL-GAN 风格 visual->text projection dense 分支")
     parser.add_argument("--text-aligned-dense-score-beta", type=float, default=1.0,
-                        help="ta_topk 模式下 text-aligned dense top-k 图像分数的融合权重")
+                        help="ta_* 模式下 text-aligned dense 图像分数的融合权重")
+    parser.add_argument("--ta-normal-quantile", type=float, default=0.95,
+                        help="ta_norm_excess 使用的 target normal 分位数阈值")
+    parser.add_argument("--ta-normal-excess-scale-floor", type=float, default=1e-6,
+                        help="ta_norm_excess 归一化尺度下限，避免除零")
     parser.add_argument("--rn50-visual-fusion", type=str2bool, choices=[True, False], default=False,
                         help="是否启用冻结 CLIP-RN50 视觉距离分支，与主 ViT/prompt 分数保守融合")
     parser.add_argument("--rn50-pretrained", type=str, default="openai",

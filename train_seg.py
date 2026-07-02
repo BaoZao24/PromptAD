@@ -15,13 +15,16 @@ from tqdm import tqdm
 TASK = 'SEG'
 
 def save_check_point(model, path):
-    selected_keys = [
-        'feature_gallery1',
-        'feature_gallery2',
-        'text_features',
-    ]
     state_dict = model.state_dict()
-    selected_state_dict = {k: v for k, v in state_dict.items() if k in selected_keys}
+    selected_state_dict = {}
+    for k, v in state_dict.items():
+        if (
+            k in {'feature_gallery1', 'feature_gallery2', 'text_features'}
+            or k.startswith('prompt_learner.')
+            or k.startswith('visual_class_prompt_adapter.')
+            or k.startswith('dense_mask_head.')
+        ):
+            selected_state_dict[k] = v
 
     torch.save(selected_state_dict, path)
 
@@ -40,22 +43,33 @@ def fit(model,
 
     features1 = []
     features2 = []
+    global_features = []
     for (data, mask, label, name, img_type) in train_data:
         data = [model.transform(Image.fromarray(cv2.cvtColor(f.numpy(), cv2.COLOR_BGR2RGB))) for f in data]
 
         data = torch.stack(data, dim=0).to(device)
-        _, _, feature_map1, feature_map2 = model.encode_image(data)
+        cls_feature, _, feature_map1, feature_map2 = model.encode_image(data)
+        global_features.append(cls_feature)
         features1.append(feature_map1)
         features2.append(feature_map2)
 
     features1 = torch.cat(features1, dim=0)
     features2 = torch.cat(features2, dim=0)
-    model.build_image_feature_gallery(features1, features2)
+    global_features = torch.cat(global_features, dim=0)
+    model.build_image_feature_gallery(features1, features2, global_features)
+    model.set_visual_class_prototype(global_features)
 
-    optimizer = torch.optim.SGD(model.prompt_learner.parameters(), lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
+    parameter_groups = model.trainable_parameter_groups(
+        args.lr,
+        prompt_lr=args.prompt_lr,
+        visual_class_prompt_lr=args.visual_class_prompt_lr,
+        dense_mask_lr=args.dense_mask_lr,
+    )
+    optimizer = torch.optim.SGD(parameter_groups, lr=args.lr, momentum=args.momentum, weight_decay=args.weight_decay)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.Epoch, eta_min=1e-5)
     criterion = nn.CrossEntropyLoss().to(device)
     criterion_tip = TripletLoss(margin=0.0)
+    criterion_bce = nn.BCEWithLogitsLoss().to(device)
 
     best_result_dict = None
     for epoch in range(args.Epoch):
@@ -81,7 +95,8 @@ def fit(model,
 
             loss_match_abnormal = (mean_ad_handle - mean_ad_learned).norm(dim=0) ** 2.0
 
-            _, feature_map, _, _ = model.encode_image(data)
+            visual_features = model.encode_image(data)
+            feature_map = visual_features[1]
 
             # compute v2t loss and triplet loss
             normal_text_features_ahchor = normal_text_features.mean(dim=0).unsqueeze(0)
@@ -108,10 +123,32 @@ def fit(model,
             trip_loss = criterion_tip(feature_map, normal_text_features_ahchor, abnormal_text_features_ahchor)
             loss = loss_v2t + trip_loss + loss_match_abnormal * args.lambda1
 
+            if model.dense_mask_head is not None:
+                mask_t = mask.float().to(device)
+                mask_t = (mask_t > 0).float().unsqueeze(1)
+                raw_dense_logits, post_dense_logits = model.calculate_dense_mask_logits(
+                    (None, None, visual_features[2], visual_features[3])
+                )
+                target_mask = F.interpolate(
+                    mask_t,
+                    size=raw_dense_logits.shape[-2:],
+                    mode='nearest',
+                )
+                loss_dense = 0.5 * (
+                    criterion_bce(raw_dense_logits, target_mask)
+                    + criterion_bce(post_dense_logits, target_mask)
+                )
+                loss = loss + args.dense_mask_loss_weight * loss_dense
+
             loss.backward()
             optimizer.step()
 
         scheduler.step()
+
+        should_eval = ((epoch + 1) % args.eval_every == 0) or (epoch == args.Epoch - 1)
+        if not should_eval:
+            continue
+
         model.build_text_feature_gallery()
 
         score_maps = []
@@ -133,7 +170,21 @@ def fit(model,
                 gt_mask_list += [m]
 
             data = data.to(device)
-            score_map = model(data, 'seg')
+            if model.dense_mask_head is not None:
+                visual_features = model.encode_image(data)
+                _, dense_map = model.calculate_dense_mask_score(visual_features)
+                anomaly_map = F.interpolate(
+                    dense_map,
+                    size=(model.out_size_h, model.out_size_w),
+                    mode='nearest',
+                )
+                am_pix = anomaly_map.detach().squeeze(1).cpu().numpy()
+                score_map = []
+                for i in range(am_pix.shape[0]):
+                    am_pix[i] = gaussian_filter(am_pix[i], sigma=4)
+                    score_map.append(am_pix[i])
+            else:
+                score_map = model(data, 'seg')
             score_maps += score_map
 
         test_imgs, score_maps, gt_mask_list = specify_resolution(test_imgs, score_maps, gt_mask_list, resolution=(args.resolution, args.resolution))
@@ -201,7 +252,9 @@ def str2bool(v):
 
 def get_args():
     parser = argparse.ArgumentParser(description='Anomaly detection')
-    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa'])
+    parser.add_argument('--dataset', type=str, default='mvtec',
+                        choices=['mvtec', 'visa',
+                                 'burst_signal', 'chirp_signal', 'dsss_signal', 'pulse_signal'])
     parser.add_argument('--class_name', type=str, default='carpet')
 
     parser.add_argument('--img-resize', type=int, default=240)
@@ -242,6 +295,56 @@ def get_args():
 
     # loss hyper parameter
     parser.add_argument("--lambda1", type=float, default=0.001)
+
+    # RF baseline-redefinition protocol (matches train_cls.py / run_rf_split_all.py)
+    parser.add_argument("--noise-level", type=str, default=None,
+                        help="JSR level for RF datasets (e.g. m10db / m20db / m30db / m40db)")
+    parser.add_argument("--split-mode", type=str, default="legacy",
+                        choices=["legacy", "normal_75_25"],
+                        help="legacy 使用原始 few-shot 切分；normal_75_25 使用 3/4 normal 训练、1/4 normal 测试")
+    parser.add_argument("--normal-train-ratio", type=float, default=0.75,
+                        help="normal_75_25 模式下正常样本训练比例")
+    parser.add_argument("--prompt-mode", type=str, default="rf",
+                        choices=['generic', 'rf_domain', 'rf', 'legacy',
+                                 'rf_object_agnostic', 'rf_scene_conditioned',
+                                 'rf_signal_structured'],
+                        help="文本 prompt 风格；与 train_cls.py 对齐")
+    parser.add_argument("--input-mode", type=str, default="auto",
+                        choices=['auto', 'rgb', 'gray3', 'gray_local2d_edge',
+                                 'morph_fusion_gray_residual_a01',
+                                 'morph_fusion_local2d_residual_a01',
+                                 'morph_fusion_tophat_a01',
+                                 'morph_fusion_multiscale_residual_a01',
+                                 'morph_fusion_gray_residual_no_contrast_a01',
+                                 'morph_fusion_clahe_gray'],
+                        help="输入通道构造方式；与 train_cls.py 对齐")
+    parser.add_argument("--visual-class-prompt", type=str2bool, choices=[True, False], default=False,
+                        help="是否启用 VCPA，将正常视觉原型映射成软 class prompt token")
+    parser.add_argument("--visual-class-token-num", type=int, default=2,
+                        help="VCPA 生成的软 class token 数量")
+    parser.add_argument("--visual-class-prompt-bottleneck-ratio", type=float, default=0.25,
+                        help="VCPA 的瓶颈维度比例")
+    parser.add_argument("--visual-class-prompt-alpha", type=float, default=0.2,
+                        help="VCPA 残差分支权重")
+    parser.add_argument("--visual-class-prototype-mode", type=str, default="mean",
+                        choices=["mean", "diverse"],
+                        help="VCPA 使用的正常视觉原型构造方式")
+    parser.add_argument("--visual-class-prototype-num", type=int, default=1,
+                        help="diverse 模式下使用的正常视觉原型数量")
+    parser.add_argument("--prompt-lr", type=float, default=None,
+                        help="prompt learner 的单独学习率；默认使用 --lr")
+    parser.add_argument("--visual-class-prompt-lr", type=float, default=None,
+                        help="VCPA 的单独学习率；默认使用 --lr")
+    parser.add_argument("--dense-mask-branch", type=str2bool, choices=[True, False], default=False,
+                        help="是否启用像素监督的 dense mask head")
+    parser.add_argument("--dense-mask-hidden-ratio", type=float, default=0.25,
+                        help="dense mask head 隐层宽度比例")
+    parser.add_argument("--dense-mask-loss-weight", type=float, default=1.0,
+                        help="dense mask BCE 损失权重")
+    parser.add_argument("--dense-mask-lr", type=float, default=None,
+                        help="dense mask head 的单独学习率；默认使用 --lr")
+    parser.add_argument("--eval-every", type=int, default=1,
+                        help="每隔多少个 epoch 做一次全量 seg 评估；最后一轮会强制评估")
 
     args = parser.parse_args()
 

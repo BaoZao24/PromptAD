@@ -1,6 +1,10 @@
 # APRIL-GAN 投影分支改进方案
 
 > 依据：`docs/research/clip_fsad_survey_2023_2026.md` 中排序第 2 的 APRIL-GAN 跨模态投影方案；源码参考 `references/VAND-APRIL-GAN/`。
+>
+> **状态说明（2026-07-02）**：本文是历史研究草案。文中涉及 `public source` 和
+> `train_rf_public_to_target_dense.py` 的命令已经不属于当前主线；对应跨库入口已删除。
+> 当前实验只保留 target pooled normal-only 协议。
 
 ## 1. 结论先说
 
@@ -139,8 +143,10 @@ lambda_dense = 1.0
 lambda_ta_mask = 1.0
 lambda_ta_img = 0.1
 lr_projection = 1e-3
-Epoch = 20
+Epoch = 8
 ```
+
+训练轮数先不要设太长。APRIL-GAN reference 的脚本里 MVTec 只训 3 epoch、VisA 训 15 epoch；我们先用 8 epoch 做主验证，确认方向有效后再扩到 15 epoch。
 
 ## 6. 推理时怎么用分数
 
@@ -301,6 +307,14 @@ image score = 原 PromptAD image score + ta_score_beta * top-k(text-aligned dens
 pixel map   = text-aligned dense map
 ```
 
+checkpoint 选择只保留通用版本：
+
+```text
+best checkpoint = 3 类 × 3 JSR 的 Image ROC 宏平均最高的 epoch
+保存文件        = ...all_test...overall-best.pt
+不再保存        = burst/chirp/dsss 各自单独 best checkpoint
+```
+
 推荐先跑：
 
 ```bash
@@ -318,8 +332,16 @@ python train_rf_public_to_target_dense.py \
   --prompt-mode rf \
   --text-prototype-mode single \
   --image-roc-source raw \
-  --Epoch 20 \
+  --Epoch 8 \
   --seed 111
 ```
 
 如果 `raw` image ROC 不好，再用同一 checkpoint 做 `--eval-only --dense-eval-mode ta_harmonic` 诊断融合是否能压误报；主候选仍然优先看 `ta_topk`。
+
+建议实验节奏：
+
+```text
+3 epoch  : smoke，确认代码、loss、结果文件没问题
+8 epoch  : 主验证，先看是否超过 baseline
+15 epoch : 只有 8 epoch 有希望时再跑正式长一点版本
+```

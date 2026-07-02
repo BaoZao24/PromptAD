@@ -20,11 +20,12 @@ from itertools import product
 
 import pandas as pd
 
-DATASETS = ['burst_signal', 'chirp_signal', 'dsss_signal', 'wideband_pulse']
+DATASETS = ['burst_signal', 'chirp_signal', 'dsss_signal', 'pulse_signal', 'wideband_pulse']
 SCENES = ['WeaponMuseum_spectrum', 'Playground_spectrum', 'TimeSquare_spectrum', 'Gymnasium_spectrum']
 NOISE_LEVELS = ['m10db', 'm20db', 'm30db']
 DATASET_NOISE_LEVELS = {
     'wideband_pulse': ['m20db', 'm30db', 'm40db'],
+    'pulse_signal': ['m20db', 'm30db', 'm40db'],
 }
 K_SHOT = 1
 SPLIT_MODE = 'normal_75_25'
@@ -196,9 +197,7 @@ if __name__ == '__main__':
     parser.add_argument('--normal-dist-ridge', type=float, default=1e-4,
                         help='normal distribution diagonal variance 的最小平滑项')
     parser.add_argument('--input-mode', type=str, default='auto',
-                        choices=['auto', 'rgb', 'gray_contrast_only', 'spectral_gradient', 'spectral_gradient_v2', 'morph_fusion', 'morph_fusion_plus', 'morph_fusion_dualgrad', 'morph_fusion_balanced', 'morph_fusion_gray_resgrad', 'morph_fusion_gray_contrast_resgrad', 'morph_fusion_gabor_residual', 'morph_fusion_gabor_residual_a01', 'morph_fusion_gabor_texture', 'morph_fusion_gabor_directional_residual', 'morph_fusion_gray_residual_a01', 'morph_fusion_gray_residual_a01_clahe10', 'morph_fusion_gray_residual_a01_clahe15', 'morph_fusion_gray_residual_a01_clahe30', 'morph_fusion_gray_residual_a01_clahe05', 'morph_fusion_gray_residual_a01_clahe80', 'morph_fusion_gray_residual_a01_clahe200', 'morph_fusion_gray_residual_a01_tile2', 'morph_fusion_gray_residual_a01_tile4', 'morph_fusion_gray_residual_a01_tile16', 'morph_fusion_gray_residual_a01_tile32', 'morph_fusion_gray_residual_no_contrast_a01', 'morph_fusion_gray_resenergy', 'morph_fusion_gray_resband', 'chirp_directional', 'chirp_ridge', 'chirp_track_enhance', 'chirp_rgb_track', 'signal_adaptive', 'signal_adaptive_v2', 'log_power',
-                                 'dsss_statistical', 'dsss_energy_smooth', 'dsss_lowfreq_band', 'dsss_energy_profile',
-                                 'dsss_rgb_residual', 'dsss_weak_residual', 'dsss_weak_residual_only', 'dsss_weak_residual_only_a01', 'dsss_clahe'])
+                        choices=['auto', 'rgb', 'gray3', 'gray_local2d_edge', 'morph_fusion_gray_residual_a01', 'morph_fusion_local2d_residual_a01', 'morph_fusion_tophat_a01', 'morph_fusion_multiscale_residual_a01', 'morph_fusion_gray_residual_no_contrast_a01', 'morph_fusion_clahe_gray'])
     parser.add_argument('--visual-adapter', action='store_true', default=False,
                         help='启用冻结 CLIP 后的轻量残差 visual adapter')
     parser.add_argument('--adapter-bottleneck-ratio', type=float, default=0.25)
