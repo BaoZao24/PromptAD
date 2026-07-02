@@ -89,7 +89,16 @@ test = 剩余 25% normal + 当前 cell 的全部 abnormal
 
 ## 最新结果
 
-CLS Image-AUROC macro：
+下面的结果只来自当前自测 RF target 数据集：
+
+```text
+/mnt/data/wangbei/data/datasets/
+burst / chirp / dsss / pulse
+```
+
+也就是说，这里还不是公开数据集和 spectrum 数据集上的结果。
+
+该自测数据集上的 CLS Image-AUROC macro：
 
 | 方法 | Image-AUROC |
 |---|---:|
@@ -98,7 +107,7 @@ CLS Image-AUROC macro：
 | ResNet18 layer3 gallery | 90.5237 |
 | **PromptAD + CLIP gallery + ResNet18 gallery** | **91.8955** |
 
-SEG Pixel-AUROC macro：
+该自测数据集上的 SEG Pixel-AUROC macro：
 
 | 方法 | Pixel-AUROC |
 |---|---:|
@@ -113,6 +122,15 @@ SEG Pixel-AUROC macro：
 analysis_outputs/20260629_cls_dual_gallery_fusion/
 analysis_outputs/20260629_seg_dual_gallery_fusion/
 ```
+
+外部验证还没有完成。当前 dual-gallery 方法还需要继续在下面两个数据集上重跑：
+
+```text
+RF_SPE_PNG public dataset
+spectrum dataset
+```
+
+这两部分结果必须单独记录，不能和当前自测数据集结果混写。
 
 ## 安装
 

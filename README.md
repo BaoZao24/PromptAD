@@ -83,7 +83,14 @@ Important constraints:
 
 ## Latest Results
 
-CLS Image-AUROC macro:
+The following results are from the current in-house RF target dataset only:
+
+```text
+/mnt/data/wangbei/data/datasets/
+burst / chirp / dsss / pulse
+```
+
+CLS Image-AUROC macro on this dataset:
 
 | Method | Image-AUROC |
 |---|---:|
@@ -92,7 +99,7 @@ CLS Image-AUROC macro:
 | ResNet18 layer3 gallery | 90.5237 |
 | **PromptAD + CLIP gallery + ResNet18 gallery** | **91.8955** |
 
-SEG Pixel-AUROC macro:
+SEG Pixel-AUROC macro on this dataset:
 
 | Method | Pixel-AUROC |
 |---|---:|
@@ -107,6 +114,15 @@ Result files:
 analysis_outputs/20260629_cls_dual_gallery_fusion/
 analysis_outputs/20260629_seg_dual_gallery_fusion/
 ```
+
+External validation is still pending. The current dual-gallery method has not yet been re-evaluated on:
+
+```text
+RF_SPE_PNG public dataset
+spectrum dataset
+```
+
+Those results must be reported separately once the same protocol is run on each dataset.
 
 ## Installation
 
