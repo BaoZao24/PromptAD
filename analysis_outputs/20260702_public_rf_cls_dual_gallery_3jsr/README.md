@@ -31,6 +31,7 @@ Per-signal mean:
 | chirp | 48.6451 | 76.0282 | 66.4049 |
 | dsss | 59.1777 | 82.5171 | 87.4986 |
 | pulse | 39.4343 | 83.4684 | 72.4786 |
+| **Average** | **48.4355** | **79.4368** | **70.3481** |
 
 Result CSV: `results_cls_public_rf_dual_gallery.csv`
 

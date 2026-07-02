@@ -27,6 +27,7 @@ Per-category Image-AUROC:
 | CHIRP | 68.5028 | 96.2324 | 99.9306 | 99.9465 |
 | GMSK | 81.0445 | 94.2265 | 99.7911 | 99.8208 |
 | QPSK | 62.2737 | 94.5654 | 99.6227 | 99.6411 |
+| **Average** | **70.9360** | **95.0072** | **99.7432** | **99.7609** |
 
 Result CSV: `results_cls_spectrum_dual_gallery.csv`
 
