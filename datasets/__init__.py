@@ -16,7 +16,6 @@ from .wideband_pulse import load_wideband_pulse, wideband_pulse_classes
 from .wideband_pulse_png import load_wideband_pulse_png, wideband_pulse_png_classes
 from .rf_spe_png import load_rf_spe_png, rf_spe_png_classes
 from .rf_target_test_pool import load_rf_target_test_pool, rf_target_test_pool_classes
-from .rf_public_pooled_smoke import load_rf_public_pooled_smoke, rf_public_pooled_smoke_classes
 
 
 mean_train = [0.48145466, 0.4578275, 0.40821073]
@@ -36,7 +35,6 @@ load_function_dict = {
     'wideband_pulse_png': load_wideband_pulse_png,
     'rf_spe_png': load_rf_spe_png,
     'rf_target_test_pool': load_rf_target_test_pool,
-    'rf_public_pooled_smoke': load_rf_public_pooled_smoke,
 }
 
 dataset_classes = {
@@ -53,7 +51,6 @@ dataset_classes = {
     'wideband_pulse_png': wideband_pulse_png_classes,
     'rf_spe_png': rf_spe_png_classes,
     'rf_target_test_pool': rf_target_test_pool_classes,
-    'rf_public_pooled_smoke': rf_public_pooled_smoke_classes,
 }
 
 def denormalization(x):
@@ -96,20 +93,6 @@ def get_dataloader_from_args(phase, **kwargs):
         extra_kwargs['noise_level'] = kwargs.get('noise_level', 'm10db')
         extra_kwargs['split_mode'] = kwargs.get('split_mode', 'normal_75_25')
         extra_kwargs['normal_train_ratio'] = kwargs.get('normal_train_ratio', 0.75)
-    elif kwargs.get('dataset') == 'rf_public_pooled_smoke':
-        extra_kwargs['noise_level'] = kwargs.get('noise_level', 'm10db')
-        extra_kwargs['split_mode'] = kwargs.get('split_mode', 'normal_75_25')
-        extra_kwargs['normal_train_ratio'] = kwargs.get('normal_train_ratio', 0.75)
-        if 'max_normal_per_class' in kwargs:
-            extra_kwargs['max_normal_per_class'] = kwargs['max_normal_per_class']
-        if 'max_abnormal_per_class' in kwargs:
-            extra_kwargs['max_abnormal_per_class'] = kwargs['max_abnormal_per_class']
-        if 'pool_classes' in kwargs:
-            extra_kwargs['pool_classes'] = kwargs['pool_classes']
-        if 'source_jsr_policy' in kwargs:
-            extra_kwargs['source_jsr_policy'] = kwargs['source_jsr_policy']
-        if 'source_noise_levels' in kwargs:
-            extra_kwargs['source_noise_levels'] = kwargs['source_noise_levels']
     elif kwargs.get('dataset') == 'deceptive_signal':
         extra_kwargs['freq'] = kwargs.get('freq', None)
 
@@ -124,7 +107,7 @@ def get_dataloader_from_args(phase, **kwargs):
     # RF datasets 的 __getitem__ 是纯 cv2 IO + resize, 无随机/全局状态, 线程安全.
     # morph_fusion 预处理在 model.transform 里, 在主进程里跑——但即便如此,
     # 多 worker 拿原始 cv2 array 也能把数据流水线从 0 worker 的同步阻塞中解放出来.
-    rf_datasets = ('rf_spe_png', 'rf_target_test_pool', 'rf_public_pooled_smoke')
+    rf_datasets = ('rf_spe_png', 'rf_target_test_pool')
     is_rf = kwargs.get('dataset') in rf_datasets
     rf_workers = 8
 

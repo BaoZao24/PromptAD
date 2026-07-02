@@ -667,7 +667,7 @@ def str2bool(v):
 
 def get_args():
     parser = argparse.ArgumentParser(description='Anomaly detection')
-    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa', 'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal', 'wideband_pulse', 'wideband_pulse_png', 'rf_spe_png', 'rf_public_pooled_smoke', 'rf_target_test_pool'])
+    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa', 'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal', 'pulse_signal', 'wideband_pulse', 'wideband_pulse_png', 'rf_spe_png', 'rf_target_test_pool'])
     parser.add_argument('--class_name', type=str, default='carpet')
 
     parser.add_argument('--img-resize', type=int, default=240)

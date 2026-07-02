@@ -3,20 +3,11 @@
 ## 项目说明
 
 - [现有方案介绍](现有方案介绍.md)
-- [跨库训练](跨库训练.md)
 - [提示词机制说明](提示词机制说明.md)
 - [分数机制说明](分数机制说明.md)
 - [改进记录](improve.md)
-- [Agent handoff brief](agent_handoff_experiment_brief.md)
-- [PromptAD Dense Mask Supervision 实验计划](PromptAD_adapter_experiment_plan.md)
-- [RF 跨库实验说明（VCP-CLIP 参考协议）](RF跨库实验说明.md)
-
-## 架构图
-
-- [当前跨库 Adapter 架构图](assets/architecture/current_cross_library_adapter_architecture.png)
-- [建议改造后的跨库 Adapter 架构图](assets/architecture/proposed_cross_library_adapter_architecture.png)
-- [Adapter 架构解释图](assets/architecture/adapter_architecture_explanation_ai.png)
-- [Adapter 架构解释图 SVG](assets/architecture/architecture_adapter_explanation.svg)
+- [当前实验总览](agent_handoff_method_funnel_overview.md)
+- [历史 handoff brief](agent_handoff_experiment_brief.md)
 
 ## 其他图片
 

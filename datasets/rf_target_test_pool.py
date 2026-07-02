@@ -1,25 +1,26 @@
-"""RF 跨库 (public source -> project target) 的 target 端池化 loader.
+"""RF target pooled normal-only loader.
 
-只在 `docs/PromptAD_adapter_experiment_plan.md` 描述的正式 RF 跨库实验里用。
-约束（参考文档 §2 / §5）：
-    - train split 只暴露 target 正常样本, 用于目标域正常特征库/normal adaptation;
+当前主线不是 public-source 跨库训练，而是 target pooled universal anomaly
+detection:
+    - train split 只暴露 target 正常样本, 用于 PromptAD 训练和 normal gallery;
     - train split 不暴露 target 异常样本和 mask, test split 用于最终评估;
-    - 把 burst/chirp/dsss 三个 signal-type 数据集对应的 4 个 scene 池化到一起,
-      使得文档 §7 要求的 burst_px / burst_sp 等指标按 signal-type 统计;
-    - 不允许 burst<->chirp<->dsss 互转, 因此 category 只接受 'burst'/'chirp'/'dsss'.
+    - 每个 signal-type 下的 4 个 scene 池化到一起;
+    - category 接受 burst/chirp/pulse/dsss, 每次按一个 signal-type 读取.
 """
 
 from .burst_signal import load_burst_signal, burst_signal_classes
 from .chirp_signal import load_chirp_signal, chirp_signal_classes
+from .pulse_signal import load_pulse_signal, pulse_signal_classes
 from .dsss_signal import load_dsss_signal, dsss_classes
 
 
-rf_target_test_pool_classes = ['burst', 'chirp', 'dsss']
+rf_target_test_pool_classes = ['burst', 'chirp', 'pulse', 'dsss']
 
 
 _SIGNAL_LOADERS = {
     'burst': (load_burst_signal, burst_signal_classes),
     'chirp': (load_chirp_signal, chirp_signal_classes),
+    'pulse': (load_pulse_signal, pulse_signal_classes),
     'dsss': (load_dsss_signal, dsss_classes),
 }
 
