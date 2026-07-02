@@ -93,7 +93,7 @@ CLS Image-AUROC macro：
 
 | 方法 | Image-AUROC |
 |---|---:|
-| pooled RF+RGB baseline | 86.3382 |
+| PromptAD RF+RGB baseline | 78.4088 |
 | CLIP normal gallery | 88.6536 |
 | ResNet18 layer3 gallery | 90.5237 |
 | **PromptAD + CLIP gallery + ResNet18 gallery** | **91.8955** |
