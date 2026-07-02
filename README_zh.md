@@ -123,14 +123,31 @@ analysis_outputs/20260629_cls_dual_gallery_fusion/
 analysis_outputs/20260629_seg_dual_gallery_fusion/
 ```
 
-外部验证还没有完成。当前 dual-gallery 方法还需要继续在下面两个数据集上重跑：
+公开 `RF_SPE_PNG` 数据集的 CLS 外部验证已经完成，本次使用 12 个异常 cell：
 
 ```text
-RF_SPE_PNG public dataset
-spectrum dataset
+burst: m30db / m40db / m50db
+chirp: m40db / m50db / m55db
+dsss:  m30db / m40db / m50db
+pulse: m30db / m40db / m50db
 ```
 
-这两部分结果必须单独记录，不能和当前自测数据集结果混写。
+RF_SPE_PNG CLS Image-AUROC macro：
+
+| 方法 | Image-AUROC |
+|---|---:|
+| PromptAD score with current checkpoint | 48.4355 |
+| ResNet18 layer3 normal gallery | 70.3481 |
+| Best dual fusion in sweep | 77.0137 |
+| **CLIP normal gallery only** | **79.4368** |
+
+结果目录：
+
+```text
+analysis_outputs/20260702_public_rf_cls_dual_gallery_3jsr/
+```
+
+RF_SPE_PNG 的 SEG，以及 spectrum 数据集的 CLS/SEG 还没重跑。外部数据集结果必须单独记录，不能和当前自测数据集结果混写。
 
 ## 安装
 

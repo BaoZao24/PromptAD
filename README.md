@@ -115,14 +115,31 @@ analysis_outputs/20260629_cls_dual_gallery_fusion/
 analysis_outputs/20260629_seg_dual_gallery_fusion/
 ```
 
-External validation is still pending. The current dual-gallery method has not yet been re-evaluated on:
+Public `RF_SPE_PNG` CLS external validation has been run with the following 12 abnormal cells:
 
 ```text
-RF_SPE_PNG public dataset
-spectrum dataset
+burst: m30db / m40db / m50db
+chirp: m40db / m50db / m55db
+dsss:  m30db / m40db / m50db
+pulse: m30db / m40db / m50db
 ```
 
-Those results must be reported separately once the same protocol is run on each dataset.
+RF_SPE_PNG CLS Image-AUROC macro:
+
+| Method | Image-AUROC |
+|---|---:|
+| PromptAD score with current checkpoint | 48.4355 |
+| ResNet18 layer3 normal gallery | 70.3481 |
+| Best dual fusion in sweep | 77.0137 |
+| **CLIP normal gallery only** | **79.4368** |
+
+Result files:
+
+```text
+analysis_outputs/20260702_public_rf_cls_dual_gallery_3jsr/
+```
+
+RF_SPE_PNG SEG and spectrum CLS/SEG are still pending. External dataset results must be reported separately from the in-house target dataset.
 
 ## Installation
 
