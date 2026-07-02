@@ -139,7 +139,30 @@ Result files:
 analysis_outputs/20260702_public_rf_cls_dual_gallery_3jsr/
 ```
 
-RF_SPE_PNG SEG and spectrum CLS/SEG are still pending. External dataset results must be reported separately from the in-house target dataset.
+Spectrum CLS external validation has also been run on `datasets/spectrum`:
+
+```text
+categories = 16QAM / CHIRP / GMSK / QPSK
+gallery = per-category train/good
+test = per-category test/good + test/bad
+```
+
+Spectrum CLS Image-AUROC macro:
+
+| Method | Image-AUROC |
+|---|---:|
+| PromptAD score with current checkpoint | 70.9360 |
+| CLIP normal gallery | 95.0072 |
+| ResNet18 layer3 normal gallery | 99.7432 |
+| **Best dual fusion in sweep** | **99.7609** |
+
+Result files:
+
+```text
+analysis_outputs/20260702_spectrum_cls_dual_gallery/
+```
+
+RF_SPE_PNG SEG and spectrum SEG are still pending. External dataset results must be reported separately from the in-house target dataset.
 
 ## Installation
 

@@ -147,7 +147,30 @@ RF_SPE_PNG CLS Image-AUROC macro：
 analysis_outputs/20260702_public_rf_cls_dual_gallery_3jsr/
 ```
 
-RF_SPE_PNG 的 SEG，以及 spectrum 数据集的 CLS/SEG 还没重跑。外部数据集结果必须单独记录，不能和当前自测数据集结果混写。
+`spectrum` 数据集的 CLS 外部验证也已经完成：
+
+```text
+categories = 16QAM / CHIRP / GMSK / QPSK
+gallery = 每个类别自己的 train/good
+test = 每个类别自己的 test/good + test/bad
+```
+
+spectrum CLS Image-AUROC macro：
+
+| 方法 | Image-AUROC |
+|---|---:|
+| PromptAD score with current checkpoint | 70.9360 |
+| CLIP normal gallery | 95.0072 |
+| ResNet18 layer3 normal gallery | 99.7432 |
+| **Best dual fusion in sweep** | **99.7609** |
+
+结果目录：
+
+```text
+analysis_outputs/20260702_spectrum_cls_dual_gallery/
+```
+
+RF_SPE_PNG 的 SEG，以及 spectrum 数据集的 SEG 还没重跑。外部数据集结果必须单独记录，不能和当前自测数据集结果混写。
 
 ## 安装
 
