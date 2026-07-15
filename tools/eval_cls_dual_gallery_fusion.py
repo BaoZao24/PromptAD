@@ -108,6 +108,7 @@ def fuse_dual_scores(promptad, clip_score, resnet_score, clip_lambdas, resnet_la
 @torch.no_grad()
 def evaluate(model, encoder, clip_gallery, resnet_galleries, eval_loaders, args, device):
     model.eval_mode()
+    model.build_text_feature_gallery()
     encoder.eval()
     rows = []
     score_root = Path(args.output_root) / "scores"
@@ -116,17 +117,23 @@ def evaluate(model, encoder, clip_gallery, resnet_galleries, eval_loaders, args,
     for signal, scene, jsr, loader in eval_loaders:
         labels = []
         names = []
-        promptad_scores = []
+        promptad_raw_scores = []
+        promptad_formal_scores = []
         clip_scores = []
         resnet_scores = {layer: [] for layer in args.resnet_layers}
 
         for data, mask, label, name, img_type in tqdm(loader, desc=f"Eval dual gallery cls {signal}/{scene}/{jsr}", leave=False):
             data_t = to_model_input(model, data, device, rgb_from_bgr=False)
             visual_features = model.encode_image(data_t)
-            score_img, _score_map = model.score_cached(visual_features, "cls")
+            score_img, score_map = model.score_cached(visual_features, "cls")
             cls_features = F.normalize(visual_features[0].float(), dim=-1).cpu()
+            raw_np = np.asarray(score_img, dtype=np.float32)
+            map_np = np.asarray(score_map, dtype=np.float32)
+            max_map = map_np.reshape(map_np.shape[0], -1).max(axis=1)
+            formal_np = 1.0 / (1.0 / np.clip(max_map, 1e-12, None) + 1.0 / np.clip(raw_np, 1e-12, None))
 
-            promptad_scores.extend([float(x) for x in score_img])
+            promptad_raw_scores.extend([float(x) for x in raw_np])
+            promptad_formal_scores.extend([float(x) for x in formal_np])
             clip_scores.extend([float(x) for x in topk_distance(cls_features, clip_gallery, args.clip_topk)])
 
             raw = data.permute(0, 3, 1, 2).to(device, non_blocking=True)
@@ -144,7 +151,8 @@ def evaluate(model, encoder, clip_gallery, resnet_galleries, eval_loaders, args,
             names.extend(list(name))
 
         labels_np = np.asarray(labels, dtype=np.int32)
-        promptad_np = np.asarray(promptad_scores, dtype=np.float32)
+        promptad_raw_np = np.asarray(promptad_raw_scores, dtype=np.float32)
+        promptad_formal_np = np.asarray(promptad_formal_scores, dtype=np.float32)
         clip_np = np.asarray(clip_scores, dtype=np.float32)
         row = {
             "method": "cls_dual_gallery_fusion",
@@ -152,13 +160,15 @@ def evaluate(model, encoder, clip_gallery, resnet_galleries, eval_loaders, args,
             "dataset": signal,
             "scene": scene,
             "jsr": jsr,
-            "promptad_rescore_auc": safe_auc(labels, promptad_np),
+            "promptad_rescore_auc": safe_auc(labels, promptad_raw_np),
+            "promptad_formal_auc": safe_auc(labels, promptad_formal_np),
             f"clip_gallery_top{args.clip_topk}_auc": safe_auc(labels, clip_np),
         }
         npz_payload = {
             "names": np.asarray(names),
             "labels": labels_np,
-            "promptad_scores": promptad_np,
+            "promptad_scores": promptad_raw_np,
+            "promptad_formal_scores": promptad_formal_np,
             "clip_gallery_scores": clip_np,
         }
 
@@ -166,17 +176,28 @@ def evaluate(model, encoder, clip_gallery, resnet_galleries, eval_loaders, args,
             resnet_np = np.asarray(resnet_scores[layer], dtype=np.float32)
             row[f"resnet18_{layer}_gallery_top{args.image_top_ratio:g}_auc"] = safe_auc(labels, resnet_np)
             npz_payload[f"resnet18_{layer}_scores"] = resnet_np
-            fused = fuse_dual_scores(
-                promptad_np,
+            raw_fused = fuse_dual_scores(
+                promptad_raw_np,
                 clip_np,
                 resnet_np,
                 args.clip_lambdas,
                 args.resnet_lambdas,
             )
-            for key, values in fused.items():
+            formal_fused = fuse_dual_scores(
+                promptad_formal_np,
+                clip_np,
+                resnet_np,
+                args.clip_lambdas,
+                args.resnet_lambdas,
+            )
+            for key, values in raw_fused.items():
                 col = f"resnet18_{layer}_{key}_auc"
                 row[col] = safe_auc(labels, values)
                 npz_payload[f"resnet18_{layer}_{key}"] = np.asarray(values, dtype=np.float32)
+            for key, values in formal_fused.items():
+                col = f"resnet18_{layer}_formal_{key}_auc"
+                row[col] = safe_auc(labels, values)
+                npz_payload[f"resnet18_{layer}_formal_{key}"] = np.asarray(values, dtype=np.float32)
 
         rows.append(row)
         np.savez_compressed(score_root / f"{signal}-{scene}-{jsr}-scores.npz", **npz_payload)
@@ -201,7 +222,7 @@ def main():
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--gpu-id", type=int, default=0)
     parser.add_argument("--seed", type=int, default=111)
-    parser.add_argument("--normal-train-ratio", type=float, default=0.75)
+    parser.add_argument("--normal-sampling", choices=["all", "frequency_one_per_band"], default="all")
     parser.add_argument("--resolution", type=int, default=400)
     parser.add_argument("--img-resize", type=int, default=240)
     parser.add_argument("--img-cropsize", type=int, default=240)

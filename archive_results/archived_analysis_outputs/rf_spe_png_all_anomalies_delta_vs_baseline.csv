@@ -1,6 +1,0 @@
-source,anomaly,dataset,scene,protocol,baseline_feature,improved_feature,m10db,m20db,m30db,m40db,mean,result_source
-RF_SPE_PNG + rf_open legacy,Burst,rf_open + rf_spe_png,single_source,k_1 (legacy m10-m30) + public-normal (m40),rgb,optimized_spectral_gradient,0.0000,0.1500,0.2100,2.3400,0.6750,legacy rf_open for m10-m30; public-normal m40 supplementary experiment
-RF_SPE_PNG + rf_open legacy,Chirp,rf_open + rf_spe_png,single_source,k_1 (legacy m10-m30) + public-normal (m40),rgb,optimized_spectral_gradient,0.0000,0.0000,0.0000,0.0700,0.0175,legacy rf_open for m10-m30; public-normal m40 supplementary experiment
-RF_SPE_PNG + rf_open legacy,DSSS,rf_open + rf_spe_png,single_source,k_1 (legacy m10-m30) + public-normal (m40),rgb,dsss_weak_residual,-0.1000,0.0200,0.3900,1.5100,0.4550,legacy rf_open for m10-m30; public-normal m40 supplementary experiment
-RF_SPE_PNG,Wideband pulse,wideband_pulse_png + rf_spe_png,single_source,k_1 (m20-m40 single-source),rgb,rgb,,0.0000,0.0000,0.0000,0.0000,result_wideband_pulse_png/rf_rgb/... for m20-m40
-RF_SPE_PNG mixed protocols,ALL_AVAILABLE,ALL_AVAILABLE,Mean,mixed_k_1_and_public_normal,rgb,morphology_aware_selection,-0.0334,0.0425,0.1500,0.9800,0.2869,aggregated from rows above; m50db retained only in supplementary records

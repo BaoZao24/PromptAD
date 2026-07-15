@@ -177,7 +177,7 @@ def main():
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--gpu-id", type=int, default=0)
     parser.add_argument("--seed", type=int, default=111)
-    parser.add_argument("--normal-train-ratio", type=float, default=0.75)
+    parser.add_argument("--normal-sampling", choices=["all", "frequency_one_per_band"], default="all")
     parser.add_argument("--resolution", type=int, default=400)
     parser.add_argument("--img-resize", type=int, default=240)
     parser.add_argument("--img-cropsize", type=int, default=240)

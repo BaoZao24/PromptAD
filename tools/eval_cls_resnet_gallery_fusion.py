@@ -25,6 +25,8 @@ from PromptAD import PromptAD
 from tools.eval_seg_resnet_gallery_fusion import (
     ResNet18LocalEncoder,
     build_resnet_gallery,
+    cnn_tta_batch,
+    cnn_tta_modes,
     flatten_feature_map,
     load_checkpoint,
 )
@@ -84,17 +86,49 @@ def attach_formal_baseline(rows, baseline_csv):
 
 
 @torch.no_grad()
-def resnet_patch_image_scores(feature_map: torch.Tensor, gallery: torch.Tensor, chunk_size: int, top_ratio: float):
+def resnet_patch_image_scores(
+    feature_map: torch.Tensor,
+    gallery: torch.Tensor,
+    chunk_size: int,
+    top_ratio: float,
+    nn_topk: int = 1,
+):
     n, c, h, w = feature_map.shape
     probes = flatten_feature_map(F.normalize(feature_map.float(), dim=1))
     scores = []
     for start in range(0, probes.shape[0], chunk_size):
         chunk = probes[start : start + chunk_size]
         sim = chunk @ gallery.t()
-        scores.append((1.0 - sim.max(dim=1).values).cpu())
+        k_nn = min(max(1, int(nn_topk)), sim.shape[1])
+        scores.append((1.0 - sim.topk(k_nn, dim=1).values.mean(dim=1)).cpu())
     patch_scores = torch.cat(scores, dim=0).reshape(n, h * w)
     k = max(1, int(round(patch_scores.shape[1] * float(top_ratio))))
     return patch_scores.topk(k, dim=1).values.mean(dim=1).numpy()
+
+
+@torch.no_grad()
+def resnet_patch_score_bank(
+    feature_map: torch.Tensor,
+    gallery: torch.Tensor,
+    chunk_size: int,
+    top_ratios,
+    nn_topk: int = 1,
+):
+    n, c, h, w = feature_map.shape
+    probes = flatten_feature_map(F.normalize(feature_map.float(), dim=1))
+    scores = []
+    for start in range(0, probes.shape[0], chunk_size):
+        chunk = probes[start : start + chunk_size]
+        sim = chunk @ gallery.t()
+        k_nn = min(max(1, int(nn_topk)), sim.shape[1])
+        scores.append((1.0 - sim.topk(k_nn, dim=1).values.mean(dim=1)).cpu())
+    patch_scores = torch.cat(scores, dim=0).reshape(n, h * w)
+    out = {"max": patch_scores.max(dim=1).values.numpy()}
+    for ratio in top_ratios:
+        k = max(1, int(round(patch_scores.shape[1] * float(ratio))))
+        key = f"top{ratio:g}"
+        out[key] = patch_scores.topk(k, dim=1).values.mean(dim=1).numpy()
+    return out
 
 
 def fuse_scores(promptad_scores: np.ndarray, visual_scores: np.ndarray, lambdas):
@@ -109,7 +143,7 @@ def fuse_scores(promptad_scores: np.ndarray, visual_scores: np.ndarray, lambdas)
 
 
 @torch.no_grad()
-def evaluate(model, encoder, galleries, eval_loaders, args, device):
+def evaluate(model, encoder, galleries_by_mode, eval_loaders, args, device):
     model.eval_mode()
     encoder.eval()
     rows = []
@@ -120,7 +154,8 @@ def evaluate(model, encoder, galleries, eval_loaders, args, device):
         labels = []
         names = []
         promptad_scores = []
-        layer_scores = {layer: [] for layer in args.resnet_layers}
+        score_keys = ["max"] + [f"top{ratio:g}" for ratio in args.image_top_ratios]
+        layer_scores = {layer: {key: [] for key in score_keys} for layer in args.resnet_layers}
 
         for data, mask, label, name, img_type in tqdm(loader, desc=f"Eval ResNet gallery cls {signal}/{scene}/{jsr}", leave=False):
             data_t = to_model_input(model, data, device, rgb_from_bgr=False)
@@ -128,16 +163,25 @@ def evaluate(model, encoder, galleries, eval_loaders, args, device):
             score_img, _score_map = model.score_cached(visual_features, "cls")
             promptad_scores.extend([float(x) for x in score_img])
 
-            raw = data.permute(0, 3, 1, 2).to(device, non_blocking=True)
-            cnn_features = encoder(raw)
+            mode_banks = {layer: {key: [] for key in score_keys} for layer in args.resnet_layers}
+            for mode, galleries in galleries_by_mode.items():
+                data_variant = cnn_tta_batch(data, mode, args)
+                raw = data_variant.permute(0, 3, 1, 2).to(device, non_blocking=True)
+                cnn_features = encoder(raw)
+                for layer in args.resnet_layers:
+                    score_bank = resnet_patch_score_bank(
+                        cnn_features[layer],
+                        galleries[layer],
+                        args.distance_chunk_size,
+                        args.image_top_ratios,
+                        args.cnn_nn_topk,
+                    )
+                    for key, values in score_bank.items():
+                        mode_banks[layer][key].append(np.asarray(values, dtype=np.float32))
             for layer in args.resnet_layers:
-                values = resnet_patch_image_scores(
-                    cnn_features[layer],
-                    galleries[layer],
-                    args.distance_chunk_size,
-                    args.image_top_ratio,
-                )
-                layer_scores[layer].extend([float(x) for x in values])
+                for key in score_keys:
+                    values = np.max(np.stack(mode_banks[layer][key], axis=0), axis=0)
+                    layer_scores[layer][key].extend([float(x) for x in values])
 
             labels.extend([int(x) for x in label.numpy().tolist()])
             names.extend(list(name))
@@ -159,12 +203,13 @@ def evaluate(model, encoder, galleries, eval_loaders, args, device):
         }
 
         for layer in args.resnet_layers:
-            visual_np = np.asarray(layer_scores[layer], dtype=np.float32)
-            row[f"resnet18_{layer}_gallery_top{args.image_top_ratio:g}_auc"] = safe_auc(labels, visual_np)
-            npz_payload[f"resnet18_{layer}_scores"] = visual_np
-            for key, values in fuse_scores(promptad_np, visual_np, args.lambdas).items():
-                row[f"resnet18_{layer}_{key}_auc"] = safe_auc(labels, values)
-                npz_payload[f"resnet18_{layer}_{key}"] = np.asarray(values, dtype=np.float32)
+            for score_key in score_keys:
+                visual_np = np.asarray(layer_scores[layer][score_key], dtype=np.float32)
+                row[f"resnet18_{layer}_gallery_{score_key}_auc"] = safe_auc(labels, visual_np)
+                npz_payload[f"resnet18_{layer}_{score_key}_scores"] = visual_np
+                for key, values in fuse_scores(promptad_np, visual_np, args.lambdas).items():
+                    row[f"resnet18_{layer}_{score_key}_{key}_auc"] = safe_auc(labels, values)
+                    npz_payload[f"resnet18_{layer}_{score_key}_{key}"] = np.asarray(values, dtype=np.float32)
 
         rows.append(row)
         np.savez_compressed(score_root / f"{signal}-{scene}-{jsr}-scores.npz", **npz_payload)
@@ -179,15 +224,39 @@ def main():
     parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--signals", nargs="+", default=SIGNALS, choices=SIGNALS)
     parser.add_argument("--resnet-layers", nargs="+", default=["layer2", "layer3"], choices=["layer2", "layer3"])
-    parser.add_argument("--image-top-ratio", type=float, default=0.1)
+    parser.add_argument("--image-top-ratios", type=float, nargs="+", default=[0.01, 0.05, 0.1])
     parser.add_argument("--lambdas", type=float, nargs="+", default=[0.2, 0.5, 1.0, 1.5, 2.0, 3.0])
     parser.add_argument("--max-gallery-patches", type=int, default=50000)
+    parser.add_argument(
+        "--cnn-coreset-size",
+        type=int,
+        default=0,
+        help="Farthest-first CNN memory size; 0 keeps the complete normal memory.",
+    )
+    parser.add_argument(
+        "--cnn-nn-topk",
+        type=int,
+        default=1,
+        help="Average distance to this many nearest CNN normal patches; 1 is legacy nearest neighbour.",
+    )
+    parser.add_argument(
+        "--cnn-paired-tta",
+        choices=["none", "stft_shift_blur"],
+        default="none",
+        help="Optional paired TTA for the CNN branch; default keeps the formal CNN path unchanged.",
+    )
+    parser.add_argument("--cnn-paired-tta-shift-px", type=int, default=4)
+    parser.add_argument("--cnn-paired-tta-blur-ksize", type=int, default=3)
     parser.add_argument("--distance-chunk-size", type=int, default=1024)
     parser.add_argument("--batch-size", type=int, default=200)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--gpu-id", type=int, default=0)
     parser.add_argument("--seed", type=int, default=111)
-    parser.add_argument("--normal-train-ratio", type=float, default=0.75)
+    parser.add_argument(
+        "--normal-sampling",
+        choices=["all", "per_frequency", "frequency_one_per_band", "split_75_25"],
+        default="all",
+    )
     parser.add_argument("--resolution", type=int, default=400)
     parser.add_argument("--img-resize", type=int, default=240)
     parser.add_argument("--img-cropsize", type=int, default=240)
@@ -230,9 +299,12 @@ def main():
     load_checkpoint(model, args.checkpoint)
 
     encoder = ResNet18LocalEncoder().to(device)
-    galleries = build_resnet_gallery(encoder, train_loader, args, device)
+    galleries_by_mode = {
+        mode: build_resnet_gallery(encoder, train_loader, args, device, tta_mode=mode)
+        for mode in cnn_tta_modes(args)
+    }
 
-    rows = evaluate(model, encoder, galleries, build_eval_loaders(args), args, device)
+    rows = evaluate(model, encoder, galleries_by_mode, build_eval_loaders(args), args, device)
     rows = attach_formal_baseline(rows, args.formal_baseline_csv)
 
     out_root = Path(args.output_root)
@@ -246,9 +318,16 @@ def main():
         "formal_baseline_csv": args.formal_baseline_csv,
         "resnet": "resnet18_imagenet1k_v1",
         "resnet_layers": args.resnet_layers,
-        "image_top_ratio": args.image_top_ratio,
+        "image_score_modes": ["max"] + [f"top{ratio:g}" for ratio in args.image_top_ratios],
+        "image_top_ratios": args.image_top_ratios,
         "lambdas": args.lambdas,
         "max_gallery_patches": args.max_gallery_patches,
+        "cnn_coreset_size": args.cnn_coreset_size,
+        "cnn_nn_topk": args.cnn_nn_topk,
+        "cnn_paired_tta": args.cnn_paired_tta,
+        "cnn_paired_tta_modes": cnn_tta_modes(args),
+        "cnn_paired_tta_shift_px": args.cnn_paired_tta_shift_px,
+        "cnn_paired_tta_blur_ksize": args.cnn_paired_tta_blur_ksize,
     }
     for col in [c for c in df.columns if c.endswith("_auc")]:
         summary[f"{col}_macro"] = float(df[col].mean())

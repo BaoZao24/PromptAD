@@ -131,9 +131,8 @@ tools/eval_formal_promptad_normal_gallery_fusion_cls.py
 tools/eval_seg_prompt_normal_gallery_fusion.py
 ```
 
-Detailed handoff documents:
+Latest handoff document:
 
 ```bash
-docs/agent_handoff_promptad_normal_gallery_fusion_cls.md
-docs/agent_handoff_seg_prompt_normal_gallery_fusion.md
+docs/agent_handoff_sampling_shot_ablation.md
 ```

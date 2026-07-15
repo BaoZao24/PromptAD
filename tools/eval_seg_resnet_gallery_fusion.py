@@ -136,6 +136,41 @@ def flatten_feature_map(feature_map: torch.Tensor) -> torch.Tensor:
     return feature_map.permute(0, 2, 3, 1).reshape(-1, feature_map.shape[1]).contiguous()
 
 
+def cnn_tta_modes(args):
+    mode = getattr(args, "cnn_paired_tta", "none")
+    if mode == "none":
+        return ["identity"]
+    if mode == "stft_shift_blur":
+        return ["identity", "blur", "time_shift_up", "time_shift_down"]
+    raise ValueError(f"Unsupported CNN paired TTA mode: {mode}")
+
+
+def cnn_tta_batch(raw_batch: torch.Tensor, mode: str, args) -> torch.Tensor:
+    if mode == "identity":
+        return raw_batch
+    variants = []
+    shift = int(getattr(args, "cnn_paired_tta_shift_px", 4))
+    blur_size = int(getattr(args, "cnn_paired_tta_blur_ksize", 3))
+    if blur_size < 3 or blur_size % 2 == 0:
+        raise ValueError("cnn_paired_tta_blur_ksize must be an odd integer >= 3")
+    for arr_tensor in raw_batch:
+        arr = arr_tensor.numpy()
+        if mode == "blur":
+            variant = cv2.GaussianBlur(arr, (blur_size, blur_size), 0)
+        elif mode in {"time_shift_up", "time_shift_down"}:
+            dy = -shift if mode == "time_shift_up" else shift
+            matrix = np.float32([[1, 0, 0], [0, 1, dy]])
+            h, w = arr.shape[:2]
+            variant = cv2.warpAffine(
+                arr, matrix, (w, h), flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REFLECT_101,
+            )
+        else:
+            raise ValueError(f"Unsupported CNN paired TTA view: {mode}")
+        variants.append(variant)
+    return torch.as_tensor(np.stack(variants, axis=0))
+
+
 def downsample_gallery(gallery: torch.Tensor, max_patches: int, seed: int) -> torch.Tensor:
     if max_patches <= 0 or gallery.shape[0] <= max_patches:
         return gallery
@@ -146,11 +181,33 @@ def downsample_gallery(gallery: torch.Tensor, max_patches: int, seed: int) -> to
 
 
 @torch.no_grad()
-def build_resnet_gallery(encoder, train_loader, args, device):
+def farthest_first_coreset(gallery: torch.Tensor, coreset_size: int, seed: int) -> torch.Tensor:
+    """Keep diverse normal patches without changing the default full-memory path."""
+    if coreset_size <= 0 or gallery.shape[0] <= coreset_size:
+        return gallery
+
+    count = gallery.shape[0]
+    selected = torch.empty(coreset_size, dtype=torch.long, device=gallery.device)
+    selected[0] = int(seed) % count
+    # Features are L2-normalized, so maximizing cosine distance is equivalent
+    # to minimizing cosine similarity to the selected set.
+    closest_similarity = gallery @ gallery[selected[0]].unsqueeze(1)
+    closest_similarity = closest_similarity.squeeze(1)
+    for index in range(1, coreset_size):
+        next_index = torch.argmin(closest_similarity)
+        selected[index] = next_index
+        similarity = gallery @ gallery[next_index].unsqueeze(1)
+        closest_similarity = torch.maximum(closest_similarity, similarity.squeeze(1))
+    return gallery[selected].contiguous()
+
+
+@torch.no_grad()
+def build_resnet_gallery(encoder, train_loader, args, device, tta_mode="identity"):
     encoder.eval()
     galleries = {layer: [] for layer in args.resnet_layers}
     for data, mask, label, name, img_type in tqdm(train_loader, desc="Build ResNet normal gallery", leave=False):
-        raw = data.permute(0, 3, 1, 2).to(device, non_blocking=True)
+        data_variant = cnn_tta_batch(data, tta_mode, args)
+        raw = data_variant.permute(0, 3, 1, 2).to(device, non_blocking=True)
         features = encoder(raw)
         for layer in args.resnet_layers:
             galleries[layer].append(flatten_feature_map(features[layer]).cpu())
@@ -159,8 +216,16 @@ def build_resnet_gallery(encoder, train_loader, args, device):
     for layer, chunks in galleries.items():
         gallery = torch.cat(chunks, dim=0).to(device)
         gallery = downsample_gallery(gallery, args.max_gallery_patches, args.seed + len(layer))
+        gallery = farthest_first_coreset(
+            gallery,
+            int(getattr(args, "cnn_coreset_size", 0)),
+            args.seed + len(layer),
+        )
         out[layer] = F.normalize(gallery, dim=1)
-        print(f"[resnet_gallery] {layer}: patches={out[layer].shape[0]} dim={out[layer].shape[1]}")
+        print(
+            f"[resnet_gallery] mode={tta_mode} {layer}: patches={out[layer].shape[0]} "
+            f"dim={out[layer].shape[1]} coreset_size={getattr(args, 'cnn_coreset_size', 0)}"
+        )
     return out
 
 
@@ -269,7 +334,7 @@ def main():
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--gpu-id", type=int, default=0)
     parser.add_argument("--seed", type=int, default=111)
-    parser.add_argument("--normal-train-ratio", type=float, default=0.75)
+    parser.add_argument("--normal-sampling", choices=["all", "frequency_one_per_band"], default="all")
     parser.add_argument("--resolution", type=int, default=400)
     parser.add_argument("--img-resize", type=int, default=240)
     parser.add_argument("--img-cropsize", type=int, default=240)

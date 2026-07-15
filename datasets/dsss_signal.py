@@ -2,9 +2,6 @@ import os
 import re
 from pathlib import Path
 
-from .rf_split_utils import load_rf_split_dataset
-
-
 dsss_classes = ['WeaponMuseum_spectrum', 'Playground_spectrum', 'TimeSquare_spectrum', 'Gymnasium_spectrum']
 
 
@@ -34,8 +31,7 @@ def _extract_freq(filename: str) -> str:
     return None
 
 
-def load_dsss_signal(category, k_shot, noise_level='m10db', freq=None, train_category=None,
-                     split_mode='legacy', normal_train_ratio=0.75):
+def load_dsss_signal(category, k_shot, noise_level='m10db', freq=None, train_category=None):
     """
     加载 DSSS 信号数据集用于 DSSS 信号检测（按场景或频段分开）
 
@@ -59,12 +55,6 @@ def load_dsss_signal(category, k_shot, noise_level='m10db', freq=None, train_cat
         train_data: (img_paths, gt_paths, labels, types)
         test_data: (img_paths, gt_paths, labels, types)
     """
-    if split_mode == 'normal_75_25':
-        return load_rf_split_dataset(
-            DSSS_SIGNAL_DIR, category, noise_level=noise_level, freq=freq,
-            normal_train_ratio=normal_train_ratio
-        )
-
     train_cat = train_category if train_category is not None else category
     train_root = os.path.join(NORMAL_DIR, train_cat)
     test_normal_root = os.path.join(DSSS_SIGNAL_DIR, category, 'normal', noise_level)

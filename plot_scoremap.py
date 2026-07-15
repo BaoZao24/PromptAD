@@ -104,7 +104,7 @@ def plot_comparison(samples, out_path):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--root-dir',  type=str, default='./result')
+    parser.add_argument('--root-dir',  type=str, default='analysis_outputs/manual_runs')
     parser.add_argument('--dataset',   type=str, default=None,
                         choices=['dsss_signal', 'burst_signal', 'chirp_signal'])
     parser.add_argument('--scene',     type=str, default=None)
@@ -114,7 +114,7 @@ if __name__ == '__main__':
                         help='每个条件各取多少个样本')
     parser.add_argument('--seed',      type=int, default=111)
     parser.add_argument('--out',       type=str,
-                        default='./result/scoremap_compare.png')
+                        default='analysis_outputs/manual_runs/scoremap_compare.png')
     args = parser.parse_args()
 
     samples = collect_samples(

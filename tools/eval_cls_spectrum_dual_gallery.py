@@ -31,6 +31,7 @@ from tools.eval_seg_resnet_gallery_fusion import (
     load_checkpoint,
 )
 from train_rf_target_pooled_universal import build_gallery, to_model_input
+from utils.rf_frequency_sampling import maybe_select_one_per_frequency_band
 from utils.training_utils import setup_seed
 
 
@@ -58,8 +59,7 @@ class SpectrumPathDataset(Dataset):
 
 def collect_train_samples(category: str, args):
     paths = sorted((Path(args.spectrum_root) / category / "train" / "good").glob("*.png"))
-    if args.max_train_normals > 0:
-        paths = paths[: args.max_train_normals]
+    paths = maybe_select_one_per_frequency_band(paths, args.normal_sampling)
     return [(p, 0, f"{category}_train_good", f"spectrum-{category}") for p in paths]
 
 
@@ -194,7 +194,7 @@ def main():
     parser.add_argument("--resnet-lambdas", type=float, nargs="+", default=[0.5, 1.0, 1.5, 2.0])
     parser.add_argument("--max-gallery-patches", type=int, default=50000)
     parser.add_argument("--distance-chunk-size", type=int, default=1024)
-    parser.add_argument("--max-train-normals", type=int, default=0)
+    parser.add_argument("--normal-sampling", choices=["all", "frequency_one_per_band"], default="all")
     parser.add_argument("--max-test-normals", type=int, default=0)
     parser.add_argument("--max-abnormals", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=160)

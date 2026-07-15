@@ -1,14 +1,27 @@
 import os
 from pathlib import Path
 
-from .rf_split_utils import _filter_by_freq
-
-
 rf_spe_png_classes = ['burst', 'chirp', 'dsss', 'wideband_pulse']
 
 
 RF_SPE_PNG_DIR = '/mnt/data/wangbei/data/RF_SPE_PNG'
 RF_PUBLIC_NORMAL_DIR = '/mnt/data/wangbei/data/RF_SPE_PNG/RF_Spectrum_Public_Dataset'
+
+
+def _extract_freq(filename: str):
+    parts = filename.split('_f')
+    if len(parts) < 2:
+        return None
+    tail = parts[-1]
+    if 'MHz' not in tail:
+        return None
+    return tail.split('MHz', 1)[0]
+
+
+def _filter_by_freq(img_paths, freq):
+    if freq is None:
+        return img_paths
+    return [img_path for img_path in img_paths if _extract_freq(Path(img_path).name) == freq]
 
 
 def _list_public_record_dirs():
@@ -67,15 +80,9 @@ def _load_with_public_normal(category, k_shot, noise_level, freq=None):
     return (train_img_paths, train_gt_paths, train_labels, train_types),            (test_img_paths, test_gt_paths, test_labels, test_types)
 
 
-def load_rf_spe_png(category, k_shot, noise_level='m10db', freq=None, train_category=None,
-                    split_mode='legacy', normal_train_ratio=0.75):
+def load_rf_spe_png(category, k_shot, noise_level='m10db', freq=None, train_category=None):
     if category not in rf_spe_png_classes:
         raise ValueError(
             f"rf_spe_png supports {rf_spe_png_classes}, got {category!r}."
         )
-    if split_mode != 'normal_75_25':
-        raise ValueError(
-            'rf_spe_png currently supports --split-mode normal_75_25 only.'
-        )
-
     return _load_with_public_normal(category, k_shot, noise_level, freq=freq)

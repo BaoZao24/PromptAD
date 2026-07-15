@@ -1,24 +1,32 @@
 import os
 from pathlib import Path
 
-from .rf_split_utils import _filter_by_freq, _split_normal_paths
-
-
 wideband_pulse_png_classes = ['wideband_pulse']
 
 
 WIDEBAND_PULSE_PNG_DIR = '/mnt/data/wangbei/data/RF_SPE_PNG/wideband_pulse'
 
 
-def load_wideband_pulse_png(category, k_shot, noise_level='m20db', freq=None, train_category=None,
-                            split_mode='legacy', normal_train_ratio=0.75):
+def _extract_freq(filename: str):
+    parts = filename.split('_f')
+    if len(parts) < 2:
+        return None
+    tail = parts[-1]
+    if 'MHz' not in tail:
+        return None
+    return tail.split('MHz', 1)[0]
+
+
+def _filter_by_freq(img_paths, freq):
+    if freq is None:
+        return img_paths
+    return [img_path for img_path in img_paths if _extract_freq(Path(img_path).name) == freq]
+
+
+def load_wideband_pulse_png(category, k_shot, noise_level='m20db', freq=None, train_category=None):
     if category != 'wideband_pulse':
         raise ValueError(
             f"wideband_pulse_png only supports class_name='wideband_pulse', got {category!r}."
-        )
-    if split_mode != 'normal_75_25':
-        raise ValueError(
-            'wideband_pulse_png currently supports --split-mode normal_75_25 only.'
         )
 
     normal_root = os.path.join(WIDEBAND_PULSE_PNG_DIR, 'normal', noise_level)
@@ -35,7 +43,9 @@ def load_wideband_pulse_png(category, k_shot, noise_level='m20db', freq=None, tr
         abnormal_paths = sorted(str(p) for p in Path(abnormal_root).glob('*.png'))
         abnormal_paths = _filter_by_freq(abnormal_paths, freq)
 
-    train_normal_paths, test_normal_paths = _split_normal_paths(normal_paths, normal_train_ratio)
+    k = max(1, int(k_shot)) if k_shot else 1
+    train_normal_paths = normal_paths[:k]
+    test_normal_paths = normal_paths[k:]
 
     train_img_paths = list(train_normal_paths)
     train_gt_paths = [0] * len(train_img_paths)

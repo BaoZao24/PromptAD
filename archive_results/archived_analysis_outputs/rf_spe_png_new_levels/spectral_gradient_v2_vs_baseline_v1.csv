@@ -1,5 +1,0 @@
-dataset,class,noise,rgb_baseline,spectral_gradient_v1,spectral_gradient_v2,v1_minus_rgb,v2_minus_rgb,v2_minus_v1
-rf_spe_png,burst,m40db,81.9700,80.5800,84.3100,-1.3900,2.3400,3.7300
-rf_spe_png,burst,m50db,60.4600,61.9000,63.3600,1.4400,2.9000,1.4600
-rf_spe_png,chirp,m40db,98.9000,98.7800,98.9700,-0.1200,0.0700,0.1900
-rf_spe_png,chirp,m50db,87.7700,84.0700,75.8600,-3.7000,-11.9100,-8.2100

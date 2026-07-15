@@ -2,7 +2,7 @@
 """Train one pooled RF PromptAD checkpoint and evaluate all target cells.
 
 This is the entrypoint for universal target-domain experiments:
-all target normal samples from burst/chirp/dsss/pulse are pooled for training,
+all target normal samples from burst/chirp/dsss/pulse/wideband_pulse are pooled for training,
 then one checkpoint is selected by macro average over all eval cells.
 """
 
@@ -30,6 +30,7 @@ from datasets.burst_signal import load_burst_signal, burst_signal_classes
 from datasets.chirp_signal import load_chirp_signal, chirp_signal_classes
 from datasets.dsss_signal import load_dsss_signal, dsss_classes
 from datasets.pulse_signal import load_pulse_signal, pulse_signal_classes
+from datasets.wideband_pulse import load_wideband_pulse, wideband_pulse_classes
 from PromptAD import PromptAD, TripletLoss
 from PromptAD.ad_prompts import (
     get_grouped_rf_abnormal_prompt_specs,
@@ -37,11 +38,12 @@ from PromptAD.ad_prompts import (
     is_rf_prompt_class,
 )
 from utils.eval_utils import specify_resolution
+from utils.rf_frequency_sampling import maybe_select_one_per_frequency_band, split_train_test_normals
 from utils.metrics import metric_cal_img, metric_cal_pix
 from utils.training_utils import setup_seed
 
 
-SIGNALS = ["burst_signal", "chirp_signal", "dsss_signal", "pulse_signal"]
+SIGNALS = ["burst_signal", "chirp_signal", "dsss_signal", "pulse_signal", "wideband_pulse"]
 SCENES = [
     "WeaponMuseum_spectrum",
     "Playground_spectrum",
@@ -53,12 +55,22 @@ JSR_BY_SIGNAL = {
     "chirp_signal": ["m10db", "m20db", "m30db"],
     "dsss_signal": ["m10db", "m20db", "m30db"],
     "pulse_signal": ["m20db", "m30db", "m40db"],
+    "wideband_pulse": ["m20db", "m30db", "m40db"],
 }
 LOADERS = {
     "burst_signal": (load_burst_signal, burst_signal_classes),
     "chirp_signal": (load_chirp_signal, chirp_signal_classes),
     "dsss_signal": (load_dsss_signal, dsss_classes),
     "pulse_signal": (load_pulse_signal, pulse_signal_classes),
+    "wideband_pulse": (load_wideband_pulse, wideband_pulse_classes),
+}
+DATASET_ROOT = Path("/mnt/data/wangbei/data/datasets")
+SIGNAL_DIRS = {
+    "burst_signal": "burst",
+    "chirp_signal": "chirp",
+    "dsss_signal": "dsss",
+    "pulse_signal": "pulse",
+    "wideband_pulse": "wideband_pulse",
 }
 METHOD_PRESETS = {
     "pooled_rf_rgb": {},
@@ -120,16 +132,49 @@ class RFPathDataset(Dataset):
         return img, gt_arr, label, img_name, sample_type
 
 
-def collect_samples(signal, scene, jsr, phase, k_shot=1, normal_train_ratio=0.75):
-    loader_fn, _ = LOADERS[signal]
-    train_data, test_data = loader_fn(
-        category=scene,
-        k_shot=k_shot,
-        noise_level=jsr,
-        split_mode="normal_75_25",
-        normal_train_ratio=normal_train_ratio,
-    )
-    data = train_data if phase == "train" else test_data
+def collect_samples(signal, scene, jsr, phase, k_shot=1, exclude_paths=None):
+    signal_dir = SIGNAL_DIRS[signal]
+    cell_root = DATASET_ROOT / signal_dir / scene
+    normal_root = cell_root / "normal" / jsr
+    abnormal_root = cell_root / "abnormal" / jsr
+    gt_root = cell_root / "groundtruth" / jsr
+    exclude_paths = set(exclude_paths or [])
+    data = ([], [], [], [])
+
+    if phase == "train":
+        img_paths = sorted(str(p) for p in normal_root.glob("*.png")) if normal_root.is_dir() else []
+        if k_shot > 0 and len(img_paths) > k_shot:
+            img_paths = img_paths[:k_shot]
+        data = (
+            img_paths,
+            [0] * len(img_paths),
+            [0] * len(img_paths),
+            [f"{scene}_normal"] * len(img_paths),
+        )
+    elif phase == "test":
+        img_paths, gt_paths, labels, sample_types = [], [], [], []
+        if normal_root.is_dir():
+            for img_path in sorted(normal_root.glob("*.png")):
+                img_path_str = str(img_path)
+                if img_path_str in exclude_paths:
+                    continue
+                img_paths.append(img_path_str)
+                gt_paths.append(0)
+                labels.append(0)
+                sample_types.append(f"{scene}_normal")
+        if abnormal_root.is_dir():
+            for img_path in sorted(abnormal_root.glob("*.png")):
+                img_path_str = str(img_path)
+                img_paths.append(img_path_str)
+                img_name = img_path.name.replace("_abnormal.png", "_groundtruth.png")
+                gt_path = gt_root / img_name
+                gt_paths.append(str(gt_path) if gt_path.exists() else 0)
+                labels.append(1)
+                sample_types.append(f"{scene}_abnormal")
+        data = (img_paths, gt_paths, labels, sample_types)
+    else:
+        raise ValueError(f"Unsupported phase {phase!r}")
+
     samples = []
     for img, gt, label, sample_type in zip(*data):
         if phase == "train" and int(label) != 0:
@@ -141,12 +186,29 @@ def collect_samples(signal, scene, jsr, phase, k_shot=1, normal_train_ratio=0.75
 
 def build_train_loader(args):
     samples = []
+    full_normal_modes = {"frequency_one_per_band", "split_75_25"}
+    support_k_shot = 0 if args.normal_sampling in full_normal_modes else args.k_shot
     for signal in args.signals:
         for scene in SCENES:
             for jsr in JSR_BY_SIGNAL[signal]:
-                samples.extend(
-                    collect_samples(signal, scene, jsr, "train", normal_train_ratio=args.normal_train_ratio)
-                )
+                cell_samples = collect_samples(signal, scene, jsr, "train", k_shot=support_k_shot)
+                if args.normal_sampling == "split_75_25":
+                    cell_samples, _ = split_train_test_normals(
+                        cell_samples,
+                        train_ratio=0.75,
+                        seed=args.seed,
+                        path_getter=lambda sample: sample[0],
+                    )
+                samples.extend(cell_samples)
+    if args.normal_sampling != "split_75_25":
+        samples = maybe_select_one_per_frequency_band(
+            samples,
+            getattr(args, "normal_sampling", "all"),
+            path_getter=lambda sample: sample[0],
+        )
+    if not samples:
+        raise RuntimeError("No train normal samples available")
+    args.support_paths = {sample[0] for sample in samples}
     return DataLoader(
         RFPathDataset(samples),
         batch_size=args.batch_size,
@@ -162,7 +224,12 @@ def build_eval_loaders(args):
         for scene in SCENES:
             for jsr in JSR_BY_SIGNAL[signal]:
                 samples = collect_samples(
-                    signal, scene, jsr, "test", normal_train_ratio=args.normal_train_ratio
+                    signal,
+                    scene,
+                    jsr,
+                    "test",
+                    k_shot=args.k_shot,
+                    exclude_paths=getattr(args, "support_paths", set()),
                 )
                 loader = DataLoader(
                     RFPathDataset(samples),
@@ -394,7 +461,7 @@ def main():
     parser.add_argument("--batch-size", type=int, default=400)
     parser.add_argument("--num-workers", type=int, default=8)
     parser.add_argument("--gpu-id", type=int, default=0)
-    parser.add_argument("--normal-train-ratio", type=float, default=0.75)
+    parser.add_argument("--normal-sampling", choices=["all", "frequency_one_per_band", "split_75_25"], default="frequency_one_per_band")
     parser.add_argument("--lr", type=float, default=0.002)
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--weight_decay", type=float, default=0.0005)

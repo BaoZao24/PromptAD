@@ -33,9 +33,12 @@ from tools.eval_cls_resnet_gallery_fusion import resnet_patch_image_scores
 from tools.eval_seg_resnet_gallery_fusion import (
     ResNet18LocalEncoder,
     build_resnet_gallery,
+    cnn_tta_batch,
+    cnn_tta_modes,
     load_checkpoint,
 )
 from train_rf_target_pooled_universal import build_gallery, to_model_input
+from utils.rf_frequency_sampling import NORMAL_SAMPLING_CHOICES, maybe_select_one_per_frequency_band
 from utils.training_utils import setup_seed
 
 
@@ -103,16 +106,21 @@ def public_normal_paths(records):
     return paths
 
 
-def split_public_normals(train_ratio: float):
+def all_public_normal_paths():
     records = public_normal_records()
-    n_train = max(1, min(len(records) - 1, int(round(len(records) * train_ratio))))
-    return public_normal_paths(records[:n_train]), public_normal_paths(records[n_train:])
+    return public_normal_paths(records)
+
+
+def select_public_support_and_test_normals(args):
+    normal_paths = all_public_normal_paths()
+    train_normal_paths = maybe_select_one_per_frequency_band(normal_paths, args.normal_sampling)
+    support_set = {str(p) for p in train_normal_paths}
+    test_normal_paths = [p for p in normal_paths if str(p) not in support_set]
+    return train_normal_paths, test_normal_paths
 
 
 def build_train_loader(args):
-    train_normal_paths, _ = split_public_normals(args.normal_train_ratio)
-    if args.max_train_normals > 0:
-        train_normal_paths = train_normal_paths[: args.max_train_normals]
+    train_normal_paths, _ = select_public_support_and_test_normals(args)
     samples = [
         (p, 0, 0, "public_train_normal", "public-rf")
         for p in train_normal_paths
@@ -127,7 +135,7 @@ def build_train_loader(args):
 
 
 def collect_eval_samples(signal: str, jsr: str, args):
-    _, test_normal_paths = split_public_normals(args.normal_train_ratio)
+    _, test_normal_paths = select_public_support_and_test_normals(args)
     if args.max_test_normals > 0:
         test_normal_paths = test_normal_paths[: args.max_test_normals]
     samples = [
@@ -207,7 +215,7 @@ def encode_clip_gallery(model, loader, device):
 
 
 @torch.no_grad()
-def evaluate(model, encoder, clip_gallery, resnet_galleries, eval_loaders, args, device):
+def evaluate(model, encoder, clip_gallery, resnet_galleries_by_mode, eval_loaders, args, device):
     model.eval_mode()
     encoder.eval()
     rows = []
@@ -228,15 +236,22 @@ def evaluate(model, encoder, clip_gallery, resnet_galleries, eval_loaders, args,
             promptad_scores.extend([float(x) for x in score_img])
             clip_scores.extend([float(x) for x in topk_distance(cls_features, clip_gallery, args.clip_topk)])
 
-            raw = data.permute(0, 3, 1, 2).to(device, non_blocking=True)
-            cnn_features = encoder(raw)
+            mode_scores = {layer: [] for layer in args.resnet_layers}
+            for mode, resnet_galleries in resnet_galleries_by_mode.items():
+                data_variant = cnn_tta_batch(data, mode, args)
+                raw = data_variant.permute(0, 3, 1, 2).to(device, non_blocking=True)
+                cnn_features = encoder(raw)
+                for layer in args.resnet_layers:
+                    values = resnet_patch_image_scores(
+                        cnn_features[layer],
+                        resnet_galleries[layer],
+                        args.distance_chunk_size,
+                        args.image_top_ratio,
+                        args.cnn_nn_topk,
+                    )
+                    mode_scores[layer].append(np.asarray(values, dtype=np.float32))
             for layer in args.resnet_layers:
-                values = resnet_patch_image_scores(
-                    cnn_features[layer],
-                    resnet_galleries[layer],
-                    args.distance_chunk_size,
-                    args.image_top_ratio,
-                )
+                values = np.max(np.stack(mode_scores[layer], axis=0), axis=0)
                 resnet_scores[layer].extend([float(x) for x in values])
 
             labels.extend([int(x) for x in label.numpy().tolist()])
@@ -293,7 +308,10 @@ def write_csv(path: Path, rows):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-root", default="analysis_outputs/20260702_public_rf_cls_dual_gallery")
-    parser.add_argument("--checkpoint", default="analysis_outputs/20260627_method_funnel/runs/pooled_rf_rgb/cls/checkpoint/overall-best.pt")
+    parser.add_argument(
+        "--checkpoint",
+        default="analysis_outputs/90_rejected_or_aborted/20260706_cleanup_old_results/20260627_method_funnel/runs/pooled_rf_rgb/cls/checkpoint/overall-best.pt",
+    )
     parser.add_argument("--signals", nargs="+", default=list(PUBLIC_SIGNALS), choices=list(PUBLIC_SIGNALS))
     parser.add_argument(
         "--jsrs-by-signal",
@@ -310,9 +328,28 @@ def main():
     parser.add_argument("--clip-lambdas", type=float, nargs="+", default=[0.5, 1.0, 1.5])
     parser.add_argument("--resnet-lambdas", type=float, nargs="+", default=[0.5, 1.0, 1.5, 2.0])
     parser.add_argument("--max-gallery-patches", type=int, default=50000)
+    parser.add_argument(
+        "--cnn-coreset-size",
+        type=int,
+        default=0,
+        help="Farthest-first CNN memory size; 0 keeps the complete normal memory.",
+    )
+    parser.add_argument(
+        "--cnn-nn-topk",
+        type=int,
+        default=1,
+        help="Average distance to this many nearest CNN normal patches; 1 is legacy nearest neighbour.",
+    )
+    parser.add_argument(
+        "--cnn-paired-tta",
+        choices=["none", "stft_shift_blur"],
+        default="none",
+        help="Optional paired TTA for the CNN branch; default keeps the formal CNN path unchanged.",
+    )
+    parser.add_argument("--cnn-paired-tta-shift-px", type=int, default=4)
+    parser.add_argument("--cnn-paired-tta-blur-ksize", type=int, default=3)
     parser.add_argument("--distance-chunk-size", type=int, default=1024)
-    parser.add_argument("--normal-train-ratio", type=float, default=0.75)
-    parser.add_argument("--max-train-normals", type=int, default=0)
+    parser.add_argument("--normal-sampling", choices=NORMAL_SAMPLING_CHOICES, default="all")
     parser.add_argument("--max-test-normals", type=int, default=0)
     parser.add_argument("--max-abnormals", type=int, default=0)
     parser.add_argument("--batch-size", type=int, default=160)
@@ -358,8 +395,11 @@ def main():
     print(f"[public_clip_gallery] images={clip_gallery.shape[0]} topk={args.clip_topk}")
 
     encoder = ResNet18LocalEncoder().to(device)
-    resnet_galleries = build_resnet_gallery(encoder, train_loader, args, device)
-    rows = evaluate(model, encoder, clip_gallery, resnet_galleries, build_eval_loaders(args), args, device)
+    resnet_galleries_by_mode = {
+        mode: build_resnet_gallery(encoder, train_loader, args, device, tta_mode=mode)
+        for mode in cnn_tta_modes(args)
+    }
+    rows = evaluate(model, encoder, clip_gallery, resnet_galleries_by_mode, build_eval_loaders(args), args, device)
 
     out_root = Path(args.output_root)
     result_path = out_root / "results_cls_public_rf_dual_gallery.csv"
@@ -369,7 +409,7 @@ def main():
         "method": "public_rf_cls_dual_gallery",
         "checkpoint": args.checkpoint,
         "dataset_root": str(RF_PUBLIC_ROOT),
-        "normal_train_ratio": args.normal_train_ratio,
+        "normal_sampling": args.normal_sampling,
         "clip_topk": args.clip_topk,
         "resnet": "resnet18_imagenet1k_v1",
         "resnet_layers": args.resnet_layers,
@@ -378,6 +418,12 @@ def main():
         "clip_lambdas": args.clip_lambdas,
         "resnet_lambdas": args.resnet_lambdas,
         "max_gallery_patches": args.max_gallery_patches,
+        "cnn_paired_tta": args.cnn_paired_tta,
+        "cnn_paired_tta_modes": cnn_tta_modes(args),
+        "cnn_paired_tta_shift_px": args.cnn_paired_tta_shift_px,
+        "cnn_paired_tta_blur_ksize": args.cnn_paired_tta_blur_ksize,
+        "cnn_coreset_size": args.cnn_coreset_size,
+        "cnn_nn_topk": args.cnn_nn_topk,
     }
     for col in [c for c in df.columns if c.endswith("_auc")]:
         summary[f"{col}_macro"] = float(df[col].mean())
@@ -386,7 +432,7 @@ def main():
     (out_root / "README.md").write_text(
         "# Public RF CLS Dual Gallery Evaluation\n\n"
         "This experiment evaluates the current dual-gallery CLS method on RF_SPE_PNG.\n\n"
-        "Normal samples are split by public normal record folders: 75% for gallery, 25% for test normals.\n"
+        "Normal support is selected by --normal-sampling; selected support normals are excluded from test normals.\n"
         "Abnormal samples are read from RF_SPE_PNG/{burst,chirp,dsss,pulse}/abnormal/{jsr}.\n\n"
         f"Result CSV: `{result_path.name}`\n\n"
         f"Summary: `{summary_path.name}`\n",

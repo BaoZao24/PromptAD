@@ -34,14 +34,6 @@ import random
 from tqdm import tqdm
 
 TASK = 'CLS'
-MULTIVIEW_FUSION_VIEWS = ('rgb', 'spectral_gradient_v2', 'dsss_weak_residual')
-
-
-def get_multiview_views(args):
-    if getattr(args, 'input_mode', None) == 'morph_fusion_gray_contrast_resgrad':
-        return ('gray_contrast_only', 'weak_residual_only', 'grad_mag_only')
-    return MULTIVIEW_FUSION_VIEWS
-
 
 
 def build_input_transform(input_mode, img_resize, img_cropsize):
@@ -94,132 +86,6 @@ def build_input_transform(input_mode, img_resize, img_cropsize):
         transforms.ToTensor(),
         transforms.Normalize(mean=mean_train, std=std_train),
     ])
-
-
-def fuse_multiview_scores(score_img_by_view, score_map_by_view, rule, lam):
-    views = list(score_img_by_view.keys())
-    score_imgs = {k: np.asarray(v, dtype=np.float32) for k, v in score_img_by_view.items()}
-    score_maps = {k: np.asarray(v, dtype=np.float32) for k, v in score_map_by_view.items()}
-
-    if rule == 'max':
-        fused_img = score_imgs[views[0]].copy()
-        fused_map = score_maps[views[0]].copy()
-        for view in views[1:]:
-            fused_img = np.maximum(fused_img, score_imgs[view])
-            fused_map = np.maximum(fused_map, score_maps[view])
-    elif rule == 'mean':
-        fused_img = sum(score_imgs[v] for v in views) / float(len(views))
-        fused_map = sum(score_maps[v] for v in views) / float(len(views))
-    elif rule == 'conservative_lam0.5':
-        anchor = views[0]
-        fused_img = score_imgs[anchor].copy()
-        fused_map = score_maps[anchor].copy()
-        aux_best_img = score_imgs[views[1]].copy()
-        aux_best_map = score_maps[views[1]].copy()
-        for view in views[2:]:
-            aux_best_img = np.maximum(aux_best_img, score_imgs[view])
-            aux_best_map = np.maximum(aux_best_map, score_maps[view])
-        fused_img = fused_img + lam * np.maximum(aux_best_img - fused_img, 0.0)
-        fused_map = fused_map + lam * np.maximum(aux_best_map - fused_map, 0.0)
-    else:
-        raise ValueError(f'Unsupported multiview fusion rule: {rule}')
-
-    return fused_img.tolist(), [fused_map[i] for i in range(fused_map.shape[0])]
-
-
-def cache_test_view_features(model, dataloader, device, args):
-    view_transforms = {
-        view: build_input_transform(view, args.img_resize, args.img_cropsize)
-        for view in get_multiview_views(args)
-    }
-    cached = []
-    print('Caching test image features for multiview fusion (one-time)...')
-    for (raw_data, mask, label, name, img_type) in tqdm(dataloader, desc='Cache multiview feats', leave=False):
-        view_cache = {}
-        denorm = None
-        image_tensor = None
-        first_view = next(iter(view_transforms))
-        for view, transform in view_transforms.items():
-            data_t = [transform(Image.fromarray(f.numpy())) for f in raw_data]
-            data_t = torch.stack(data_t, dim=0)
-            vf = model.encode_image(data_t.to(device))
-            view_cache[view] = [v.cpu() for v in vf]
-            if view == 'rgb':
-                denorm = [denormalization(d.cpu().numpy()) for d in data_t]
-                image_tensor = data_t
-            elif denorm is None and view == first_view:
-                denorm = [cv2.cvtColor(f.numpy(), cv2.COLOR_BGR2RGB) if f.ndim == 3 and f.shape[2] == 3 else f.numpy() for f in raw_data]
-                image_tensor = data_t
-        cached.append({
-            'views': view_cache,
-            'mask': mask,
-            'label': label,
-            'name': name,
-            'denorm': denorm,
-            'image': image_tensor.cpu() if image_tensor is not None else None,
-        })
-    return cached
-
-
-def evaluate_multiview_fusion(model, dataloader, cached_test_batches, device, args, epoch_idx):
-    scores_img = []
-    score_maps = []
-    test_imgs = []
-    gt_list = []
-    gt_mask_list = []
-    names = []
-    view_transforms = None
-    if model.use_visual_adapter or model.use_visual_lora:
-        view_transforms = {
-            view: build_input_transform(view, args.img_resize, args.img_cropsize)
-            for view in get_multiview_views(args)
-        }
-        with torch.no_grad():
-            for (raw_data, mask, label, name, img_type) in tqdm(dataloader, desc=f'Multiview Eval {epoch_idx}', leave=False):
-                score_img_by_view = {}
-                score_map_by_view = {}
-                denorm = None
-                for view, transform in view_transforms.items():
-                    data_t = [transform(Image.fromarray(f.numpy())) for f in raw_data]
-                    data_t = torch.stack(data_t, dim=0).to(device)
-                    vf_gpu = model.encode_image(data_t)
-                    score_img, score_map = model.score_cached(vf_gpu, 'cls', image=data_t)
-                    score_img_by_view[view] = score_img
-                    score_map_by_view[view] = score_map
-                    if view == 'rgb':
-                        denorm = [denormalization(d.cpu().numpy()) for d in data_t]
-                fused_img, fused_map = fuse_multiview_scores(
-                    score_img_by_view, score_map_by_view, args.multiview_fusion_rule, args.multiview_fusion_lambda
-                )
-                test_imgs += denorm
-                names += list(name)
-                gt_list += label.numpy().tolist()
-                for m in mask.numpy():
-                    m[m > 0] = 1
-                    gt_mask_list.append(m)
-                score_maps += fused_map
-                scores_img += fused_img
-    else:
-        for batch in tqdm(cached_test_batches, desc=f'Multiview Eval {epoch_idx}', leave=False):
-            score_img_by_view = {}
-            score_map_by_view = {}
-            for view in get_multiview_views(args):
-                vf_gpu = [v.to(device) for v in batch['views'][view]]
-                score_img, score_map = model.score_cached(vf_gpu, 'cls', image=batch.get('image').to(device) if batch.get('image') is not None else None)
-                score_img_by_view[view] = score_img
-                score_map_by_view[view] = score_map
-            fused_img, fused_map = fuse_multiview_scores(
-                score_img_by_view, score_map_by_view, args.multiview_fusion_rule, args.multiview_fusion_lambda
-            )
-            test_imgs += batch['denorm']
-            names += list(batch['name'])
-            gt_list += batch['label'].numpy().tolist()
-            for m in batch['mask'].numpy():
-                m[m > 0] = 1
-                gt_mask_list.append(m)
-            score_maps += fused_map
-            scores_img += fused_img
-    return scores_img, score_maps, test_imgs, gt_list, gt_mask_list, names
 
 
 def _to_gray01(raw_img):
@@ -389,10 +255,7 @@ def fit(model,
         model.build_rn50_gallery(torch.cat(rn50_features, dim=0), local_gallery_features)
 
     cached_test_batches = []
-    if args.multiview_fusion:
-        if not model.use_visual_adapter and not model.use_visual_lora:
-            cached_test_batches = cache_test_view_features(model, dataloader, device, args)
-    elif not model.use_visual_adapter and not model.use_visual_lora:
+    if not model.use_visual_adapter and not model.use_visual_lora:
         # ── Cache test image features once (image encoder is frozen during training) ──
         # Each epoch only text-prompt changes; re-encoding test images is wasteful.
         print('Caching test image features (one-time)...')
@@ -534,60 +397,53 @@ def fit(model,
             rebuild_cnn_mamba_gallery(model, train_data, device, desc='CNN-Mamba gallery')
 
         print(f'Epoch [{epoch + 1}/{args.Epoch}] evaluating...')
-        if args.multiview_fusion:
-            scores_img, score_maps, test_imgs, gt_list, gt_mask_list, names = evaluate_multiview_fusion(
-                model, dataloader, cached_test_batches, device, args, epoch + 1
-            )
-            visual_maps_raw = None
-            text_scores = None
-        else:
-            scores_img = []
-            score_maps = []
-            visual_maps_raw = []
-            text_scores_collected = []
-            test_imgs = []
-            gt_list = []
-            gt_mask_list = []
-            names = []
+        scores_img = []
+        score_maps = []
+        visual_maps_raw = []
+        text_scores_collected = []
+        test_imgs = []
+        gt_list = []
+        gt_mask_list = []
+        names = []
 
-            if model.use_visual_adapter or model.use_visual_lora:
-                with torch.no_grad():
-                    for (raw_data, mask, label, name, img_type) in tqdm(dataloader, desc=f'Eval {epoch + 1}/{args.Epoch}', leave=False):
-                        data_t = [model.transform(Image.fromarray(f.numpy())) for f in raw_data]
-                        data_t = torch.stack(data_t, dim=0).to(device)
-                        vf_gpu = model.encode_image(data_t)
-                        score_img, score_map, raw_maps, ts = model.score_cached(vf_gpu, 'cls', return_raw_map=True, image=data_t if (args.cnn_vit_mamba_fusion or args.rn50_visual_fusion) else None)
-                        if args.stat_fusion:
-                            stat_scores = calculate_batch_stat_scores(raw_data, topk_ratio=args.stat_topk_ratio)
-                            score_img = fuse_with_stat_scores(score_img, stat_scores, args.stat_fusion_beta)
-
-                        test_imgs += [denormalization(d.cpu().numpy()) for d in data_t]
-                        names += list(name)
-                        gt_list += label.numpy().tolist()
-                        for m in mask.numpy():
-                            m[m > 0] = 1
-                            gt_mask_list.append(m)
-                        score_maps += score_map
-                        scores_img += score_img
-                        visual_maps_raw += raw_maps
-                        text_scores_collected += list(ts)
-            else:
-                for batch in tqdm(cached_test_batches, desc=f'Eval {epoch + 1}/{args.Epoch}', leave=False):
-                    vf_gpu = [v.to(device) for v in batch['vf']]
-                    score_img, score_map, raw_maps, ts = model.score_cached(vf_gpu, 'cls', return_raw_map=True, image=batch.get('image').to(device) if batch.get('image') is not None else None)
+        if model.use_visual_adapter or model.use_visual_lora:
+            with torch.no_grad():
+                for (raw_data, mask, label, name, img_type) in tqdm(dataloader, desc=f'Eval {epoch + 1}/{args.Epoch}', leave=False):
+                    data_t = [model.transform(Image.fromarray(f.numpy())) for f in raw_data]
+                    data_t = torch.stack(data_t, dim=0).to(device)
+                    vf_gpu = model.encode_image(data_t)
+                    score_img, score_map, raw_maps, ts = model.score_cached(vf_gpu, 'cls', return_raw_map=True, image=data_t if (args.cnn_vit_mamba_fusion or args.rn50_visual_fusion) else None)
                     if args.stat_fusion:
-                        score_img = fuse_with_stat_scores(score_img, batch['stat_scores'], args.stat_fusion_beta)
+                        stat_scores = calculate_batch_stat_scores(raw_data, topk_ratio=args.stat_topk_ratio)
+                        score_img = fuse_with_stat_scores(score_img, stat_scores, args.stat_fusion_beta)
 
-                    test_imgs  += batch['denorm']
-                    names      += list(batch['name'])
-                    gt_list    += batch['label'].numpy().tolist()
-                    for m in batch['mask'].numpy():
+                    test_imgs += [denormalization(d.cpu().numpy()) for d in data_t]
+                    names += list(name)
+                    gt_list += label.numpy().tolist()
+                    for m in mask.numpy():
                         m[m > 0] = 1
                         gt_mask_list.append(m)
                     score_maps += score_map
                     scores_img += score_img
                     visual_maps_raw += raw_maps
                     text_scores_collected += list(ts)
+        else:
+            for batch in tqdm(cached_test_batches, desc=f'Eval {epoch + 1}/{args.Epoch}', leave=False):
+                vf_gpu = [v.to(device) for v in batch['vf']]
+                score_img, score_map, raw_maps, ts = model.score_cached(vf_gpu, 'cls', return_raw_map=True, image=batch.get('image').to(device) if batch.get('image') is not None else None)
+                if args.stat_fusion:
+                    score_img = fuse_with_stat_scores(score_img, batch['stat_scores'], args.stat_fusion_beta)
+
+                test_imgs  += batch['denorm']
+                names      += list(batch['name'])
+                gt_list    += batch['label'].numpy().tolist()
+                for m in batch['mask'].numpy():
+                    m[m > 0] = 1
+                    gt_mask_list.append(m)
+                score_maps += score_map
+                scores_img += score_img
+                visual_maps_raw += raw_maps
+                text_scores_collected += list(ts)
 
         test_imgs, score_maps, gt_mask_list = specify_resolution(test_imgs, score_maps, gt_mask_list, resolution=(args.resolution, args.resolution))
 
@@ -672,7 +528,7 @@ def str2bool(v):
 
 def get_args():
     parser = argparse.ArgumentParser(description='Anomaly detection')
-    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa', 'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal', 'pulse_signal', 'wideband_pulse', 'wideband_pulse_png', 'rf_spe_png', 'rf_target_test_pool'])
+    parser.add_argument('--dataset', type=str, default='mvtec', choices=['mvtec', 'visa', 'spectrum', 'sample', 'deceptive_signal', 'burst_signal', 'dsss_signal', 'chirp_signal', 'pulse_signal', 'wideband_pulse', 'wideband_pulse_png', 'rf_spe_png'])
     parser.add_argument('--class_name', type=str, default='carpet')
 
     parser.add_argument('--img-resize', type=int, default=240)
@@ -681,7 +537,7 @@ def get_args():
 
     parser.add_argument('--batch-size', type=int, default=400)
     parser.add_argument('--vis', type=str2bool, choices=[True, False], default=False)
-    parser.add_argument("--root-dir", type=str, default="./result")
+    parser.add_argument("--root-dir", type=str, default="analysis_outputs/manual_runs")
     parser.add_argument("--load-memory", type=str2bool, default=True)
     parser.add_argument("--cal-pro", type=str2bool, default=False)
     parser.add_argument("--seed", type=int, default=111)
@@ -741,13 +597,6 @@ def get_args():
                         help="统计纹理分数聚合时使用的 top-k 比例")
     parser.add_argument("--stat-fusion-beta", type=float, default=0.5,
                         help="传统频谱统计分数融合权重")
-    parser.add_argument("--multiview-fusion", type=str2bool, choices=[True, False], default=False,
-                        help="是否在评估时对固定三视图 rgb/spectral_gradient_v2/dsss_weak_residual 做在线分数融合")
-    parser.add_argument("--multiview-fusion-rule", type=str, default="mean",
-                        choices=["max", "mean", "conservative_lam0.5"],
-                        help="多视图在线融合规则")
-    parser.add_argument("--multiview-fusion-lambda", type=float, default=0.5,
-                        help="conservative 融合规则中 aux 提升项的固定权重")
     parser.add_argument("--visual-class-prompt", type=str2bool, choices=[True, False], default=False,
                         help="是否启用 VCPA，将正常视觉原型映射成软 class prompt token")
     parser.add_argument("--visual-class-token-num", type=int, default=2,
@@ -839,11 +688,6 @@ def get_args():
                         help="visual LoRA 的单独学习率；默认使用 --lr")
     parser.add_argument("--text-aligned-dense-lr", type=float, default=None,
                         help="text-aligned dense projection 分支的单独学习率；默认使用 --lr")
-    parser.add_argument("--split-mode", type=str, default="legacy", choices=["legacy", "normal_75_25"],
-                        help="legacy 使用原始 few-shot 切分；normal_75_25 使用 3/4 normal 训练、1/4 normal 测试")
-    parser.add_argument("--normal-train-ratio", type=float, default=0.75,
-                        help="normal_75_25 模式下正常样本训练比例")
-
     # burst_signal related
     parser.add_argument("--noise-level", type=str, default='m10db', choices=['m10db', 'm20db', 'm30db', 'm40db', 'm50db', 'm55db', 'm60db', 'm70db'])
 
