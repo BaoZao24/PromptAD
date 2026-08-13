@@ -412,6 +412,9 @@ def main():
             "rf_spectral_structure_v1",
             "rf_spectral_background_v1",
             "rf_spectral_time_background_v1",
+            "rf_time_alignment_v1",
+            "rf_frequency_response_only_v1",
+            "rf_spectral_response_v1",
             "rf_spectral_physics_v1",
             "rf_spectral_physics_v2",
             "stft_physical_time_v1",
@@ -427,6 +430,11 @@ def main():
     parser.add_argument("--paired-tta-shift-px", type=int, default=4)
     parser.add_argument("--paired-tta-blur-ksize", type=int, default=3)
     parser.add_argument("--paired-tta-background-noise-strength", type=float, default=3.0)
+    parser.add_argument(
+        "--paired-tta-frequency-response-strength",
+        type=float,
+        default=3.0,
+    )
     parser.add_argument("--batch-size", type=int, default=96)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--gpu-id", type=int, default=0)

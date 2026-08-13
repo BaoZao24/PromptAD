@@ -448,6 +448,7 @@ def parse_args():
     parser.add_argument("--paired-tta-shift-px", type=int, default=4)
     parser.add_argument("--paired-tta-blur-ksize", type=int, default=3)
     parser.add_argument("--paired-tta-background-noise-strength", type=float, default=3.0)
+    parser.add_argument("--paired-tta-frequency-response-strength", type=float, default=3.0)
     parser.add_argument("--gallery-chunk-size", type=int, default=4096)
     parser.add_argument("--freq-window", type=int, default=-1)
     parser.add_argument("--nn-topk", type=int, default=5)
@@ -502,12 +503,16 @@ def main():
         "ofdma_spectral_structure_v1",
         "ofdma_spectral_background_v1",
         "ofdma_spectral_time_background_v1",
+        "ofdma_time_alignment_v1",
+        "ofdma_frequency_response_only_v1",
+        "ofdma_spectral_response_v1",
         "ofdma_spectral_physics_v1",
     }:
         raise ValueError(
             "OFDMA evaluation requires --paired-tta ofdma_time_shift_blur, "
             "ofdma_spectral_structure_v1, ofdma_spectral_background_v1, "
-            "ofdma_spectral_time_background_v1, "
+            "ofdma_spectral_time_background_v1, ofdma_time_alignment_v1, "
+            "ofdma_frequency_response_only_v1, ofdma_spectral_response_v1, "
             "or ofdma_spectral_physics_v1"
         )
 

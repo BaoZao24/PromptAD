@@ -144,6 +144,7 @@ def _augment_array(arr, mode, args):
             shift_px=int(getattr(args, "paired_tta_shift_px", 2)),
             blur_ksize=int(getattr(args, "paired_tta_blur_ksize", 3)),
             background_noise_strength=float(getattr(args, "paired_tta_background_noise_strength", 3.0)),
+            frequency_response_strength=float(getattr(args, "paired_tta_frequency_response_strength", 3.0)),
         )
     raise ValueError(f"Unsupported paired TTA transform: {mode}")
 
@@ -948,6 +949,9 @@ def parse_args():
             "rf_spectral_structure_v1",
             "rf_spectral_background_v1",
             "rf_spectral_time_background_v1",
+            "rf_time_alignment_v1",
+            "rf_frequency_response_only_v1",
+            "rf_spectral_response_v1",
             "rf_spectral_physics_v1",
             "rf_spectral_physics_v2",
             "stft_physical_time_v1",
@@ -956,6 +960,9 @@ def parse_args():
             "ofdma_spectral_structure_v1",
             "ofdma_spectral_background_v1",
             "ofdma_spectral_time_background_v1",
+            "ofdma_time_alignment_v1",
+            "ofdma_frequency_response_only_v1",
+            "ofdma_spectral_response_v1",
             "ofdma_spectral_physics_v1",
         ],
         default="stft_shift_blur",
@@ -967,6 +974,12 @@ def parse_args():
     parser.add_argument("--paired-tta-shift-px", type=int, default=4)
     parser.add_argument("--paired-tta-blur-ksize", type=int, default=3)
     parser.add_argument("--paired-tta-background-noise-strength", type=float, default=3.0)
+    parser.add_argument(
+        "--paired-tta-frequency-response-strength",
+        type=float,
+        default=3.0,
+        help="RMS intensity of the smooth frequency-response calibration view.",
+    )
     parser.add_argument("--gallery-chunk-size", type=int, default=4096)
     parser.add_argument("--freq-window", type=int, default=-1, help="-1 disables frequency-position constraint; 0 uses the same row only.")
     parser.add_argument("--nn-topk", type=int, default=5)
@@ -1157,6 +1170,7 @@ def main():
         "paired_tta_shift_px": args.paired_tta_shift_px,
         "paired_tta_blur_ksize": args.paired_tta_blur_ksize,
         "paired_tta_background_noise_strength": args.paired_tta_background_noise_strength,
+        "paired_tta_frequency_response_strength": args.paired_tta_frequency_response_strength,
         "gallery_patch_count": int(sum(scene_gallery_patch_counts.values())),
         "scene_gallery_patch_counts": scene_gallery_patch_counts,
         "gallery_feature_dim": gallery_feature_dim,

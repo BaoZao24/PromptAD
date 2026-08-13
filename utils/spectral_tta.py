@@ -35,6 +35,21 @@ SPECTRAL_TTA_BUNDLES = {
         "rf_time_shift_down",
         "rf_background_noise_jitter",
     ),
+    "rf_time_alignment_v1": (
+        "identity",
+        "rf_time_shift_up",
+        "rf_time_shift_down",
+    ),
+    "rf_frequency_response_only_v1": (
+        "identity",
+        "rf_frequency_response_jitter",
+    ),
+    "rf_spectral_response_v1": (
+        "identity",
+        "rf_time_shift_up",
+        "rf_time_shift_down",
+        "rf_frequency_response_jitter",
+    ),
     "rf_spectral_physics_v1": (
         "identity",
         "rf_frequency_shift_left",
@@ -94,6 +109,21 @@ SPECTRAL_TTA_BUNDLES = {
         "ofdma_time_shift_left",
         "ofdma_time_shift_right",
         "ofdma_background_noise_jitter",
+    ),
+    "ofdma_time_alignment_v1": (
+        "identity",
+        "ofdma_time_shift_left",
+        "ofdma_time_shift_right",
+    ),
+    "ofdma_frequency_response_only_v1": (
+        "identity",
+        "ofdma_frequency_response_jitter",
+    ),
+    "ofdma_spectral_response_v1": (
+        "identity",
+        "ofdma_time_shift_left",
+        "ofdma_time_shift_right",
+        "ofdma_frequency_response_jitter",
     ),
     "ofdma_spectral_physics_v1": (
         "identity",
@@ -301,6 +331,65 @@ def _background_noise_jitter(
     return result.astype(array.dtype, copy=False)
 
 
+def _frequency_response_jitter(
+    array: np.ndarray,
+    *,
+    frequency_axis: int,
+    strength: float = 3.0,
+    seed: int = 20260814,
+) -> np.ndarray:
+    """Apply a smooth, zero-mean frequency-response perturbation.
+
+    A receiver front end or antenna can slightly raise some frequency bands
+    while attenuating others.  This transform models that calibration change
+    as one low-order curve shared by every time step.  It therefore preserves
+    temporal shape and does not create, shift, or blur a signal event.
+
+    Images in this project are rendered spectrograms rather than raw IQ, so
+    the response is represented as a small additive intensity offset.  The
+    curve has zero mean and a fixed seed, keeping paired support/query views
+    reproducible and avoiding a global brightness change.
+    """
+
+    if frequency_axis not in (0, 1):
+        raise ValueError("frequency_axis must be 0 or 1")
+    length = int(array.shape[frequency_axis])
+    if length < 4:
+        raise ValueError("frequency-response jitter requires at least 4 frequency bins")
+
+    coordinate = np.linspace(-1.0, 1.0, num=length, dtype=np.float32)
+    rng = np.random.default_rng(int(seed))
+    curve = np.zeros(length, dtype=np.float32)
+    # Two to four broad ripples cover mild band-dependent receiver response
+    # without turning the transform into a local texture/noise augmentation.
+    for order in (1, 2, 3):
+        amplitude = float(rng.normal(0.0, 1.0)) / float(order)
+        phase = float(rng.uniform(-np.pi, np.pi))
+        curve += amplitude * np.cos(order * np.pi * coordinate + phase)
+    curve -= float(np.mean(curve))
+    rms = float(np.sqrt(np.mean(np.square(curve))))
+    curve *= float(strength) / max(rms, 1e-6)
+
+    if frequency_axis == 0:
+        delta = curve[:, None]
+    else:
+        delta = curve[None, :]
+
+    result = array.astype(np.float32).copy()
+    if result.ndim == 2:
+        result += delta
+    else:
+        result += delta[..., None]
+
+    if np.issubdtype(array.dtype, np.integer):
+        info = np.iinfo(array.dtype)
+        result = np.clip(result, info.min, info.max)
+    else:
+        upper = 1.0 if float(np.nanmax(array)) <= 1.0 else 255.0
+        result = np.clip(result, 0.0, upper)
+    return result.astype(array.dtype, copy=False)
+
+
 def _frequency_shift_px(shift_px: int) -> int:
     """Use a smaller displacement on the frequency axis than on time."""
 
@@ -314,6 +403,7 @@ def augment_spectrogram(
     shift_px: int = 2,
     blur_ksize: int = 3,
     background_noise_strength: float = 3.0,
+    frequency_response_strength: float = 3.0,
 ) -> np.ndarray:
     """Apply one axis-aware paired TTA transform to a BGR/grayscale image."""
 
@@ -335,6 +425,12 @@ def augment_spectrogram(
         return _background_noise_floor(array, -1.0, strength=background_noise_strength)
     if mode == "rf_background_noise_jitter":
         return _background_noise_jitter(array, strength=background_noise_strength)
+    if mode == "rf_frequency_response_jitter":
+        return _frequency_response_jitter(
+            array,
+            frequency_axis=1,
+            strength=frequency_response_strength,
+        )
     if mode == "rf_bandwidth_narrow":
         return _bandwidth_scale(array, 0.97)
     if mode == "rf_bandwidth_wide":
@@ -369,6 +465,12 @@ def augment_spectrogram(
         return _background_noise_floor(array, -1.0, strength=background_noise_strength)
     if mode == "ofdma_background_noise_jitter":
         return _background_noise_jitter(array, strength=background_noise_strength)
+    if mode == "ofdma_frequency_response_jitter":
+        return _frequency_response_jitter(
+            array,
+            frequency_axis=0,
+            strength=frequency_response_strength,
+        )
     if mode == "ofdma_power_gain":
         return _power_affine(array, 1.06)
     if mode == "ofdma_power_loss":
