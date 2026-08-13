@@ -12,7 +12,7 @@
 - [分数机制说明](method/分数机制说明.md)
 - [置信度融合计算方法](method/置信度计算方法.md)
 - [提示词机制说明](method/提示词机制说明.md)
-- [传统通信基线与频谱 TTA](method/传统通信基线与频谱TTA.md)
+- [当前频谱 TTA](method/传统通信基线与频谱TTA.md)
 - [外部 baseline 源码与文献清单](method/baseline_source_inventory.md)
 
 ## 正式研究记录

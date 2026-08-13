@@ -111,7 +111,7 @@ eigenvalue detector 混写。
 
 ## 传统通信/频谱统计出处
 
-定量实现和输入限制见 [`传统通信基线与频谱TTA.md`](传统通信基线与频谱TTA.md)。
+定量实现、数据协议和输入限制见 [`论文实验部分.md`](../paper/论文实验部分.md)。
 主要出处为：Urkowitz (1967) energy detection、Rohling (1983) CA-CFAR、Antoni
 (2006) spectral kurtosis、Gurugopinath (2017) spectral flatness，以及频谱熵检测
 工作（2023）。当前 PNG-only 评估不把 Gardner (1991) cyclostationary detection 或
