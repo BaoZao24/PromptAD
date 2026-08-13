@@ -5,3 +5,4 @@
 每个入口仍指向原始日期运行目录；实验结论请与正式结果分开表述。
 
 - `20260813_tta_memory_layout_rf_full/`：四视图正常特征“合库”与“分库配对”的受控对照；RF 60 单元总体持平，当前仍采用分库。
+- `20260813_tta_memory_layout_fedjam_full/`：同一记忆组织对照；FedJam 完整 test 上合库的 AUROC 更高，但 4-shot 误报指标变差。

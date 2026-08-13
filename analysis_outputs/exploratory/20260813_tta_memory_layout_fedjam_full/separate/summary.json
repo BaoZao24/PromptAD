@@ -1,0 +1,108 @@
+{
+  "method": "fedjam_fewshot_dual_visual",
+  "data_root": "/mnt/data/wangbei/data/FedJam",
+  "checkpoint": "/mnt/data/wangbei/PromptAD/analysis_outputs/02_current_baselines/promptad_formal_baseline/pooled_rf_rgb_cls/checkpoint/overall-best.pt",
+  "shots": [
+    1,
+    2,
+    4
+  ],
+  "test_counts": {
+    "0": 1800,
+    "1": 1800,
+    "2": 1800,
+    "3": 1800
+  },
+  "train_counts": {
+    "0": 7200,
+    "1": 7200,
+    "2": 7200,
+    "3": 7200
+  },
+  "support_only": true,
+  "test_batch_statistics_used": false,
+  "vit_tta_modes": [
+    "identity",
+    "blur",
+    "time_shift_up",
+    "time_shift_down"
+  ],
+  "vit_tta_memory_layout": "separate",
+  "vit_reference_modes": [
+    "time_shift_up_large",
+    "time_shift_down_large"
+  ],
+  "cnn_reference_modes": [
+    "time_shift_up",
+    "time_shift_down",
+    "blur"
+  ],
+  "vit_feature": "normalized ViT layer1+layer2 concat",
+  "cnn_feature": "ImageNet ResNet18 layer3",
+  "vit_coreset_ratio": 0.5,
+  "vit_nn_topk": 5,
+  "cnn_top_ratio": 0.1,
+  "seed": 111,
+  "batch_size": 8,
+  "include_promptad_text": false,
+  "shot_1": {
+    "vit_patchcore": {
+      "auroc": 83.66612654320987,
+      "auprc": 94.60835240246654,
+      "fpr95": 78.5,
+      "gate_active_rate": null
+    },
+    "cnn_layer3_top0.1": {
+      "auroc": 75.11623456790123,
+      "auprc": 91.00489919462814,
+      "fpr95": 84.55555555555556,
+      "gate_active_rate": null
+    },
+    "confidence_gated_dual_visual": {
+      "auroc": 83.71138374485597,
+      "auprc": 94.62440819017517,
+      "fpr95": 78.5,
+      "gate_active_rate": 0.9245833333333333
+    }
+  },
+  "shot_2": {
+    "vit_patchcore": {
+      "auroc": 84.29364197530865,
+      "auprc": 94.70132156018511,
+      "fpr95": 74.22222222222223,
+      "gate_active_rate": null
+    },
+    "cnn_layer3_top0.1": {
+      "auroc": 79.3988940329218,
+      "auprc": 92.70377162293173,
+      "fpr95": 79.05555555555556,
+      "gate_active_rate": null
+    },
+    "confidence_gated_dual_visual": {
+      "auroc": 84.48411522633745,
+      "auprc": 94.75808096986572,
+      "fpr95": 73.22222222222223,
+      "gate_active_rate": 0.5055555555555555
+    }
+  },
+  "shot_4": {
+    "vit_patchcore": {
+      "auroc": 84.46879115226338,
+      "auprc": 94.64915888296463,
+      "fpr95": 70.33333333333334,
+      "gate_active_rate": null
+    },
+    "cnn_layer3_top0.1": {
+      "auroc": 83.26731481481482,
+      "auprc": 94.09215136598552,
+      "fpr95": 69.27777777777779,
+      "gate_active_rate": null
+    },
+    "confidence_gated_dual_visual": {
+      "auroc": 84.80250514403292,
+      "auprc": 94.74798511036077,
+      "fpr95": 68.83333333333333,
+      "gate_active_rate": 0.5336111111111111
+    }
+  }
+}

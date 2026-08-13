@@ -247,7 +247,7 @@ def build_vit_galleries(
     args,
     device: torch.device,
 ):
-    """Build one coreset gallery per shot and paired-TTA view."""
+    """Build either paired galleries or one merged augmented normal gallery."""
 
     support_features = {}
     with torch.inference_mode():
@@ -257,16 +257,44 @@ def build_vit_galleries(
 
     galleries = {}
     for shot in shots:
+        subset_args = SimpleNamespace(
+            coreset_ratio=args.coreset_ratio,
+            coreset_method="farthest",
+            seed=args.seed + shot,
+        )
+        if args.vit_tta_memory_layout == "merged":
+            per_view_count = support_features[VIT_TTA_MODES[0]][:shot].numel() // support_features[VIT_TTA_MODES[0]].shape[-1]
+            # Match the total number retained by four separately rounded
+            # coresets.  This matters for 1-shot, where 4 * round(225 * .5)
+            # is 448 rather than round(4 * 225 * .5) = 450.
+            merged_keep = sum(
+                max(1, int(round(per_view_count * args.coreset_ratio)))
+                for _mode in VIT_TTA_MODES
+            )
+            features = torch.cat(
+                [
+                    support_features[mode][:shot].reshape(-1, support_features[mode].shape[-1])
+                    for mode in VIT_TTA_MODES
+                ],
+                dim=0,
+            )
+            features = F.normalize(features.float(), dim=-1).contiguous()
+            if args.coreset_ratio < 1.0:
+                subset_args.coreset_ratio = merged_keep / float(features.shape[0])
+                indices, _ = select_gallery_subset(features, subset_args)
+                features = features[indices]
+            galleries[shot] = features
+            print(
+                f"[vit_gallery] shot={shot} layout=merged "
+                f"patches={features.shape[0]} dim={features.shape[1]}"
+            )
+            continue
+
         galleries[shot] = {}
         for mode in VIT_TTA_MODES:
             features = support_features[mode][:shot].reshape(-1, support_features[mode].shape[-1])
             features = F.normalize(features.float(), dim=-1).contiguous()
             if args.coreset_ratio < 1.0:
-                subset_args = SimpleNamespace(
-                    coreset_ratio=args.coreset_ratio,
-                    coreset_method="farthest",
-                    seed=args.seed + shot,
-                )
                 indices, _ = select_gallery_subset(features, subset_args)
                 features = features[indices]
             galleries[shot][mode] = features
@@ -302,6 +330,16 @@ def build_cnn_galleries(
 def vit_query_scores(patch_features: torch.Tensor, galleries: dict, args):
     """Return paired-TTA ViT max-patch scores for one query batch."""
 
+    if args.vit_tta_memory_layout == "merged":
+        probes = patch_features["identity"].reshape(-1, patch_features["identity"].shape[-1])
+        distances = topk_cosine_distance_chunked(
+            probes,
+            galleries,
+            args.distance_chunk_size,
+            args.nn_topk,
+        ).reshape(patch_features["identity"].shape[0], -1)
+        return distances.max(dim=1).values.cpu().numpy().astype(np.float32)
+
     scores = []
     for mode in VIT_TTA_MODES:
         gallery = galleries[mode]
@@ -318,7 +356,12 @@ def vit_query_scores(patch_features: torch.Tensor, galleries: dict, args):
 
 @torch.inference_mode()
 def score_vit_batch(model, raw: torch.Tensor, gallery: dict, args, device: torch.device):
-    features, _text_scores = encode_vit_views(model, raw, args, device)
+    if args.vit_tta_memory_layout == "merged":
+        # A merged gallery is queried once.  ``raw`` may already be a held-out
+        # shifted support view when constructing the fixed gate reference.
+        features = {"identity": vit_features(model, raw, device)}
+    else:
+        features, _text_scores = encode_vit_views(model, raw, args, device)
     scores = vit_query_scores(features, gallery, args)
     return scores
 
@@ -461,6 +504,15 @@ def main():
     parser.add_argument("--cnn-nn-topk", type=int, default=1)
     parser.add_argument("--coreset-ratio", type=float, default=0.5)
     parser.add_argument("--shift-px", type=int, default=4)
+    parser.add_argument(
+        "--vit-tta-memory-layout",
+        choices=["separate", "merged"],
+        default="separate",
+        help=(
+            "separate: query each augmented view against its paired normal gallery; "
+            "merged: combine augmented normal features and query each test view once."
+        ),
+    )
     parser.add_argument("--seed", type=int, default=111)
     parser.add_argument("--gpu-id", type=int, default=0)
     parser.add_argument(
@@ -595,9 +647,17 @@ def main():
             batch_labels = [record.label for record in pending]
             batch_names = [record.name for record in pending]
 
-            vit_features_by_mode, text_scores = encode_vit_views(
-                model, raw, args, device
-            )
+            if args.vit_tta_memory_layout == "merged":
+                visual = model.encode_image(to_model_input(model, raw, device, rgb_from_bgr=True))
+                vit_features_by_mode = {"identity": prepare_patch_features(visual)}
+                text_scores = np.asarray(
+                    model.calculate_textual_anomaly_score(visual, "cls"),
+                    dtype=np.float32,
+                )
+            else:
+                vit_features_by_mode, text_scores = encode_vit_views(
+                    model, raw, args, device
+                )
             cnn_raw = raw.permute(0, 3, 1, 2).to(device, non_blocking=True)
             cnn_layer3 = encoder(cnn_raw)["layer3"]
 
@@ -634,9 +694,17 @@ def main():
             raw = raw_tensor(pending)
             batch_labels = [record.label for record in pending]
             batch_names = [record.name for record in pending]
-            vit_features_by_mode, text_scores = encode_vit_views(
-                model, raw, args, device
-            )
+            if args.vit_tta_memory_layout == "merged":
+                visual = model.encode_image(to_model_input(model, raw, device, rgb_from_bgr=True))
+                vit_features_by_mode = {"identity": prepare_patch_features(visual)}
+                text_scores = np.asarray(
+                    model.calculate_textual_anomaly_score(visual, "cls"),
+                    dtype=np.float32,
+                )
+            else:
+                vit_features_by_mode, text_scores = encode_vit_views(
+                    model, raw, args, device
+                )
             cnn_layer3 = encoder(raw.permute(0, 3, 1, 2).to(device, non_blocking=True))["layer3"]
             for shot in shots:
                 vit_scores = vit_query_scores(vit_features_by_mode, vit_galleries[shot], args)
@@ -682,6 +750,7 @@ def main():
         "support_only": True,
         "test_batch_statistics_used": False,
         "vit_tta_modes": list(VIT_TTA_MODES),
+        "vit_tta_memory_layout": args.vit_tta_memory_layout,
         "vit_reference_modes": list(VIT_REFERENCE_MODES),
         "cnn_reference_modes": list(CNN_REFERENCE_MODES),
         "vit_feature": "normalized ViT layer1+layer2 concat",
