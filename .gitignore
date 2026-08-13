@@ -114,6 +114,9 @@ archive_results/2026_06_01_workspace_cleanup/
 # They remain available in the workspace, but changes under references/ are ignored.
 references/
 
+# Local Codex workspace metadata and auxiliary files.
+opencodex/
+
 # Locally rendered paper exports. The Markdown source is versioned; PDFs can be
 # regenerated with the renderer when needed. Existing architecture PDFs remain
 # tracked because ignore rules do not remove files already in the index.
