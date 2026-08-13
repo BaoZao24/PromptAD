@@ -10,7 +10,7 @@
 
 论文主表统一比较传统频谱统计、已完成的外部异常检测基线和本文方法。ViT-only、
 CNN-only 等内部视觉分支单独放在消融表和消融图中，不作为主表独立方法。外部方法的覆盖
-范围和文献编号见 [论文实验部分](./docs/论文实验部分.md)。
+范围和文献编号见 [论文实验部分](./docs/paper/论文实验部分.md)。
 
 ```text
 CNN-only（本文内部消融）
@@ -44,7 +44,7 @@ ViT Normal Gallery
 与外部 PatchCore 混称。当前方法使用 ViT 与 CNN 的视觉 normal memory 证据。仓库
 保留上游 PromptAD 代码仅用于实现兼容，不将其作为论文对比行。
 
-详细说明见：[docs/现有方案介绍.md](./docs/现有方案介绍.md)。
+详细说明见：[docs/paper/现有方案介绍.md](./docs/paper/现有方案介绍.md)。
 
 ## 当前实验协议
 
@@ -79,7 +79,7 @@ test:
 当前正式 RF support-only 实验在 In-house RF 上得到
 **91.97/81.80/22.00**（AUROC/AUPRC/FPR@95%TPR）。Public RF 采用主线
 `k=1/2/4-per-frequency` 协议，Ours 的三档 AUROC 为 **81.74/82.97/83.74**；完整
-三指标表见 [`docs/论文实验部分.md`](./docs/论文实验部分.md) 表 1 和表 1b。
+三指标表见 [`docs/paper/论文实验部分.md`](./docs/paper/论文实验部分.md) 表 1 和表 1b。
 
 下面的 RF 结果来自当前正式的 ViT+CNN 置信度融合版本；功率残差探索分支不进入主表。
 
@@ -105,7 +105,7 @@ deceptive）和 60 个 signal/scene/strength 单元；每个场景有 24 个候�
 `per_frequency` 建立正常 support。正式强度为：burst/chirp/DSSS 使用 −10/−20/−30 dB，
 pulse 使用 −20/−30/−40 dB，deceptive 使用 strong/medium/weak；`wideband_pulse` 不进入
 当前五类主比较。场景、频谱切片和各类注入参数详见
-[`docs/论文实验部分.md`](./docs/论文实验部分.md) 第 4.1.1 节。
+[`docs/paper/论文实验部分.md`](./docs/paper/论文实验部分.md) 第 4.1.1 节。
 
 数据集参考文献：
 
@@ -143,7 +143,7 @@ FedJam 的 1/2/4-shot 图像模态补充实验，以及带文献出处的 ED、C
 IAD-PER、SAIFE、UDMA、WinCLIP、PatchCore 结果分别见
 [`analysis_outputs/20260810_fedjam_visual_baselines_formal/`](./analysis_outputs/20260810_fedjam_visual_baselines_formal/)
 和 [`analysis_outputs/20260810_fedjam_traditional_fewshot_formal/`](./analysis_outputs/20260810_fedjam_traditional_fewshot_formal/)。
-完整论文表格见 [`docs/论文实验部分.md`](./docs/论文实验部分.md) 的表 9–11。
+完整论文表格见 [`docs/paper/论文实验部分.md`](./docs/paper/论文实验部分.md) 的表 9–11。
 
 ## 安装
 
@@ -215,10 +215,10 @@ python tools/eval_cls_dual_visual_evidence_fusion.py \
 
 ## 重要文档
 
-- [现有方案介绍](./docs/现有方案介绍.md)
+- [现有方案介绍](./docs/paper/现有方案介绍.md)
 - [文档索引](./docs/README.md)
-- [分数机制说明](./docs/分数机制说明.md)
-- [提示词机制说明](./docs/提示词机制说明.md)
+- [分数机制说明](./docs/method/分数机制说明.md)
+- [提示词机制说明](./docs/method/提示词机制说明.md)
 
 ## 说明
 

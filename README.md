@@ -12,7 +12,7 @@ The paper uses one unified main comparison across all four datasets: classical
 spectrogram-domain communication statistics, completed external anomaly-detection baselines,
 and the proposed method. The two visual branches are internal ablations and are
 reported separately; coverage and references are listed in
-[the experiment section](./docs/论文实验部分.md).
+[the experiment section](./docs/paper/论文实验部分.md).
 
 ```text
 CNN-only (internal ablation)
@@ -48,7 +48,7 @@ baseline. The current method uses visual ViT and CNN normal-memory evidence. The
 retains the upstream PromptAD code for implementation compatibility, but it is
 not a paper comparison row.
 
-Detailed method description: [docs/现有方案介绍.md](./docs/现有方案介绍.md).
+Detailed method description: [docs/paper/现有方案介绍.md](./docs/paper/现有方案介绍.md).
 
 ## Experiment Protocol
 
@@ -79,7 +79,7 @@ Important constraints:
 The current formal support-only RF run achieves
 **91.97/81.80/22.00** (AUROC/AUPRC/FPR@95%TPR) on In-house RF. Public RF uses the main
 `k=1/2/4-per-frequency` protocol; Ours obtains **81.74/82.97/83.74** AUROC across the
-three k values. The complete three-metric tables are in [`docs/论文实验部分.md`](./docs/论文实验部分.md),
+three k values. The complete three-metric tables are in [`docs/paper/论文实验部分.md`](./docs/paper/论文实验部分.md),
 Tables 1 and 1b.
 
 The RF results below are from the current formal ViT+CNN confidence-fusion method;
@@ -110,7 +110,7 @@ It uses 24 candidate frequency bands per scene for `per_frequency` support. The 
 sets are −10/−20/−30 dB for burst/chirp/DSSS, −20/−30/−40 dB for pulse, and
 strong/medium/weak for deceptive; `wideband_pulse` is not part of the five-type main comparison.
 Detailed scene and injection parameters are recorded in
-[`docs/论文实验部分.md`](./docs/论文实验部分.md), Section 4.1.1.
+[`docs/paper/论文实验部分.md`](./docs/paper/论文实验部分.md), Section 4.1.1.
 
 Dataset references:
 
@@ -152,7 +152,7 @@ The FedJam 1/2/4-shot image-only supplement and the unified main comparison
 are documented in
 [`analysis_outputs/20260810_fedjam_visual_baselines_formal/`](./analysis_outputs/20260810_fedjam_visual_baselines_formal/)
 and [`analysis_outputs/20260810_fedjam_traditional_fewshot_formal/`](./analysis_outputs/20260810_fedjam_traditional_fewshot_formal/).
-The paper tables are in [`docs/论文实验部分.md`](./docs/论文实验部分.md), Tables 9–11.
+The paper tables are in [`docs/paper/论文实验部分.md`](./docs/paper/论文实验部分.md), Tables 9–11.
 
 ## Installation
 
@@ -225,10 +225,10 @@ fusion-tuning arguments. Existing output keys and compatibility module names con
 
 ## Useful Documentation
 
-- [Current method](./docs/现有方案介绍.md)
+- [Current method](./docs/paper/现有方案介绍.md)
 - [Docs index](./docs/README.md)
-- [Score mechanism](./docs/分数机制说明.md)
-- [Prompt mechanism](./docs/提示词机制说明.md)
+- [Score mechanism](./docs/method/分数机制说明.md)
+- [Prompt mechanism](./docs/method/提示词机制说明.md)
 
 ## Notes
 

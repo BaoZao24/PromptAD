@@ -88,6 +88,15 @@ tmp_*
 autoresearch/
 logs/
 analysis_outputs/*
+!analysis_outputs/README.md
+!analysis_outputs/formal/
+!analysis_outputs/formal/**
+!analysis_outputs/exploratory/
+!analysis_outputs/exploratory/**
+!analysis_outputs/smoke_validation/
+!analysis_outputs/smoke_validation/**
+!analysis_outputs/archive/
+!analysis_outputs/archive/**
 !analysis_outputs/current_scheme_figures/
 !analysis_outputs/current_scheme_figures/*.png
 !analysis_outputs/public_gray_residual_a01/
@@ -121,3 +130,4 @@ opencodex/
 # regenerated with the renderer when needed. Existing architecture PDFs remain
 # tracked because ignore rules do not remove files already in the index.
 docs/论文实验部分.pdf
+docs/paper/论文实验部分.pdf

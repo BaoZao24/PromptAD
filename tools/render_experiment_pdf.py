@@ -27,8 +27,8 @@ from matplotlib.mathtext import math_to_image
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_INPUT = ROOT / "docs/论文实验部分.md"
-DEFAULT_OUTPUT = ROOT / "docs/论文实验部分.pdf"
+DEFAULT_INPUT = ROOT / "docs/paper/论文实验部分.md"
+DEFAULT_OUTPUT = ROOT / "docs/paper/论文实验部分.pdf"
 TIMES_FONT_FILES = (
     Path("/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman.ttf"),
     Path("/usr/share/fonts/truetype/msttcorefonts/Times_New_Roman_Italic.ttf"),

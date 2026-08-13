@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Create the figures used by the paper-style experiment section.
 
-The result tables and protocol in ``docs/现有方案介绍.md`` are the source of
+The result tables and protocol in ``docs/paper/现有方案介绍.md`` are the source of
 truth for this script.  It only consumes completed score/metric files; it does
 not rerun a model or use test labels for inference.  Labels are used here only
 to draw the reported evaluation curves.

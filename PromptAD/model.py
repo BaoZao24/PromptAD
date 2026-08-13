@@ -1,6 +1,6 @@
 """PromptAD 的核心模型文件。
 
-> 通俗导读：见 `docs/model_walkthrough.md`，第一次读这份文件强烈建议先看那份。
+> 通俗导读：见 `docs/archive/model_walkthrough.md`，第一次读这份文件强烈建议先看那份。
 
 文件章节地图（按行号粗略给出，最好结合代码当前实际位置看）：
 
