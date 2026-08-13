@@ -344,8 +344,29 @@ def patch_col_indices(num_images, grid_h, grid_w, device):
     return cols.repeat(int(num_images))
 
 
+def finalize_vit_nn_gallery(gallery, rows, cols, args):
+    """Normalize and coreset a gallery after all intended views are present."""
+    gallery = F.normalize(gallery.float(), dim=-1)
+    if args.coreset_ratio < 1.0:
+        if args.rowwise_coreset:
+            gallery, rows, cols = select_gallery_subset_by_rows(gallery, rows, args, cols)
+        else:
+            idx, _ = select_gallery_subset(gallery, args)
+            gallery = gallery[idx]
+            rows = rows[idx]
+            cols = cols[idx]
+    return gallery.contiguous(), rows.contiguous(), cols.contiguous()
+
+
 @torch.no_grad()
-def build_vit_nn_gallery_with_rows(model, train_loader, args, device, paired_tta_mode=None):
+def build_vit_nn_gallery_with_rows(
+    model,
+    train_loader,
+    args,
+    device,
+    paired_tta_mode=None,
+    apply_coreset=True,
+):
     model.eval_mode()
     patches = []
     row_ids = []
@@ -366,15 +387,8 @@ def build_vit_nn_gallery_with_rows(model, train_loader, args, device, paired_tta
     gallery = torch.cat(patches, dim=0)
     rows = torch.cat(row_ids, dim=0)
     cols = torch.cat(col_ids, dim=0)
-    if args.coreset_ratio < 1.0:
-        gallery = F.normalize(gallery.float(), dim=-1)
-        if args.rowwise_coreset:
-            gallery, rows, cols = select_gallery_subset_by_rows(gallery, rows, args, cols)
-        else:
-            idx, _ = select_gallery_subset(gallery, args)
-            gallery = gallery[idx]
-            rows = rows[idx]
-            cols = cols[idx]
+    if apply_coreset:
+        return finalize_vit_nn_gallery(gallery, rows, cols, args)
     return F.normalize(gallery.float(), dim=-1).contiguous(), rows.contiguous(), cols.contiguous()
 
 
@@ -657,7 +671,7 @@ def build_gallery_state(model, train_loader, args, device):
             args,
             device,
         )
-    else:
+    elif args.paired_tta_memory_layout == "separate":
         paired_tta_galleries = []
         for mode in _paired_tta_modes(args):
             tta_gallery, tta_rows, tta_cols = build_vit_nn_gallery_with_rows(
@@ -671,6 +685,30 @@ def build_gallery_state(model, train_loader, args, device):
                 (mode, tta_gallery, tta_rows, tta_cols)
             )
         gallery, gallery_rows, gallery_cols = paired_tta_galleries[0][1:]
+    else:
+        # The merged layout is the support-augmentation alternative: all four
+        # normal views share one coreset, and each test image is encoded once.
+        gallery_parts = []
+        row_parts = []
+        col_parts = []
+        for mode in _paired_tta_modes(args):
+            tta_gallery, tta_rows, tta_cols = build_vit_nn_gallery_with_rows(
+                model,
+                train_loader,
+                args,
+                device,
+                paired_tta_mode=mode,
+                apply_coreset=False,
+            )
+            gallery_parts.append(tta_gallery)
+            row_parts.append(tta_rows)
+            col_parts.append(tta_cols)
+        gallery, gallery_rows, gallery_cols = finalize_vit_nn_gallery(
+            torch.cat(gallery_parts, dim=0),
+            torch.cat(row_parts, dim=0),
+            torch.cat(col_parts, dim=0),
+            args,
+        )
     row_stats = (
         build_frequency_row_stats(
             gallery,
@@ -694,6 +732,14 @@ def build_gallery_state(model, train_loader, args, device):
         "row_prototypes": row_prototypes,
         "paired_tta_galleries": paired_tta_galleries,
     }
+
+
+def gallery_patch_count(state):
+    """Count stored features across all paired memories, not just identity."""
+    paired = state.get("paired_tta_galleries")
+    if paired:
+        return int(sum(view_gallery.shape[0] for _mode, view_gallery, _rows, _cols in paired))
+    return int(state["gallery"].shape[0])
 
 
 @torch.no_grad()
@@ -968,6 +1014,15 @@ def parse_args():
         default="stft_shift_blur",
     )
     parser.add_argument("--paired-tta-fusion", choices=["mean", "max"], default="max")
+    parser.add_argument(
+        "--paired-tta-memory-layout",
+        choices=["separate", "merged"],
+        default="separate",
+        help=(
+            "separate: match each augmented query with its own normal memory; "
+            "merged: combine all augmented normal features into one memory and query the original once."
+        ),
+    )
     parser.add_argument("--paired-tta-contrast", type=float, default=1.04)
     parser.add_argument("--paired-tta-brightness", type=float, default=1.0)
     parser.add_argument("--paired-tta-crop-ratio", type=float, default=0.02)
@@ -1032,7 +1087,7 @@ def main():
     if not (0.0 < args.coreset_ratio <= 1.0):
         raise ValueError("--coreset-ratio must be in (0, 1]")
     if args.paired_tta != "none" and args.support_augment != "none":
-        raise ValueError("--paired-tta builds separate support memories; use it with --support-augment none.")
+        raise ValueError("--paired-tta already augments normal support; use it with --support-augment none.")
     setup_seed(args.seed)
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
     device = "cpu" if args.use_cpu else "cuda:0"
@@ -1099,7 +1154,7 @@ def main():
                 )
             )
         train_samples.extend(scene_train_samples)
-        scene_gallery_patch_counts[scene] = int(state["gallery"].shape[0])
+        scene_gallery_patch_counts[scene] = gallery_patch_count(state)
         gallery_feature_dim = int(state["gallery"].shape[1])
     if args.support_reference_only:
         out_root = Path(args.output_root)
@@ -1163,6 +1218,7 @@ def main():
         "support_crop_ratio": args.support_crop_ratio,
         "paired_tta": args.paired_tta,
         "paired_tta_fusion": args.paired_tta_fusion,
+        "paired_tta_memory_layout": args.paired_tta_memory_layout,
         "paired_tta_modes": _paired_tta_modes(args),
         "paired_tta_contrast": args.paired_tta_contrast,
         "paired_tta_brightness": args.paired_tta_brightness,
@@ -1200,6 +1256,7 @@ def main():
         f"- coreset ratio: `{args.coreset_ratio}`",
         f"- support augment: `{args.support_augment}`",
         f"- paired TTA: `{args.paired_tta}`",
+        f"- TTA memory layout: `{args.paired_tta_memory_layout}`",
         f"- gallery patches across memories: `{int(sum(scene_gallery_patch_counts.values()))}`",
         "",
         "## Macro AUROC",
