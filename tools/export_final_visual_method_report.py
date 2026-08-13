@@ -12,30 +12,7 @@ import numpy as np
 from sklearn.metrics import average_precision_score, roc_auc_score, roc_curve
 
 
-METHOD = "vit_confidence_gated_cnn"
-
-
-def minmax(values):
-    values = np.asarray(values, dtype=np.float64)
-    low, high = float(values.min()), float(values.max())
-    if high - low < 1e-12:
-        return np.zeros_like(values)
-    return (values - low) / (high - low)
-
-
-def rank_percentile(values):
-    order = np.argsort(values)
-    ranks = np.empty(len(values), dtype=np.float64)
-    ranks[order] = np.arange(len(values), dtype=np.float64)
-    return ranks / max(len(values) - 1, 1)
-
-
-def gated_score(vit, cnn):
-    vit_n, cnn_n = minmax(vit), minmax(cnn)
-    rank_gate = np.clip((rank_percentile(cnn) - 0.5) / 0.5, 0.0, 1.0)
-    advantage = np.clip(cnn_n - vit_n, 0.0, 1.0)
-    confidence = rank_gate * advantage
-    return 1.0 - (1.0 - vit_n) * (1.0 - confidence * cnn_n)
+METHOD = "confidence_gated_dual_visual"
 
 
 def metric_row(labels, scores):
@@ -59,7 +36,7 @@ def parse_cell(path: Path, dataset: str):
 def load_dataset(score_dir: Path, dataset: str):
     cells = []
     self_prefixes = ("burst_signal-", "chirp_signal-", "dsss_signal-", "pulse_signal-", "wideband_pulse-")
-    public_prefixes = ("burst-", "chirp-", "dsss-", "pulse-")
+    public_prefixes = ("burst-", "chirp-", "dsss-", "pulse-", "wideband_pulse-")
     for path in sorted(score_dir.glob("*-scores.npz")):
         is_self_cell = path.stem.startswith(self_prefixes)
         is_public_cell = path.stem.startswith(public_prefixes)
@@ -69,18 +46,15 @@ def load_dataset(score_dir: Path, dataset: str):
             continue
         data = np.load(path, allow_pickle=True)
         labels = data["labels"].astype(np.int32)
-        vit_key = "vit_score" if "vit_score" in data.files else "vit_scores"
-        cnn_key = "cnn_local_score" if "cnn_local_score" in data.files else "cnn_scores"
-        vit = data[vit_key].astype(np.float64)
-        cnn = data[cnn_key].astype(np.float64)
-        if "final_scores" in data.files:
-            final = data["final_scores"].astype(np.float64)
-        elif "conservative_confidence_or" in data.files:
-            final = data["conservative_confidence_or"].astype(np.float64)
-        elif "confidence_or" in data.files:
-            final = data["confidence_or"].astype(np.float64)
-        else:
-            final = gated_score(vit, cnn)
+        required = ("vit_score", "cnn_score", "confidence_gated_score")
+        missing = [key for key in required if key not in data.files]
+        if missing:
+            raise RuntimeError(
+                f"{path} is not a confidence-gate output; missing={missing}"
+            )
+        vit = data["vit_score"].astype(np.float64)
+        cnn = data["cnn_score"].astype(np.float64)
+        final = data["confidence_gated_score"].astype(np.float64)
         signal, scene, jsr = parse_cell(path, dataset)
         cells.append({
             "dataset": dataset,

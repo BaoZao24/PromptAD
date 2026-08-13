@@ -8,22 +8,28 @@
 
 ## 当前方案
 
-当前主 baseline 使用 PatchCore-style CNN 局部正常特征库：
+论文主表统一比较传统频谱统计、已完成的外部异常检测基线和本文方法。ViT-only、
+CNN-only 等内部视觉分支单独放在消融表和消融图中，不作为主表独立方法。外部方法的覆盖
+范围和文献编号见 [论文实验部分](./docs/论文实验部分.md)。
 
 ```text
-PatchCore-style baseline
-= CNN local normal gallery
+CNN-only（本文内部消融）
+= ResNet18 layer3 local normal gallery
 + nearest-neighbour anomaly score
+
+传统频谱统计
+= ED / 谱熵 / 谱平坦度
++ 谱峭度 / CA-CFAR
 ```
 
-当前改进方案是：
+当前方法是：
 
 ```text
-Confidence-Gated Dual Visual Normality Fusion
+Confidence Fusion（ViT+CNN）
 
 ViT Normal Gallery
 + CNN Local Gallery
-+ 无标签 CNN 置信度门控 OR 融合
++ 置信度融合
 ```
 
 各分支作用：
@@ -32,9 +38,11 @@ ViT Normal Gallery
 |---|---|
 | ViT Normal Gallery | 用少量正常频谱图的 ViT patch 特征，计算结构级异常偏离。 |
 | CNN Local Gallery | 用少量正常频谱图的 CNN 局部特征，计算局部纹理和能量细节偏离。 |
-| Confidence-gated OR fusion | 根据 CNN 分数的相对排名计算无标签置信度，仅在 CNN 证据强于 ViT 时增强最终分数。 |
+| 置信度融合 | 只用正常 support 参考分布中的 CNN 排名与 CNN-over-ViT 优势形成非负修正，不读取其他测试图像，不暴露融合调参接口。 |
 
-PromptAD `text + ViT patch anomaly map` 只保留为参考 baseline；当前方法使用 ViT 与 CNN 的视觉 normal memory 证据。
+外部 PatchCore [12](https://openaccess.thecvf.com/content/CVPR2022/papers/Roth_Towards_Total_Recall_in_Industrial_Anomaly_Detection_CVPR_2022_paper.pdf) 和传统频谱统计是正式对比方法；CNN-only 是本文内部消融，不能
+与外部 PatchCore 混称。当前方法使用 ViT 与 CNN 的视觉 normal memory 证据。仓库
+保留上游 PromptAD 代码仅用于实现兼容，不将其作为论文对比行。
 
 详细说明见：[docs/现有方案介绍.md](./docs/现有方案介绍.md)。
 
@@ -45,7 +53,8 @@ PromptAD `text + ViT patch anomaly map` 只保留为参考 baseline；当前方�
 ```text
 support / gallery:
   只使用 target normal 样本
-  每个频段选 1 张正常图
+  按数据集协议从 target normal 样本建立 support；RF 每频段选 1 张，OFDMA/FedJam
+  使用 1/2/4-shot
   不使用 target abnormal 样本
 
 test:
@@ -57,15 +66,84 @@ test:
 关键约束：
 
 - 不使用 target abnormal 训练或建库。
-- PatchCore-style CNN local normal memory 是当前主 baseline。
-- PromptAD `text + ViT patch anomaly map` 只作为参考对照。
-- 结果需要报告各异常、各 JSR、各异常均值和总 macro average。
+- 外部异常检测基线和有出处的传统频谱统计是对比基线；其中 SAIFE 是通信频谱深度生成式
+  方法，不归入通用视觉方法；ViT/CNN 单分支只作内部消融。
+- ViT normal-memory 单分支只作内部消融，不属于 baseline。
+- 四个数据集统一使用 ED、CA-CFAR、SCSE、KLD-Ref、IAD-PER、SAIFE、UDMA、PatchCore、
+  WinCLIP 和 Ours；其中 IAD-PER 是主表中唯一的 VAE 基线。ViT-only、CNN-only 只作为内部
+  消融；谱熵、谱平坦度、谱峭度、ICA-Frozen、VAE-MSE、Deep SVDD、PaDiM、STFPM 的结果
+  保留在补充记录中。
 
 ## 当前结果状态
 
-少样本协议正在重新整理。
+当前正式 RF support-only 实验在 In-house RF 上得到
+**91.97/81.80/22.00**（AUROC/AUPRC/FPR@95%TPR）。Public RF 采用主线
+`k=1/2/4-per-frequency` 协议，Ours 的三档 AUROC 为 **81.74/82.97/83.74**；完整
+三指标表见 [`docs/论文实验部分.md`](./docs/论文实验部分.md) 表 1 和表 1b。
 
-正式结果需要按少样本协议重跑后再填写。
+下面的 RF 结果来自当前正式的 ViT+CNN 置信度融合版本；功率残差探索分支不进入主表。
+
+| 数据集 | Ours：Confidence Fusion AUROC |
+|---|---:|
+| In-house RF（本项目自测数据 + 合成干扰） | **91.97** |
+| Public RF [14](https://doi.org/10.1007/s11036-009-0199-9) | **81.74 / 82.97 / 83.74**（k=1/2/4） |
+
+ViT-only、CNN-only、Direct OR 等内部支线不作为独立主方法，统一放在论文实验部分的
+内部消融表和图中。
+
+数据集出处直接列在这里：In-house RF 的正常背景来自本项目自测/自采集的 RF 记录，并在其上
+注入合成干扰生成异常样本，因此属于本项目自测的派生数据集，不是外部公开数据集。Public RF
+的正常底座来自
+[14](https://doi.org/10.1007/s11036-009-0199-9)及其公开测量数据入口，异常样本由本项目
+注入干扰派生；OFDMA 基于 [15](https://arxiv.org/abs/2606.02102) 的公开模拟论文、源码和
+数据改编生成；FedJam 直接使用未修改的公开数据集，出处为
+[13](https://arxiv.org/abs/2508.09369)。
+
+In-house RF 正式协议包含 4 个场景（`WeaponMuseum_spectrum`、`Playground_spectrum`、
+`TimeSquare_spectrum`、`Gymnasium_spectrum`）、5 类合成注入（burst、chirp、DSSS、pulse、
+deceptive）和 60 个 signal/scene/strength 单元；每个场景有 24 个候选频段，使用
+`per_frequency` 建立正常 support。正式强度为：burst/chirp/DSSS 使用 −10/−20/−30 dB，
+pulse 使用 −20/−30/−40 dB，deceptive 使用 strong/medium/weak；`wideband_pulse` 不进入
+当前五类主比较。场景、频谱切片和各类注入参数详见
+[`docs/论文实验部分.md`](./docs/论文实验部分.md) 第 4.1.1 节。
+
+数据集参考文献：
+
+13. I. Panitsas, I. Ofeidis, and L. Tassiulas, “FedJam: Multimodal Federated Learning Framework for Jamming Detection,” [原论文](https://arxiv.org/abs/2508.09369)、[数据集](https://huggingface.co/datasets/panitsasi/FedJam)、[代码](https://github.com/panitsasi/fedJam)。
+14. M. Wellens and P. Mähönen, “Lessons Learned from an Extensive Spectrum Occupancy Measurement Campaign and a Stochastic Duty Cycle Model,” [DOI](https://doi.org/10.1007/s11036-009-0199-9)、[公开测量数据入口](http://download.mobnets.rwth-aachen.de)。
+15. A. Schösser, M. Salehi, S. Ma, P. Schulz, and G. Fettweis, “Spectrum Anomaly Detection in OFDMA Systems: Simulation Framework and Benchmark Dataset,” [论文](https://arxiv.org/abs/2606.02102)、[源码](https://github.com/akdd11/ofdma-spectrum-anomalies-simulation)、[Zenodo 数据](https://doi.org/10.5281/zenodo.20341906)。
+
+包括 VAE、SAIFE、Deep SVDD、PaDiM、STFPM、WinCLIP 和官方 PatchCore 在内的 In-house RF
+新版 support 全部重跑记录见
+[`analysis_outputs/20260725_target_scene_self_rf_baselines_seed111/README.md`](./analysis_outputs/20260725_target_scene_self_rf_baselines_seed111/README.md)。
+
+已核对的结果文件见
+[`analysis_outputs/20260713_final_visual_metrics/README.md`](./analysis_outputs/20260713_final_visual_metrics/README.md)。
+
+Public RF 五类合并宏平均和 wideband 逐单元结果见
+[`analysis_outputs/20260730_public_rf_wideband_formal_seed111/summary/`](./analysis_outputs/20260730_public_rf_wideband_formal_seed111/summary/)。
+
+OFDMA target-scene 冷启动的正式方案分别计算 21 个 SU 的分数，取最大值后再使用
+ViT+CNN support-only 置信度融合。30 个独立 test 场景的 Ours 结果如下：
+
+| Shot | AUROC | AUPRC | FPR@95%TPR |
+|---:|---:|---:|---:|
+| 1 | 85.30 | 88.80 | 69.77 |
+| 2 | 89.53 | 92.01 | 57.63 |
+| 4 | 92.75 | 94.55 | 45.90 |
+
+完整协议、逐方法结果和统一表见
+[`analysis_outputs/20260731_ofdma_v2_realistic_unified/README.md`](./analysis_outputs/20260731_ofdma_v2_realistic_unified/README.md)。
+同一 target-scene 协议下补做的官方 PatchCore 结果见
+[`analysis_outputs/20260810_ofdma_patchcore_formal/README.md`](./analysis_outputs/20260810_ofdma_patchcore_formal/README.md)：
+1/2/4-shot 的 AUROC/AUPRC/FPR@95%TPR 分别为
+70.14/76.78/86.03、75.83/81.29/81.37、81.81/86.14/72.50。
+
+FedJam 的 1/2/4-shot 图像模态补充实验，以及带文献出处的 ED、CA-CFAR、SCSE、KLD-Ref、
+IAD-PER、SAIFE、UDMA、WinCLIP、PatchCore 结果分别见
+[`analysis_outputs/20260810_fedjam_visual_baselines_formal/`](./analysis_outputs/20260810_fedjam_visual_baselines_formal/)
+和 [`analysis_outputs/20260810_fedjam_traditional_fewshot_formal/`](./analysis_outputs/20260810_fedjam_traditional_fewshot_formal/)。
+完整论文表格见 [`docs/论文实验部分.md`](./docs/论文实验部分.md) 的表 9–11。
 
 ## 安装
 
@@ -110,22 +188,30 @@ PatchCore-style CNN 局部正常特征库 baseline：
 ```bash
 python tools/eval_patchcore_cls.py \
   --protocol rf_target \
-  --rf-train-mode pooled \
   --normal-sampling per_frequency \
   --output-root analysis_outputs/patchcore_fewshot_baseline
 ```
 
-基于已有 ViT/CNN 分数做校准双视觉融合：
+基于当前 ViT/CNN 分数运行置信度融合：
 
 ```bash
+python tools/eval_cls_aux_cnn_gallery.py \
+  --protocol public_rf \
+  --normal-sampling per_frequency \
+  --output-root analysis_outputs/current_public_aux_cnn
+
 python tools/eval_cls_dual_visual_evidence_fusion.py \
   --protocol public_rf \
-  --vit-score-dir analysis_outputs/20260706_pairtta_stft_shift_blur_public/scores \
-  --cnn-score-dir analysis_outputs/20260704_public_rf_official_patchcore_cls/scores \
-  --output-root analysis_outputs/public_rf_calibrated_dual_visual
+  --vit-score-dir analysis_outputs/current_public_vit/scores \
+  --cnn-score-dir analysis_outputs/current_public_aux_cnn/scores \
+  --vit-reference-dir analysis_outputs/current_public_vit_reference \
+  --cnn-reference-dir analysis_outputs/current_public_cnn_reference \
+  --output-root analysis_outputs/current_public_confidence_fusion
 ```
 
-正式实验时需要按具体 run 修改输出目录。
+辅助 CNN 在所有数据集固定使用 ResNet18 layer3；融合入口默认使用 support-only
+置信度校准，不读取测试批次统计量，也不提供 CNN 类型或融合调参参数。代码中的旧
+`gate` 字段和兼容路径只属于实现标识，不是论文方法名称。
 
 ## 重要文档
 
@@ -137,3 +223,5 @@ python tools/eval_cls_dual_visual_evidence_fusion.py \
 ## 说明
 
 仓库仍保留上游 MVTec / VisA 接口以兼容原 PromptAD，但当前 RF 主线以本文描述的少样本 target-normal 协议为准。
+
+[12]: https://openaccess.thecvf.com/content/CVPR2022/papers/Roth_Towards_Total_Recall_in_Industrial_Anomaly_Detection_CVPR_2022_paper.pdf

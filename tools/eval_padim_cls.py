@@ -24,12 +24,18 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools.eval_patchcore_cls import (  # noqa: E402
     JSR_BY_SIGNAL,
+    PUBLIC_RF_JSRS,
     SCENES,
     SPECTRUM_CATEGORIES,
     SPECTRUM_ROOT,
     public_rf_jobs,
     rf_target_jobs,
     spectrum_jobs,
+)
+from tools.ofdma_fewshot_baseline_common import (  # noqa: E402
+    add_ofdma_args,
+    load_sample_image,
+    ofdma_jobs,
 )
 from utils.rf_frequency_sampling import NORMAL_SAMPLING_CHOICES  # noqa: E402
 from utils.training_utils import setup_seed  # noqa: E402
@@ -52,7 +58,7 @@ class ImagePathDataset(Dataset):
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
-        image = Image.open(sample["path"]).convert("RGB")
+        image = load_sample_image(sample)
         return self.transform(image), int(sample["label"]), str(sample["path"]), str(sample["name"])
 
 
@@ -147,20 +153,52 @@ def score_embeddings(embeddings, stats):
 
 
 def predict_job(model, stats, job, args, device):
-    embeddings, labels, paths, names = extract_embeddings(model, job["test_samples"], args, device)
-    scores, maps = score_embeddings(embeddings, stats)
+    maps = None
+    if args.protocol == "ofdma":
+        loader = make_loader(job["test_samples"], args, shuffle=False)
+        score_parts = []
+        labels, paths, names = [], [], []
+        feature_ids = None
+        model.eval()
+        with torch.no_grad():
+            for images, batch_labels, batch_paths, batch_names in loader:
+                feats = model(images.to(device)).cpu()
+                if feature_ids is None:
+                    feature_ids = make_feature_ids(
+                        feats.shape[1],
+                        args.embedding_dim,
+                        args.seed,
+                    )
+                batch_scores, _ = score_embeddings(feats[:, feature_ids].numpy(), stats)
+                score_parts.append(batch_scores)
+                labels.extend(int(value) for value in batch_labels.numpy().tolist())
+                paths.extend(str(value) for value in batch_paths)
+                names.extend(str(value) for value in batch_names)
+        if not score_parts:
+            raise RuntimeError("No OFDMA samples for PaDiM prediction")
+        scores = np.concatenate(score_parts).astype(np.float32)
+        labels = np.asarray(labels, dtype=np.int32)
+    else:
+        embeddings, labels, paths, names = extract_embeddings(
+            model,
+            job["test_samples"],
+            args,
+            device,
+        )
+        scores, maps = score_embeddings(embeddings, stats)
 
     score_dir = Path(args.output_root) / "scores"
     score_dir.mkdir(parents=True, exist_ok=True)
     stem = f"{job['dataset']}-{job['category']}-{job['scene']}-{job['jsr']}".replace("/", "_")
-    np.savez_compressed(
-        score_dir / f"{stem}-scores.npz",
-        scores=scores,
-        labels=labels,
-        anomaly_maps=maps,
-        image_paths=np.asarray(paths),
-        names=np.asarray(names),
-    )
+    payload = {
+        "scores": scores,
+        "labels": labels,
+        "image_paths": np.asarray(paths),
+        "names": np.asarray(names),
+    }
+    if maps is not None:
+        payload["anomaly_maps"] = maps
+    np.savez_compressed(score_dir / f"{stem}-scores.npz", **payload)
     return {
         "method": "padim_diag_resnet18",
         "dataset": job["dataset"],
@@ -232,14 +270,24 @@ def append_average(rows):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--protocol", choices=["spectrum", "public_rf", "rf_target"], required=True)
+    parser.add_argument(
+        "--protocol",
+        choices=["spectrum", "public_rf", "rf_target", "ofdma"],
+        required=True,
+    )
     parser.add_argument("--output-root", default="analysis_outputs/padim_cls")
     parser.add_argument("--gpu-id", type=int, default=0)
     parser.add_argument("--use-cpu", action="store_true")
     parser.add_argument("--seed", type=int, default=111)
     parser.add_argument("--normal-sampling", choices=NORMAL_SAMPLING_CHOICES, default="per_frequency")
+    parser.add_argument(
+        "--support-manifest",
+        default="",
+        help="Shared target-scene support manifest for the rf_target protocol.",
+    )
     parser.add_argument("--rf-train-mode", choices=["pooled", "per_cell"], default="pooled")
     parser.add_argument("--rf-signals", nargs="+", default=list(JSR_BY_SIGNAL.keys()), choices=list(JSR_BY_SIGNAL.keys()))
+    parser.add_argument("--public-rf-signals", nargs="+", default=list(PUBLIC_RF_JSRS), choices=list(PUBLIC_RF_JSRS))
     parser.add_argument("--rf-scenes", nargs="+", default=SCENES, choices=SCENES)
     parser.add_argument("--spectrum-root", default=str(SPECTRUM_ROOT))
     parser.add_argument("--spectrum-categories", nargs="+", default=list(SPECTRUM_CATEGORIES), choices=list(SPECTRUM_CATEGORIES))
@@ -254,6 +302,7 @@ def parse_args():
     parser.add_argument("--weights", choices=["default", "none"], default="default")
     parser.add_argument("--embedding-dim", type=int, default=128)
     parser.add_argument("--var-eps", type=float, default=0.01)
+    add_ofdma_args(parser)
     return parser.parse_args()
 
 
@@ -267,6 +316,8 @@ def main():
         jobs = spectrum_jobs(args)
     elif args.protocol == "public_rf":
         jobs = public_rf_jobs(args)
+    elif args.protocol == "ofdma":
+        jobs = ofdma_jobs(args)
     else:
         jobs = rf_target_jobs(args)
 
@@ -278,6 +329,12 @@ def main():
     summary = {
         "method": "padim_diag_resnet18",
         "protocol": args.protocol,
+        "support_protocol": "target_scene" if args.protocol == "rf_target" else None,
+        "support_manifest": getattr(args, "support_manifest", "") or None,
+        "support_manifest_sha256": getattr(args, "support_manifest_sha256", None),
+        "test_normal_paths_sha256": getattr(args, "test_normal_paths_sha256", None),
+        "support_policy": getattr(args, "support_policy", None),
+        "per_frequency_k": getattr(args, "per_frequency_k", None),
         "normal_sampling": args.normal_sampling,
         "rf_train_mode": getattr(args, "rf_train_mode", None),
         "weights": args.weights,

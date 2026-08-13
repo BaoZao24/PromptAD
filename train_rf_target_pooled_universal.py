@@ -1,9 +1,9 @@
 #!/usr/bin/env python
-"""Train one pooled RF PromptAD checkpoint and evaluate all target cells.
+"""Legacy pooled RF PromptAD training entrypoint.
 
-This is the entrypoint for universal target-domain experiments:
-all target normal samples from burst/chirp/dsss/pulse/wideband_pulse are pooled for training,
-then one checkpoint is selected by macro average over all eval cells.
+The current formal gated-fusion protocol uses one support manifest per scene.
+This script remains for reproducing older pooled PromptAD checkpoints and for
+shared image/model helpers imported by evaluation tools.
 """
 
 from __future__ import annotations
@@ -25,12 +25,12 @@ from scipy.ndimage import gaussian_filter
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from datasets import dataset_classes
-from datasets.burst_signal import load_burst_signal, burst_signal_classes
-from datasets.chirp_signal import load_chirp_signal, chirp_signal_classes
-from datasets.dsss_signal import load_dsss_signal, dsss_classes
-from datasets.pulse_signal import load_pulse_signal, pulse_signal_classes
-from datasets.wideband_pulse import load_wideband_pulse, wideband_pulse_classes
+from datasets.rf_target import (
+    RF_JSR_BY_SIGNAL,
+    RF_SCENES,
+    RF_TARGET_SIGNALS,
+    collect_rf_target_samples,
+)
 from PromptAD import PromptAD, TripletLoss
 from PromptAD.ad_prompts import (
     get_grouped_rf_abnormal_prompt_specs,
@@ -43,34 +43,11 @@ from utils.metrics import metric_cal_img, metric_cal_pix
 from utils.training_utils import setup_seed
 
 
-SIGNALS = ["burst_signal", "chirp_signal", "dsss_signal", "pulse_signal", "wideband_pulse"]
-SCENES = [
-    "WeaponMuseum_spectrum",
-    "Playground_spectrum",
-    "TimeSquare_spectrum",
-    "Gymnasium_spectrum",
-]
+SIGNALS = list(RF_TARGET_SIGNALS)
+SCENES = list(RF_SCENES)
 JSR_BY_SIGNAL = {
-    "burst_signal": ["m10db", "m20db", "m30db"],
-    "chirp_signal": ["m10db", "m20db", "m30db"],
-    "dsss_signal": ["m10db", "m20db", "m30db"],
-    "pulse_signal": ["m20db", "m30db", "m40db"],
-    "wideband_pulse": ["m20db", "m30db", "m40db"],
-}
-LOADERS = {
-    "burst_signal": (load_burst_signal, burst_signal_classes),
-    "chirp_signal": (load_chirp_signal, chirp_signal_classes),
-    "dsss_signal": (load_dsss_signal, dsss_classes),
-    "pulse_signal": (load_pulse_signal, pulse_signal_classes),
-    "wideband_pulse": (load_wideband_pulse, wideband_pulse_classes),
-}
-DATASET_ROOT = Path("/mnt/data/wangbei/data/datasets")
-SIGNAL_DIRS = {
-    "burst_signal": "burst",
-    "chirp_signal": "chirp",
-    "dsss_signal": "dsss",
-    "pulse_signal": "pulse",
-    "wideband_pulse": "wideband_pulse",
+    signal: list(jsrs)
+    for signal, jsrs in RF_JSR_BY_SIGNAL.items()
 }
 METHOD_PRESETS = {
     "pooled_rf_rgb": {},
@@ -133,55 +110,16 @@ class RFPathDataset(Dataset):
 
 
 def collect_samples(signal, scene, jsr, phase, k_shot=1, exclude_paths=None):
-    signal_dir = SIGNAL_DIRS[signal]
-    cell_root = DATASET_ROOT / signal_dir / scene
-    normal_root = cell_root / "normal" / jsr
-    abnormal_root = cell_root / "abnormal" / jsr
-    gt_root = cell_root / "groundtruth" / jsr
-    exclude_paths = set(exclude_paths or [])
-    data = ([], [], [], [])
+    """Backward-compatible name for the canonical self-RF data accessor."""
 
-    if phase == "train":
-        img_paths = sorted(str(p) for p in normal_root.glob("*.png")) if normal_root.is_dir() else []
-        if k_shot > 0 and len(img_paths) > k_shot:
-            img_paths = img_paths[:k_shot]
-        data = (
-            img_paths,
-            [0] * len(img_paths),
-            [0] * len(img_paths),
-            [f"{scene}_normal"] * len(img_paths),
-        )
-    elif phase == "test":
-        img_paths, gt_paths, labels, sample_types = [], [], [], []
-        if normal_root.is_dir():
-            for img_path in sorted(normal_root.glob("*.png")):
-                img_path_str = str(img_path)
-                if img_path_str in exclude_paths:
-                    continue
-                img_paths.append(img_path_str)
-                gt_paths.append(0)
-                labels.append(0)
-                sample_types.append(f"{scene}_normal")
-        if abnormal_root.is_dir():
-            for img_path in sorted(abnormal_root.glob("*.png")):
-                img_path_str = str(img_path)
-                img_paths.append(img_path_str)
-                img_name = img_path.name.replace("_abnormal.png", "_groundtruth.png")
-                gt_path = gt_root / img_name
-                gt_paths.append(str(gt_path) if gt_path.exists() else 0)
-                labels.append(1)
-                sample_types.append(f"{scene}_abnormal")
-        data = (img_paths, gt_paths, labels, sample_types)
-    else:
-        raise ValueError(f"Unsupported phase {phase!r}")
-
-    samples = []
-    for img, gt, label, sample_type in zip(*data):
-        if phase == "train" and int(label) != 0:
-            continue
-        prefix = f"{signal}-{scene}-{jsr}"
-        samples.append((img, gt, label, sample_type, prefix))
-    return samples
+    return collect_rf_target_samples(
+        signal,
+        scene,
+        jsr,
+        phase,
+        k_shot=k_shot,
+        exclude_paths=exclude_paths,
+    )
 
 
 def build_train_loader(args):
@@ -243,6 +181,26 @@ def build_eval_loaders(args):
 
 
 def to_model_input(model, raw_batch, device, rgb_from_bgr=True):
+    # Target-scene OFDMA samples are already 240x240 uint8 tensors after the
+    # official letterbox preprocessing.  Avoid a per-image PIL/torchvision
+    # round trip for this fixed geometry; this is numerically equivalent to
+    # ToTensor + CLIP normalization and keeps the formal protocol unchanged.
+    if (
+        isinstance(raw_batch, torch.Tensor)
+        and raw_batch.ndim == 4
+        and raw_batch.shape[-1] == 3
+        and getattr(model, "dataset_name", None) == "ofdma_spectrum"
+        and int(raw_batch.shape[1]) == int(getattr(model, "out_size_h", -1))
+        and int(raw_batch.shape[2]) == int(getattr(model, "out_size_w", -1))
+    ):
+        batch = raw_batch.to(device=device, dtype=torch.float32, non_blocking=True)
+        if rgb_from_bgr:
+            batch = batch[..., [2, 1, 0]]
+        batch = batch.permute(0, 3, 1, 2).div_(255.0)
+        mean = batch.new_tensor([0.48145466, 0.4578275, 0.40821073]).view(1, 3, 1, 1)
+        std = batch.new_tensor([0.26862954, 0.26130258, 0.27577711]).view(1, 3, 1, 1)
+        return (batch - mean) / std
+
     imgs = []
     for arr in raw_batch:
         arr = arr.numpy()

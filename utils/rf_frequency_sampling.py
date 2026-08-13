@@ -29,7 +29,11 @@ def frequency_band_key(path) -> tuple[float, float] | None:
     return float(match.group(1)), float(match.group(2))
 
 
-def select_one_per_frequency_band(items: Sequence[T], path_getter=lambda item: item) -> list[T]:
+def select_one_per_frequency_band(
+    items: Sequence[T],
+    path_getter=lambda item: item,
+    seed: int | None = None,
+) -> list[T]:
     """Keep one item per parsed RF frequency band.
 
     If no item has a parseable frequency band, return the original items. This
@@ -50,11 +54,87 @@ def select_one_per_frequency_band(items: Sequence[T], path_getter=lambda item: i
 
     selected = []
     seen = set()
-    for key, _path, item in sorted(keyed, key=lambda row: (row[0], row[1])):
+    grouped: dict[tuple[float, float], list[tuple[tuple[float, float], str, T]]] = {}
+    for row in keyed:
+        grouped.setdefault(row[0], []).append(row)
+    for key in sorted(grouped):
+        candidates = grouped[key]
+        if seed is None:
+            chosen = min(candidates, key=lambda row: row[1])
+        else:
+            # Hash-based ordering is independent of caller order and Python's
+            # process-level hash randomization.  The same support seed is
+            # therefore shared exactly by all branch evaluators.
+            chosen = min(
+                candidates,
+                key=lambda row: hashlib.sha256(
+                    f"{int(seed)}:{row[1]}".encode("utf-8")
+                ).hexdigest(),
+            )
         if key in seen:
             continue
         seen.add(key)
-        selected.append(item)
+        selected.append(chosen[2])
+    return selected
+
+
+def select_k_per_frequency_band(
+    items: Sequence[T],
+    k: int,
+    path_getter=lambda item: item,
+    seed: int | None = None,
+) -> list[T]:
+    """Keep ``k`` distinct items per parsed RF frequency band.
+
+    Candidate order is deterministic and independent of the caller's input
+    order.  Consequently, selections are nested: the first item selected for
+    a band at ``k=1`` is also selected at ``k=2`` and ``k=4`` when the same
+    seed is used.  The function is deliberately strict about malformed RF
+    inputs so a k-per-frequency experiment cannot silently fall back to a
+    global shot count.
+    """
+    if int(k) < 1:
+        raise ValueError(f"k must be >= 1, got {k}")
+
+    grouped: dict[tuple[float, float], list[tuple[str, T]]] = {}
+    unkeyed = []
+    for item in items:
+        path = path_getter(item)
+        key = frequency_band_key(path)
+        if key is None:
+            unkeyed.append(str(path))
+            continue
+        grouped.setdefault(key, []).append((str(path), item))
+
+    if not grouped:
+        raise ValueError("k-per-frequency requires parseable RF frequency bands")
+    if unkeyed:
+        raise ValueError(
+            "k-per-frequency received paths without a parseable frequency band: "
+            + ", ".join(sorted(unkeyed)[:3])
+        )
+
+    selected = []
+    for key in sorted(grouped):
+        candidates = grouped[key]
+        if seed is None:
+            ordered = sorted(candidates, key=lambda row: row[0])
+        else:
+            ordered = sorted(
+                candidates,
+                key=lambda row: (
+                    hashlib.sha256(
+                        f"{int(seed)}:{row[0]}".encode("utf-8")
+                    ).hexdigest(),
+                    row[0],
+                ),
+            )
+        if len(ordered) < int(k):
+            raise ValueError(
+                f"Frequency band {key[0]:.5f}-{key[1]:.5f}MHz has only "
+                f"{len(ordered)} candidates; cannot select k={int(k)}"
+            )
+        selected.extend(item for _path, item in ordered[: int(k)])
     return selected
 
 
@@ -93,14 +173,19 @@ def split_train_test_normals(
     return ordered[:train_count], ordered[train_count:]
 
 
-def maybe_select_one_per_frequency_band(items: Sequence[T], mode: str, path_getter=lambda item: item) -> list[T]:
+def maybe_select_one_per_frequency_band(
+    items: Sequence[T],
+    mode: str,
+    path_getter=lambda item: item,
+    seed: int | None = None,
+) -> list[T]:
     if mode in {"all", "", None}:
         return list(items)
     if mode == "split_75_25":
         train_items, _test_items = split_train_test_normals(items, path_getter=path_getter)
         return train_items
     if mode in {"frequency_one_per_band", "per_frequency"}:
-        return select_one_per_frequency_band(items, path_getter=path_getter)
+        return select_one_per_frequency_band(items, path_getter=path_getter, seed=seed)
     if mode in {"1shot", "2shot", "4shot"}:
         return select_first_n(items, int(mode.removesuffix("shot")), path_getter=path_getter)
     raise ValueError(f"Unsupported normal sampling mode: {mode}")

@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from PIL import Image
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import average_precision_score, roc_auc_score, roc_curve
 from torch.optim import Adam
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
@@ -27,6 +27,7 @@ for path in (REPO_ROOT, VAE_SRC):
 from model import VAE, vae_loss  # type: ignore  # noqa: E402
 from tools.eval_patchcore_cls import (  # noqa: E402
     JSR_BY_SIGNAL,
+    PUBLIC_RF_JSRS,
     SCENES,
     SPECTRUM_CATEGORIES,
     SPECTRUM_ROOT,
@@ -34,7 +35,13 @@ from tools.eval_patchcore_cls import (  # noqa: E402
     rf_target_jobs,
     spectrum_jobs,
 )
+from tools.ofdma_fewshot_baseline_common import (  # noqa: E402
+    add_ofdma_args,
+    load_sample_image,
+    ofdma_jobs,
+)
 from utils.rf_frequency_sampling import NORMAL_SAMPLING_CHOICES  # noqa: E402
+from utils.iad_per import iad_per_score  # noqa: E402
 from utils.training_utils import setup_seed  # noqa: E402
 
 
@@ -54,7 +61,7 @@ class VAEPathDataset(Dataset):
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
-        image = Image.open(sample["path"]).convert("RGB")
+        image = load_sample_image(sample)
         return self.transform(image), int(sample["label"]), str(sample["path"]), str(sample["name"])
 
 
@@ -62,6 +69,32 @@ def safe_auc(labels, scores) -> float:
     if len(set(labels)) < 2:
         return float("nan")
     return float(roc_auc_score(labels, scores) * 100.0)
+
+
+def safe_metrics(labels, scores) -> dict[str, float]:
+    labels_np = np.asarray(labels, dtype=np.int32).reshape(-1)
+    scores_np = np.asarray(scores, dtype=np.float64).reshape(-1)
+    # FedJam retains its four semantic labels in saved payloads; the shared
+    # headline task is benign (0) versus any jammer (>0).
+    if np.unique(labels_np).size > 2:
+        labels_np = (labels_np != 0).astype(np.int32)
+    if labels_np.size == 0 or np.unique(labels_np).size < 2:
+        return {
+            "image_auroc": float("nan"),
+            "image_auprc": float("nan"),
+            "fpr95": float("nan"),
+        }
+    fpr, tpr, _ = roc_curve(labels_np, scores_np)
+    reached = np.flatnonzero(tpr >= 0.95)
+    return {
+        "image_auroc": float(roc_auc_score(labels_np, scores_np) * 100.0),
+        "image_auprc": float(average_precision_score(labels_np, scores_np) * 100.0),
+        "fpr95": float(fpr[reached[0]] * 100.0) if reached.size else float("nan"),
+    }
+
+
+def method_name(args) -> str:
+    return "iad_per" if args.score_mode == "iad_per" else "vae_reconstruction"
 
 
 def train_signature(job):
@@ -123,7 +156,17 @@ def predict_job(model, job, args, device):
         data = data.to(device).float()
         output, _mean, _logvar = model(data)
         diff = (output - data) ** 2
-        if args.score_mode == "mse_mean":
+        if args.score_mode == "iad_per":
+            batch_scores = iad_per_score(
+                data,
+                output,
+                alpha=args.per_alpha,
+                gamma=args.per_gamma,
+                background_weight=args.per_background_weight,
+                xi=args.per_background_percentile,
+                eta=args.per_signal_percentile,
+            )
+        elif args.score_mode == "mse_mean":
             batch_scores = diff.reshape(data.size(0), -1).mean(dim=1)
         elif args.score_mode == "mse_sum":
             batch_scores = diff.reshape(data.size(0), -1).sum(dim=1)
@@ -149,7 +192,7 @@ def predict_job(model, job, args, device):
         names=np.asarray(names),
     )
     return {
-        "method": "vae_reconstruction",
+        "method": method_name(args),
         "dataset": job["dataset"],
         "category": job["category"],
         "scene": job["scene"],
@@ -157,7 +200,7 @@ def predict_job(model, job, args, device):
         "num_train_normal": len(job["train_samples"]),
         "num_test_normal": int((labels_np == 0).sum()),
         "num_test_abnormal": int((labels_np == 1).sum()),
-        "image_auroc": safe_auc(labels, scores),
+        **safe_metrics(labels, scores),
     }
 
 
@@ -202,7 +245,7 @@ def append_average(rows):
     avg = {key: "" for key in rows[0].keys()}
     avg.update(
         {
-            "method": "vae_reconstruction",
+            "method": rows[0]["method"],
             "dataset": rows[0]["dataset"],
             "category": "average",
             "scene": "macro",
@@ -211,6 +254,8 @@ def append_average(rows):
             "num_test_normal": "",
             "num_test_abnormal": "",
             "image_auroc": float(np.mean([row["image_auroc"] for row in rows])),
+            "image_auprc": float(np.mean([row["image_auprc"] for row in rows])),
+            "fpr95": float(np.mean([row["fpr95"] for row in rows])),
         }
     )
     out.append(avg)
@@ -219,14 +264,24 @@ def append_average(rows):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--protocol", choices=["spectrum", "public_rf", "rf_target"], required=True)
+    parser.add_argument(
+        "--protocol",
+        choices=["spectrum", "public_rf", "rf_target", "ofdma"],
+        required=True,
+    )
     parser.add_argument("--output-root", default="analysis_outputs/vae_cls")
     parser.add_argument("--gpu-id", type=int, default=0)
     parser.add_argument("--use-cpu", action="store_true")
     parser.add_argument("--seed", type=int, default=111)
     parser.add_argument("--normal-sampling", choices=NORMAL_SAMPLING_CHOICES, default="per_frequency")
+    parser.add_argument(
+        "--support-manifest",
+        default="",
+        help="Shared target-scene support manifest for the rf_target protocol.",
+    )
     parser.add_argument("--rf-train-mode", choices=["pooled", "per_cell"], default="pooled")
     parser.add_argument("--rf-signals", nargs="+", default=list(JSR_BY_SIGNAL.keys()), choices=list(JSR_BY_SIGNAL.keys()))
+    parser.add_argument("--public-rf-signals", nargs="+", default=list(PUBLIC_RF_JSRS), choices=list(PUBLIC_RF_JSRS))
     parser.add_argument("--rf-scenes", nargs="+", default=SCENES, choices=SCENES)
     parser.add_argument("--spectrum-root", default=str(SPECTRUM_ROOT))
     parser.add_argument("--spectrum-categories", nargs="+", default=list(SPECTRUM_CATEGORIES), choices=list(SPECTRUM_CATEGORIES))
@@ -244,8 +299,18 @@ def parse_args():
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight-decay", type=float, default=0.0)
-    parser.add_argument("--score-mode", choices=["mse_mean", "mse_sum", "mae_mean"], default="mse_mean")
+    parser.add_argument(
+        "--score-mode",
+        choices=["mse_mean", "mse_sum", "mae_mean", "iad_per"],
+        default="mse_mean",
+    )
+    parser.add_argument("--per-alpha", type=float, default=0.05)
+    parser.add_argument("--per-gamma", type=int, default=3)
+    parser.add_argument("--per-background-weight", type=float, default=2.0)
+    parser.add_argument("--per-background-percentile", type=float, default=90.0)
+    parser.add_argument("--per-signal-percentile", type=float, default=99.0)
     parser.add_argument("--log-every", type=int, default=25)
+    add_ofdma_args(parser)
     return parser.parse_args()
 
 
@@ -259,6 +324,8 @@ def main():
         jobs = spectrum_jobs(args)
     elif args.protocol == "public_rf":
         jobs = public_rf_jobs(args)
+    elif args.protocol == "ofdma":
+        jobs = ofdma_jobs(args)
     else:
         jobs = rf_target_jobs(args)
 
@@ -268,8 +335,14 @@ def main():
     result_path = out_root / "results_vae_cls.csv"
     write_csv(result_path, rows_with_avg)
     summary = {
-        "method": "vae_reconstruction",
+        "method": method_name(args),
         "protocol": args.protocol,
+        "support_protocol": "target_scene" if args.protocol == "rf_target" else None,
+        "support_manifest": getattr(args, "support_manifest", "") or None,
+        "support_manifest_sha256": getattr(args, "support_manifest_sha256", None),
+        "test_normal_paths_sha256": getattr(args, "test_normal_paths_sha256", None),
+        "support_policy": getattr(args, "support_policy", None),
+        "per_frequency_k": getattr(args, "per_frequency_k", None),
         "normal_sampling": args.normal_sampling,
         "rf_train_mode": getattr(args, "rf_train_mode", None),
         "image_size": args.image_size,
@@ -281,14 +354,27 @@ def main():
         "batch_size": args.batch_size,
         "lr": args.lr,
         "score_mode": args.score_mode,
+        "per": (
+            {
+                "alpha": args.per_alpha,
+                "gamma": args.per_gamma,
+                "background_weight": args.per_background_weight,
+                "background_percentile": args.per_background_percentile,
+                "signal_percentile": args.per_signal_percentile,
+            }
+            if args.score_mode == "iad_per"
+            else None
+        ),
         "seed": args.seed,
         "num_jobs": len(rows),
         "image_auroc_macro": float(np.mean([row["image_auroc"] for row in rows])),
+        "image_auprc_macro": float(np.mean([row["image_auprc"] for row in rows])),
+        "fpr95_macro": float(np.mean([row["fpr95"] for row in rows])),
     }
     out_root.mkdir(parents=True, exist_ok=True)
     (out_root / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True), encoding="utf-8")
     (out_root / "README.md").write_text(
-        "# VAE Reconstruction CLS Baseline\n\n"
+        f"# {method_name(args)} CLS Baseline\n\n"
         f"Protocol: `{args.protocol}`\n\n"
         f"Normal sampling: `{args.normal_sampling}`\n\n"
         f"Result CSV: `{result_path.name}`\n\n"

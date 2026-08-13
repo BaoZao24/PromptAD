@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import sys
@@ -38,24 +39,30 @@ from tools.eval_seg_resnet_gallery_fusion import (
     load_checkpoint,
 )
 from train_rf_target_pooled_universal import build_gallery, to_model_input
-from utils.rf_frequency_sampling import NORMAL_SAMPLING_CHOICES, maybe_select_one_per_frequency_band
+from utils.rf_frequency_sampling import NORMAL_SAMPLING_CHOICES
+from utils.public_rf_support import (
+    public_normal_paths as shared_public_normal_paths,
+    select_support_and_test_paths,
+)
 from utils.training_utils import setup_seed
 
 
 RF_PUBLIC_ROOT = Path("/mnt/data/wangbei/data/RF_SPE_PNG")
 PUBLIC_NORMAL_DIR = RF_PUBLIC_ROOT / "RF_Spectrum_Public_Dataset"
-PUBLIC_SIGNALS = ("burst", "chirp", "dsss", "pulse")
+PUBLIC_SIGNALS = ("burst", "chirp", "dsss", "pulse", "deceptive")
 JSR_BY_SIGNAL = {
     "burst": ("m10db", "m20db", "m30db", "m40db", "m50db"),
     "chirp": ("m30db", "m40db", "m50db", "m55db", "m60db", "m70db"),
     "dsss": ("m10db", "m20db", "m30db", "m40db", "m50db"),
     "pulse": ("m10db", "m20db", "m30db", "m40db", "m50db"),
+    "deceptive": ("m10db", "m20db", "m30db"),
 }
 DEFAULT_THREE_JSR_BY_SIGNAL = {
     "burst": ("m30db", "m40db", "m50db"),
     "chirp": ("m40db", "m50db", "m55db"),
     "dsss": ("m30db", "m40db", "m50db"),
     "pulse": ("m30db", "m40db", "m50db"),
+    "deceptive": ("m10db", "m20db", "m30db"),
 }
 
 
@@ -107,15 +114,32 @@ def public_normal_paths(records):
 
 
 def all_public_normal_paths():
-    records = public_normal_records()
-    return public_normal_paths(records)
+    return shared_public_normal_paths()
 
 
 def select_public_support_and_test_normals(args):
     normal_paths = all_public_normal_paths()
-    train_normal_paths = maybe_select_one_per_frequency_band(normal_paths, args.normal_sampling)
-    support_set = {str(p) for p in train_normal_paths}
-    test_normal_paths = [p for p in normal_paths if str(p) not in support_set]
+    train_normal_paths, test_normal_paths, manifest = select_support_and_test_paths(
+        normal_paths,
+        normal_sampling=args.normal_sampling,
+        seed=getattr(args, "support_seed", None),
+        manifest_path=getattr(args, "support_manifest", None),
+    )
+    digest = (
+        manifest.get("support_paths_sha256")
+        if manifest is not None
+        else hashlib.sha256(
+            "\n".join(str(path) for path in train_normal_paths).encode("utf-8")
+        ).hexdigest()
+    )
+    args.support_manifest_sha256 = digest
+    args.test_normal_paths_sha256 = (
+        manifest.get("test_paths_sha256")
+        if manifest is not None
+        else hashlib.sha256(
+            "\n".join(str(path) for path in test_normal_paths).encode("utf-8")
+        ).hexdigest()
+    )
     return train_normal_paths, test_normal_paths
 
 
@@ -310,7 +334,7 @@ def main():
     parser.add_argument("--output-root", default="analysis_outputs/20260702_public_rf_cls_dual_gallery")
     parser.add_argument(
         "--checkpoint",
-        default="analysis_outputs/90_rejected_or_aborted/20260706_cleanup_old_results/20260627_method_funnel/runs/pooled_rf_rgb/cls/checkpoint/overall-best.pt",
+        default="analysis_outputs/02_current_baselines/promptad_formal_baseline/pooled_rf_rgb_cls/checkpoint/overall-best.pt",
     )
     parser.add_argument("--signals", nargs="+", default=list(PUBLIC_SIGNALS), choices=list(PUBLIC_SIGNALS))
     parser.add_argument(
@@ -318,7 +342,7 @@ def main():
         default=None,
         help=(
             "Semicolon-separated JSR protocol, e.g. "
-            "'burst:m30db,m40db,m50db;chirp:m40db,m50db,m55db;dsss:m30db,m40db,m50db;pulse:m30db,m40db,m50db'. "
+            "'burst:m30db,m40db,m50db;chirp:m40db,m50db,m55db;dsss:m30db,m40db,m50db;pulse:m30db,m40db,m50db;deceptive:m10db,m20db,m30db'. "
             "Defaults to this three-JSR public RF protocol."
         ),
     )
@@ -356,6 +380,23 @@ def main():
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--gpu-id", type=int, default=0)
     parser.add_argument("--seed", type=int, default=111)
+    parser.add_argument(
+        "--support-seed",
+        type=int,
+        default=None,
+        help=(
+            "Optional independent seed for public-RF normal support selection. "
+            "When omitted, the historical deterministic per-frequency choice is used."
+        ),
+    )
+    parser.add_argument(
+        "--support-manifest",
+        default="",
+        help=(
+            "Shared public-RF support/test manifest. When supplied, the listed "
+            "test paths remain fixed across support replicates."
+        ),
+    )
     parser.add_argument("--resolution", type=int, default=400)
     parser.add_argument("--img-resize", type=int, default=240)
     parser.add_argument("--img-cropsize", type=int, default=240)
@@ -410,6 +451,10 @@ def main():
         "checkpoint": args.checkpoint,
         "dataset_root": str(RF_PUBLIC_ROOT),
         "normal_sampling": args.normal_sampling,
+        "support_seed": getattr(args, "support_seed", None),
+        "support_manifest": getattr(args, "support_manifest", ""),
+        "support_manifest_sha256": getattr(args, "support_manifest_sha256", None),
+        "test_normal_paths_sha256": getattr(args, "test_normal_paths_sha256", None),
         "clip_topk": args.clip_topk,
         "resnet": "resnet18_imagenet1k_v1",
         "resnet_layers": args.resnet_layers,
@@ -432,7 +477,7 @@ def main():
     (out_root / "README.md").write_text(
         "# Public RF CLS Dual Gallery Evaluation\n\n"
         "This experiment evaluates the current dual-gallery CLS method on RF_SPE_PNG.\n\n"
-        "Normal support is selected by --normal-sampling; selected support normals are excluded from test normals.\n"
+        "Normal support/test paths follow the shared public-RF manifest when supplied; otherwise the historical selection is used.\n"
         "Abnormal samples are read from RF_SPE_PNG/{burst,chirp,dsss,pulse}/abnormal/{jsr}.\n\n"
         f"Result CSV: `{result_path.name}`\n\n"
         f"Summary: `{summary_path.name}`\n",

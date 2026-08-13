@@ -49,7 +49,6 @@ class Args:
     dataset = "rf_target_test_pool"
     class_name = "signal"
     normal_sampling = "frequency_one_per_band"
-    patch_layer = "concat"
     coreset_method = "farthest"
     coreset_ratio = 0.5
     rowwise_coreset = False

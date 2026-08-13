@@ -24,12 +24,18 @@ if str(REPO_ROOT) not in sys.path:
 
 from tools.eval_patchcore_cls import (  # noqa: E402
     JSR_BY_SIGNAL,
+    PUBLIC_RF_JSRS,
     SCENES,
     SPECTRUM_CATEGORIES,
     SPECTRUM_ROOT,
     public_rf_jobs,
     rf_target_jobs,
     spectrum_jobs,
+)
+from tools.ofdma_fewshot_baseline_common import (  # noqa: E402
+    add_ofdma_args,
+    load_sample_image,
+    ofdma_jobs,
 )
 from utils.rf_frequency_sampling import NORMAL_SAMPLING_CHOICES  # noqa: E402
 from utils.training_utils import setup_seed  # noqa: E402
@@ -52,7 +58,7 @@ class ImagePathDataset(Dataset):
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
-        image = Image.open(sample["path"]).convert("RGB")
+        image = load_sample_image(sample)
         return self.transform(image), int(sample["label"]), str(sample["path"]), str(sample["name"])
 
 
@@ -144,6 +150,7 @@ def fit_stfpm(train_samples, args, device):
 def predict_job(teacher, student, job, args, device):
     loader = make_loader(job["test_samples"], args, shuffle=False)
     labels, scores, paths, names, maps = [], [], [], [], []
+    save_maps = args.protocol != "ofdma"
     for images, batch_labels, batch_paths, batch_names in loader:
         images = images.to(device)
         teacher_features = teacher(images)
@@ -161,21 +168,29 @@ def predict_job(teacher, student, job, args, device):
         scores.extend(float(x) for x in batch_scores.tolist())
         paths.extend(str(x) for x in batch_paths)
         names.extend(str(x) for x in batch_names)
-        maps.append(batch_maps)
+        if save_maps:
+            maps.append(batch_maps)
 
     labels_np = np.asarray(labels, dtype=np.int32)
     scores_np = np.asarray(scores, dtype=np.float32)
-    maps_np = np.concatenate(maps, axis=0) if maps else np.zeros((0, 64, 64), dtype=np.float32)
     score_dir = Path(args.output_root) / "scores"
     score_dir.mkdir(parents=True, exist_ok=True)
     stem = f"{job['dataset']}-{job['category']}-{job['scene']}-{job['jsr']}".replace("/", "_")
+    payload = {
+        "scores": scores_np,
+        "labels": labels_np,
+        "image_paths": np.asarray(paths),
+        "names": np.asarray(names),
+    }
+    if save_maps:
+        payload["anomaly_maps"] = (
+            np.concatenate(maps, axis=0)
+            if maps
+            else np.zeros((0, 64, 64), dtype=np.float32)
+        )
     np.savez_compressed(
         score_dir / f"{stem}-scores.npz",
-        scores=scores_np,
-        labels=labels_np,
-        anomaly_maps=maps_np,
-        image_paths=np.asarray(paths),
-        names=np.asarray(names),
+        **payload,
     )
     return {
         "method": "stfpm_resnet18",
@@ -248,14 +263,24 @@ def append_average(rows):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--protocol", choices=["spectrum", "public_rf", "rf_target"], required=True)
+    parser.add_argument(
+        "--protocol",
+        choices=["spectrum", "public_rf", "rf_target", "ofdma"],
+        required=True,
+    )
     parser.add_argument("--output-root", default="analysis_outputs/stfpm_cls")
     parser.add_argument("--gpu-id", type=int, default=0)
     parser.add_argument("--use-cpu", action="store_true")
     parser.add_argument("--seed", type=int, default=111)
     parser.add_argument("--normal-sampling", choices=NORMAL_SAMPLING_CHOICES, default="per_frequency")
+    parser.add_argument(
+        "--support-manifest",
+        default="",
+        help="Shared target-scene support manifest for the rf_target protocol.",
+    )
     parser.add_argument("--rf-train-mode", choices=["pooled", "per_cell"], default="pooled")
     parser.add_argument("--rf-signals", nargs="+", default=list(JSR_BY_SIGNAL.keys()), choices=list(JSR_BY_SIGNAL.keys()))
+    parser.add_argument("--public-rf-signals", nargs="+", default=list(PUBLIC_RF_JSRS), choices=list(PUBLIC_RF_JSRS))
     parser.add_argument("--rf-scenes", nargs="+", default=SCENES, choices=SCENES)
     parser.add_argument("--spectrum-root", default=str(SPECTRUM_ROOT))
     parser.add_argument("--spectrum-categories", nargs="+", default=list(SPECTRUM_CATEGORIES), choices=list(SPECTRUM_CATEGORIES))
@@ -272,6 +297,7 @@ def parse_args():
     parser.add_argument("--momentum", type=float, default=0.9)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--log-every", type=int, default=25)
+    add_ofdma_args(parser)
     return parser.parse_args()
 
 
@@ -285,6 +311,8 @@ def main():
         jobs = spectrum_jobs(args)
     elif args.protocol == "public_rf":
         jobs = public_rf_jobs(args)
+    elif args.protocol == "ofdma":
+        jobs = ofdma_jobs(args)
     else:
         jobs = rf_target_jobs(args)
 
@@ -296,6 +324,12 @@ def main():
     summary = {
         "method": "stfpm_resnet18",
         "protocol": args.protocol,
+        "support_protocol": "target_scene" if args.protocol == "rf_target" else None,
+        "support_manifest": getattr(args, "support_manifest", "") or None,
+        "support_manifest_sha256": getattr(args, "support_manifest_sha256", None),
+        "test_normal_paths_sha256": getattr(args, "test_normal_paths_sha256", None),
+        "support_policy": getattr(args, "support_policy", None),
+        "per_frequency_k": getattr(args, "per_frequency_k", None),
         "normal_sampling": args.normal_sampling,
         "rf_train_mode": getattr(args, "rf_train_mode", None),
         "epochs": args.epochs,

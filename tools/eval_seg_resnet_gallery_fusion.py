@@ -104,6 +104,7 @@ class ResNet18LocalEncoder(nn.Module):
         self.layer1 = net.layer1
         self.layer2 = net.layer2
         self.layer3 = net.layer3
+        self.layer4 = net.layer4
         self.register_buffer(
             "mean",
             torch.tensor(weights.transforms().mean).view(1, 3, 1, 1),
@@ -123,12 +124,15 @@ class ResNet18LocalEncoder(nn.Module):
         x = F.interpolate(x, size=(224, 224), mode="bilinear", align_corners=False)
         x = (x - self.mean) / self.std
         x = self.stem(x)
-        x = self.layer1(x)
-        layer2 = self.layer2(x)
+        layer1 = self.layer1(x)
+        layer2 = self.layer2(layer1)
         layer3 = self.layer3(layer2)
+        layer4 = self.layer4(layer3)
         return {
+            "layer1": F.normalize(layer1.float(), dim=1),
             "layer2": F.normalize(layer2.float(), dim=1),
             "layer3": F.normalize(layer3.float(), dim=1),
+            "layer4": F.normalize(layer4.float(), dim=1),
         }
 
 
@@ -145,9 +149,25 @@ def cnn_tta_modes(args):
     raise ValueError(f"Unsupported CNN paired TTA mode: {mode}")
 
 
+def normalize_cnn_input_batch(raw_batch: torch.Tensor, args) -> torch.Tensor:
+    """Optional per-image normalization for experimental CNN-only evidence."""
+    mode = getattr(args, "cnn_input_normalization", "raw")
+    if mode == "raw":
+        return raw_batch
+    if mode != "robust_global":
+        raise ValueError(f"Unsupported CNN input normalization: {mode}")
+    gray = raw_batch.float().mean(dim=-1)
+    flat = gray.flatten(1)
+    median = flat.median(dim=1).values.view(-1, 1, 1)
+    mad = (gray - median).abs().flatten(1).median(dim=1).values.view(-1, 1, 1)
+    robust_z = (gray - median) / torch.clamp(1.4826 * mad, min=1.0)
+    normalized = ((robust_z.clamp(-3.0, 3.0) + 3.0) / 6.0 * 255.0).round().to(torch.uint8)
+    return normalized.unsqueeze(-1).repeat(1, 1, 1, 3)
+
+
 def cnn_tta_batch(raw_batch: torch.Tensor, mode: str, args) -> torch.Tensor:
     if mode == "identity":
-        return raw_batch
+        return normalize_cnn_input_batch(raw_batch, args)
     variants = []
     shift = int(getattr(args, "cnn_paired_tta_shift_px", 4))
     blur_size = int(getattr(args, "cnn_paired_tta_blur_ksize", 3))
@@ -168,7 +188,7 @@ def cnn_tta_batch(raw_batch: torch.Tensor, mode: str, args) -> torch.Tensor:
         else:
             raise ValueError(f"Unsupported CNN paired TTA view: {mode}")
         variants.append(variant)
-    return torch.as_tensor(np.stack(variants, axis=0))
+    return normalize_cnn_input_batch(torch.as_tensor(np.stack(variants, axis=0)), args)
 
 
 def downsample_gallery(gallery: torch.Tensor, max_patches: int, seed: int) -> torch.Tensor:

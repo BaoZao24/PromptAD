@@ -85,6 +85,8 @@ Thumbs.db
 result_split_ablation/
 tmp_*/
 tmp_*
+autoresearch/
+logs/
 analysis_outputs/*
 !analysis_outputs/current_scheme_figures/
 !analysis_outputs/current_scheme_figures/*.png
@@ -111,3 +113,15 @@ archive_results/2026_06_01_workspace_cleanup/
 # Third-party reference repositories cloned for code reading
 # (See docs/research/clip_fsad_survey_2023_2026.md for the list)
 references/
+
+# Keep the locally archived paper PDFs and their audit manifest versionable;
+# the other cloned reference repositories remain ignored.
+!references/
+references/*
+!references/papers/
+!references/papers/**
+
+# Locally rendered paper exports. The Markdown source is versioned; PDFs can be
+# regenerated with the renderer when needed. Existing architecture PDFs remain
+# tracked because ignore rules do not remove files already in the index.
+docs/论文实验部分.pdf

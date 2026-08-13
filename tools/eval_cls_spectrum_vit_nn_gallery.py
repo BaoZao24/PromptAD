@@ -38,7 +38,7 @@ from tools.eval_cls_vit_patchcore_gallery import (
 )
 from tools.eval_seg_resnet_gallery_fusion import load_checkpoint
 from train_rf_target_pooled_universal import build_gallery, to_model_input
-from utils.rf_frequency_sampling import NORMAL_SAMPLING_CHOICES, maybe_select_one_per_frequency_band
+from utils.rf_frequency_sampling import maybe_select_one_per_frequency_band
 from utils.training_utils import setup_seed
 
 
@@ -114,7 +114,7 @@ def compute_spectrum_patch_map(model, raw_batch, gallery, gallery_rows, gallery_
     data_variant = paired_tta_batch(raw_batch, paired_tta_mode, args)
     data_t = to_model_input(model, data_variant, device, rgb_from_bgr=True)
     visual_features = model.encode_image(data_t)
-    patch_features = prepare_patch_features(visual_features, args.patch_layer)
+    patch_features = prepare_patch_features(visual_features)
     bsz, num_patches, _ = patch_features.shape
     grid_h, grid_w = model.grid_size
     if args.memory_mode == "row_proto":
@@ -146,6 +146,55 @@ def compute_spectrum_patch_map(model, raw_batch, gallery, gallery_rows, gallery_
 
 
 @torch.no_grad()
+def compute_spectrum_fused_map(
+    model,
+    raw_batch,
+    gallery,
+    gallery_rows,
+    gallery_cols,
+    args,
+    device,
+    row_stats=None,
+    row_prototypes=None,
+    paired_tta_galleries=None,
+):
+    if paired_tta_galleries:
+        maps = [
+            compute_spectrum_patch_map(
+                model,
+                raw_batch,
+                tta_gallery,
+                tta_rows,
+                tta_cols,
+                args,
+                device,
+                row_stats=None,
+                row_prototypes=None,
+                paired_tta_mode=mode,
+            )
+            for mode, tta_gallery, tta_rows, tta_cols in paired_tta_galleries
+        ]
+        stacked = torch.stack(maps, dim=0)
+        if args.paired_tta_fusion == "mean":
+            return stacked.mean(dim=0)
+        if args.paired_tta_fusion == "max":
+            return stacked.max(dim=0).values
+        raise ValueError(f"Unsupported paired TTA fusion: {args.paired_tta_fusion}")
+    return compute_spectrum_patch_map(
+        model,
+        raw_batch,
+        gallery,
+        gallery_rows,
+        gallery_cols,
+        args,
+        device,
+        row_stats,
+        row_prototypes,
+        paired_tta_mode="identity",
+    )
+
+
+@torch.no_grad()
 def evaluate_category(model, category, train_loader, eval_loader, args, device):
     build_gallery(model, train_loader, device)
     model.build_text_feature_gallery()
@@ -163,7 +212,6 @@ def evaluate_category(model, category, train_loader, eval_loader, args, device):
     grid_h, grid_w = model.grid_size
     row_stats = build_frequency_row_stats(vit_nn_gallery, gallery_rows, args, grid_h) if args.freq_zscore else None
     row_prototypes = build_row_prototypes(vit_nn_gallery, gallery_rows, grid_h) if args.memory_mode == "row_proto" else None
-
     labels, names = [], []
     text_scores, vit_max_scores = [], []
     nn_max_scores = []
@@ -178,41 +226,18 @@ def evaluate_category(model, category, train_loader, eval_loader, args, device):
         vit_map = np.asarray(vit_map, dtype=np.float32)
         vit_max = vit_map.reshape(vit_map.shape[0], -1).max(axis=1)
 
-        if paired_tta_galleries:
-            maps = []
-            for mode, tta_gallery, tta_rows, tta_cols in paired_tta_galleries:
-                maps.append(compute_spectrum_patch_map(
-                    model,
-                    data,
-                    tta_gallery,
-                    tta_rows,
-                    tta_cols,
-                    args,
-                    device,
-                    row_stats=None,
-                    row_prototypes=None,
-                    paired_tta_mode=mode,
-                ))
-            stacked_maps = torch.stack(maps, dim=0)
-            if args.paired_tta_fusion == "mean":
-                nn_t = stacked_maps.mean(dim=0)
-            elif args.paired_tta_fusion == "max":
-                nn_t = stacked_maps.max(dim=0).values
-            else:
-                raise ValueError(f"Unsupported paired TTA fusion: {args.paired_tta_fusion}")
-        else:
-            nn_t = compute_spectrum_patch_map(
-                model,
-                data,
-                vit_nn_gallery,
-                gallery_rows,
-                gallery_cols,
-                args,
-                device,
-                row_stats,
-                row_prototypes,
-                paired_tta_mode="identity",
-            )
+        nn_t = compute_spectrum_fused_map(
+            model,
+            data,
+            vit_nn_gallery,
+            gallery_rows,
+            gallery_cols,
+            args,
+            device,
+            row_stats,
+            row_prototypes,
+            paired_tta_galleries,
+        )
         nn_map = nn_t.detach().cpu().numpy().astype(np.float32)
 
         text_scores.extend(float(x) for x in text_np)
@@ -234,7 +259,7 @@ def evaluate_category(model, category, train_loader, eval_loader, args, device):
         "task": "cls",
         "dataset": "spectrum",
         "category": category,
-        "patch_layer": args.patch_layer,
+        "patch_layer": "concat",
         "coreset_ratio": args.coreset_ratio,
         "freq_window": args.freq_window,
         "nn_topk": args.nn_topk,
@@ -286,13 +311,16 @@ def main():
     parser.add_argument("--spectrum-root", default=str(SPECTRUM_ROOT))
     parser.add_argument(
         "--checkpoint",
-        default="analysis_outputs/90_rejected_or_aborted/20260706_cleanup_old_results/20260627_method_funnel/runs/pooled_rf_rgb/cls/checkpoint/overall-best.pt",
+        default="analysis_outputs/02_current_baselines/promptad_formal_baseline/pooled_rf_rgb_cls/checkpoint/overall-best.pt",
     )
     parser.add_argument("--categories", nargs="+", default=list(SPECTRUM_CLASSES), choices=list(SPECTRUM_CLASSES))
-    parser.add_argument("--normal-sampling", choices=NORMAL_SAMPLING_CHOICES, default="per_frequency")
-    parser.add_argument("--patch-layer", choices=["layer1", "layer2", "concat"], default="concat")
-    parser.add_argument("--coreset-ratio", type=float, default=1.0)
-    parser.add_argument("--coreset-method", choices=["random", "farthest"], default="random")
+    parser.add_argument(
+        "--normal-sampling",
+        choices=("1shot", "2shot", "4shot"),
+        default="4shot",
+    )
+    parser.add_argument("--coreset-ratio", type=float, default=0.5)
+    parser.add_argument("--coreset-method", choices=["random", "farthest"], default="farthest")
     parser.add_argument("--rowwise-coreset", action="store_true")
     parser.add_argument("--memory-mode", choices=["global_nn", "row_nn", "row_proto"], default="global_nn")
     parser.add_argument("--row-proto-zscore", action="store_true")
@@ -300,14 +328,14 @@ def main():
     parser.add_argument("--freq-window", type=int, default=-1)
     parser.add_argument("--position-soft-axis", choices=["frequency", "time"], default="frequency")
     parser.add_argument("--position-soft-weight", type=float, default=0.0)
-    parser.add_argument("--nn-topk", type=int, default=1)
+    parser.add_argument("--nn-topk", type=int, default=5)
     parser.add_argument("--nn-agg", choices=["mean", "weighted", "adaptive"], default="mean")
     parser.add_argument("--nn-weight-temp", type=float, default=0.05)
     parser.add_argument("--adaptive-sim-margin", type=float, default=0.02)
     parser.add_argument("--freq-zscore", action="store_true")
     parser.add_argument("--map-top-ratios", type=float, nargs="+", default=[0.01, 0.05, 0.1])
-    parser.add_argument("--paired-tta", choices=["none", "visionad_safe", "stft_shift_blur", "stft_time_shift_v2"], default="none")
-    parser.add_argument("--paired-tta-fusion", choices=["mean", "max"], default="mean")
+    parser.add_argument("--paired-tta", choices=["none", "visionad_safe", "stft_shift_blur", "stft_time_shift_v2"], default="stft_shift_blur")
+    parser.add_argument("--paired-tta-fusion", choices=["mean", "max"], default="max")
     parser.add_argument("--paired-tta-contrast", type=float, default=1.04)
     parser.add_argument("--paired-tta-brightness", type=float, default=1.0)
     parser.add_argument("--paired-tta-crop-ratio", type=float, default=0.02)
@@ -385,7 +413,7 @@ def main():
         "categories": args.categories,
         "normal_sampling": args.normal_sampling,
         "max_train_normals": args.max_train_normals,
-        "patch_layer": args.patch_layer,
+        "patch_layer": "concat",
         "coreset_ratio": args.coreset_ratio,
         "coreset_method": args.coreset_method,
         "rowwise_coreset": bool(args.rowwise_coreset),
@@ -418,7 +446,7 @@ def main():
         "Nearest-neighbour gallery scoring over PromptAD/CLIP ViT patch features.",
         "",
         f"- normal sampling: `{args.normal_sampling}`",
-        f"- patch layer: `{args.patch_layer}`",
+        "- patch layer: `concat`",
         f"- paired TTA: `{args.paired_tta}`",
         f"- paired TTA fusion: `{args.paired_tta_fusion}`",
         f"- categories: `{len(rows)}`",

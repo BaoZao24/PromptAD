@@ -49,7 +49,6 @@ from tools.eval_cls_vit_patchcore_gallery import (
 )
 from tools.eval_seg_resnet_gallery_fusion import load_checkpoint
 from train_rf_target_pooled_universal import build_gallery, to_model_input
-from utils.rf_frequency_sampling import NORMAL_SAMPLING_CHOICES
 from utils.training_utils import setup_seed
 
 
@@ -68,7 +67,7 @@ def build_patchcore_gallery(model, train_loader, args, device):
     for data, mask, label, name, img_type in tqdm(train_loader, desc="Build public CLIP-ViT NN gallery", leave=False):
         data_t = to_model_input(model, data, device, rgb_from_bgr=True)
         visual_features = model.encode_image(data_t)
-        patch_features = prepare_patch_features(visual_features, args.patch_layer)
+        patch_features = prepare_patch_features(visual_features)
         patches.append(patch_features.reshape(-1, patch_features.shape[-1]))
     gallery = torch.cat(patches, dim=0)
     if args.coreset_ratio < 1.0:
@@ -80,11 +79,24 @@ def build_patchcore_gallery(model, train_loader, args, device):
 
 
 @torch.no_grad()
-def compute_public_patch_map(model, raw_batch, gallery, gallery_rows, gallery_cols, args, device, row_stats=None, row_prototypes=None, paired_tta_mode="identity"):
-    data_variant = paired_tta_batch(raw_batch, paired_tta_mode, args)
-    data_t = to_model_input(model, data_variant, device, rgb_from_bgr=True)
-    visual_features = model.encode_image(data_t)
-    patch_features = prepare_patch_features(visual_features, args.patch_layer)
+def compute_public_patch_map(
+    model,
+    raw_batch,
+    gallery,
+    gallery_rows,
+    gallery_cols,
+    args,
+    device,
+    row_stats=None,
+    row_prototypes=None,
+    paired_tta_mode="identity",
+    visual_features=None,
+):
+    if visual_features is None or paired_tta_mode != "identity":
+        data_variant = paired_tta_batch(raw_batch, paired_tta_mode, args)
+        data_t = to_model_input(model, data_variant, device, rgb_from_bgr=True)
+        visual_features = model.encode_image(data_t)
+    patch_features = prepare_patch_features(visual_features)
     bsz, num_patches, _ = patch_features.shape
     grid_h, grid_w = model.grid_size
     if args.memory_mode == "row_proto":
@@ -116,7 +128,70 @@ def compute_public_patch_map(model, raw_batch, gallery, gallery_rows, gallery_co
 
 
 @torch.no_grad()
-def evaluate(model, patchcore_gallery, eval_loaders, args, device, gallery_rows=None, gallery_cols=None, row_stats=None, row_prototypes=None, paired_tta_galleries=None):
+def compute_public_fused_map(
+    model,
+    raw_batch,
+    patchcore_gallery,
+    gallery_rows,
+    gallery_cols,
+    args,
+    device,
+    row_stats=None,
+    row_prototypes=None,
+    paired_tta_galleries=None,
+    visual_features=None,
+):
+    if paired_tta_galleries:
+        maps = [
+            compute_public_patch_map(
+                model,
+                raw_batch,
+                tta_gallery,
+                tta_rows,
+                tta_cols,
+                args,
+                device,
+                row_stats=None,
+                row_prototypes=None,
+                paired_tta_mode=mode,
+                visual_features=(visual_features if mode == "identity" else None),
+            )
+            for mode, tta_gallery, tta_rows, tta_cols in paired_tta_galleries
+        ]
+        stacked = torch.stack(maps, dim=0)
+        if args.paired_tta_fusion == "mean":
+            return stacked.mean(dim=0)
+        if args.paired_tta_fusion == "max":
+            return stacked.max(dim=0).values
+        raise ValueError(f"Unsupported paired TTA fusion: {args.paired_tta_fusion}")
+    return compute_public_patch_map(
+        model,
+        raw_batch,
+        patchcore_gallery,
+        gallery_rows,
+        gallery_cols,
+        args,
+        device,
+        row_stats,
+        row_prototypes,
+        paired_tta_mode="identity",
+        visual_features=visual_features,
+    )
+
+
+@torch.no_grad()
+def evaluate(
+    model,
+    patchcore_gallery,
+    eval_loaders,
+    args,
+    device,
+    gallery_rows=None,
+    gallery_cols=None,
+    row_stats=None,
+    row_prototypes=None,
+    paired_tta_galleries=None,
+):
     model.eval_mode()
     model.build_text_feature_gallery()
     rows = []
@@ -139,41 +214,19 @@ def evaluate(model, patchcore_gallery, eval_loaders, args, device, gallery_rows=
             vit_max = vit_map.reshape(vit_map.shape[0], -1).max(axis=1)
             vit_top001 = top_ratio_score(vit_map, 0.01)
 
-            if paired_tta_galleries:
-                maps = []
-                for mode, tta_gallery, tta_rows, tta_cols in paired_tta_galleries:
-                    maps.append(compute_public_patch_map(
-                        model,
-                        data,
-                        tta_gallery,
-                        tta_rows,
-                        tta_cols,
-                        args,
-                        device,
-                        row_stats=None,
-                        row_prototypes=None,
-                        paired_tta_mode=mode,
-                    ))
-                stacked_maps = torch.stack(maps, dim=0)
-                if args.paired_tta_fusion == "mean":
-                    pc_t = stacked_maps.mean(dim=0)
-                elif args.paired_tta_fusion == "max":
-                    pc_t = stacked_maps.max(dim=0).values
-                else:
-                    raise ValueError(f"Unsupported paired TTA fusion: {args.paired_tta_fusion}")
-            else:
-                pc_t = compute_public_patch_map(
-                    model,
-                    data,
-                    patchcore_gallery,
-                    gallery_rows,
-                    gallery_cols,
-                    args,
-                    device,
-                    row_stats,
-                    row_prototypes,
-                    paired_tta_mode="identity",
-                )
+            pc_t = compute_public_fused_map(
+                model,
+                data,
+                patchcore_gallery,
+                gallery_rows,
+                gallery_cols,
+                args,
+                device,
+                row_stats,
+                row_prototypes,
+                paired_tta_galleries,
+                visual_features=visual_features,
+            )
             pc_map = pc_t.detach().cpu().numpy().astype(np.float32)
 
             text_scores.extend(float(x) for x in text_np)
@@ -206,7 +259,7 @@ def evaluate(model, patchcore_gallery, eval_loaders, args, device, gallery_rows=
             "dataset": signal,
             "scene": scene,
             "jsr": jsr,
-            "patch_layer": args.patch_layer,
+            "patch_layer": "concat",
             "coreset_ratio": args.coreset_ratio,
             "freq_window": args.freq_window,
             "nn_topk": args.nn_topk,
@@ -241,6 +294,10 @@ def evaluate(model, patchcore_gallery, eval_loaders, args, device, gallery_rows=
             "vit_patchcore_max_scores": pc_max_np,
             "text_vit_patchcore_max": text_pc_max,
         }
+        if getattr(args, "support_manifest_sha256", ""):
+            payload["support_manifest_sha256"] = np.asarray(
+                args.support_manifest_sha256
+            )
         if pc_coherent_np is not None:
             text_pc_coherent = harmonic(text_np, pc_coherent_np)
             row["vit_patchcore_coherent_auc"] = safe_auc(labels, pc_coherent_np)
@@ -261,21 +318,72 @@ def evaluate(model, patchcore_gallery, eval_loaders, args, device, gallery_rows=
     return rows
 
 
+@torch.no_grad()
+def support_reference_scores(
+    model,
+    support_loader,
+    patchcore_gallery,
+    gallery_rows,
+    gallery_cols,
+    args,
+    device,
+    row_stats=None,
+    row_prototypes=None,
+    paired_tta_galleries=None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Score held-out shifts of the normal support only.
+
+    The two \u00b18-pixel shifts are not part of the formal support gallery.  They
+    provide a small normal reference distribution without consulting any
+    public-RF test image or test label.
+    """
+
+    scores, names = [], []
+    for data, _mask, _label, name, _img_type in tqdm(
+        support_loader,
+        desc="Score support-only public ViT reference",
+        leave=False,
+    ):
+        for mode in ("time_shift_up_large", "time_shift_down_large"):
+            shifted = paired_tta_batch(data, mode, args)
+            map_t = compute_public_fused_map(
+                model,
+                shifted,
+                patchcore_gallery,
+                gallery_rows,
+                gallery_cols,
+                args,
+                device,
+                row_stats,
+                row_prototypes,
+                paired_tta_galleries,
+            )
+            map_np = map_t.detach().cpu().numpy().astype(np.float32)
+            scores.extend(
+                map_np.reshape(map_np.shape[0], -1).max(axis=1).tolist()
+            )
+            names.extend(str(value) for value in name)
+    return np.asarray(scores, dtype=np.float32), np.asarray(names)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output-root", default="analysis_outputs/20260704_public_rf_vit_patchcore_gallery_cls")
     parser.add_argument(
         "--checkpoint",
-        default="analysis_outputs/90_rejected_or_aborted/20260706_cleanup_old_results/20260627_method_funnel/runs/pooled_rf_rgb/cls/checkpoint/overall-best.pt",
+        default="analysis_outputs/02_current_baselines/promptad_formal_baseline/pooled_rf_rgb_cls/checkpoint/overall-best.pt",
     )
     parser.add_argument("--signals", nargs="+", default=list(PUBLIC_SIGNALS), choices=list(PUBLIC_SIGNALS))
     parser.add_argument("--jsrs-by-signal", default=None)
-    parser.add_argument("--normal-sampling", choices=NORMAL_SAMPLING_CHOICES, default="per_frequency")
+    parser.add_argument(
+        "--normal-sampling",
+        choices=("per_frequency", "1shot", "2shot", "4shot"),
+        default="per_frequency",
+    )
     parser.add_argument("--max-test-normals", type=int, default=0)
     parser.add_argument("--max-abnormals", type=int, default=0)
-    parser.add_argument("--patch-layer", choices=["layer1", "layer2", "concat"], default="concat")
-    parser.add_argument("--coreset-ratio", type=float, default=1.0)
-    parser.add_argument("--coreset-method", choices=["random", "farthest"], default="random")
+    parser.add_argument("--coreset-ratio", type=float, default=0.5)
+    parser.add_argument("--coreset-method", choices=["random", "farthest"], default="farthest")
     parser.add_argument("--rowwise-coreset", action="store_true")
     parser.add_argument("--memory-mode", choices=["global_nn", "row_nn", "row_proto"], default="global_nn")
     parser.add_argument("--row-proto-zscore", action="store_true")
@@ -284,7 +392,7 @@ def main():
     parser.add_argument("--support-crop-ratio", type=float, default=0.03)
     parser.add_argument("--gallery-chunk-size", type=int, default=4096)
     parser.add_argument("--freq-window", type=int, default=-1)
-    parser.add_argument("--nn-topk", type=int, default=1)
+    parser.add_argument("--nn-topk", type=int, default=5)
     parser.add_argument("--nn-agg", choices=["mean", "weighted", "adaptive"], default="mean")
     parser.add_argument("--nn-weight-temp", type=float, default=0.05)
     parser.add_argument("--adaptive-sim-margin", type=float, default=0.02)
@@ -294,17 +402,52 @@ def main():
     parser.add_argument("--coherence-alpha", type=float, default=0.0)
     parser.add_argument("--coherence-top-ratio", type=float, default=0.05)
     parser.add_argument("--map-top-ratios", type=float, nargs="+", default=[0.01, 0.05, 0.1])
-    parser.add_argument("--paired-tta", choices=["none", "visionad_safe", "stft_shift_blur", "stft_time_shift_v2"], default="none")
-    parser.add_argument("--paired-tta-fusion", choices=["mean", "max"], default="mean")
+    parser.add_argument(
+        "--paired-tta",
+        choices=[
+            "none",
+            "visionad_safe",
+            "stft_shift_blur",
+            "stft_time_shift_v2",
+            "rf_spectral_structure_v1",
+            "rf_spectral_background_v1",
+            "rf_spectral_time_background_v1",
+            "rf_spectral_physics_v1",
+            "rf_spectral_physics_v2",
+            "stft_physical_time_v1",
+            "stft_physical_cfo_v1",
+            "stft_physical_nuisance_v1",
+        ],
+        default="stft_shift_blur",
+    )
+    parser.add_argument("--paired-tta-fusion", choices=["mean", "max"], default="max")
     parser.add_argument("--paired-tta-contrast", type=float, default=1.04)
     parser.add_argument("--paired-tta-brightness", type=float, default=1.0)
     parser.add_argument("--paired-tta-crop-ratio", type=float, default=0.02)
     parser.add_argument("--paired-tta-shift-px", type=int, default=4)
     parser.add_argument("--paired-tta-blur-ksize", type=int, default=3)
+    parser.add_argument("--paired-tta-background-noise-strength", type=float, default=3.0)
     parser.add_argument("--batch-size", type=int, default=96)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--gpu-id", type=int, default=0)
     parser.add_argument("--seed", type=int, default=111)
+    parser.add_argument(
+        "--support-seed",
+        type=int,
+        default=None,
+        help=(
+            "Optional independent seed for public-RF normal support selection; "
+            "the same value must be used by the CNN branch."
+        ),
+    )
+    parser.add_argument(
+        "--support-manifest",
+        default="",
+        help=(
+            "Shared public-RF support/test manifest. When supplied, the listed "
+            "test paths remain fixed across support replicates."
+        ),
+    )
     parser.add_argument("--resolution", type=int, default=400)
     parser.add_argument("--img-resize", type=int, default=240)
     parser.add_argument("--img-cropsize", type=int, default=240)
@@ -320,6 +463,11 @@ def main():
     parser.add_argument("--n_pro", type=int, default=3)
     parser.add_argument("--n_pro_ab", type=int, default=4)
     parser.add_argument("--use-cpu", type=int, default=0)
+    parser.add_argument(
+        "--support-reference-only",
+        action="store_true",
+        help="Build only the support-only calibration reference and skip test scoring.",
+    )
     args = parser.parse_args()
 
     if not (0.0 < args.coreset_ratio <= 1.0):
@@ -356,6 +504,45 @@ def main():
         args.freq_window = 0
     row_stats = build_frequency_row_stats(patchcore_gallery, gallery_rows, args, model.grid_size[0]) if args.freq_zscore else None
     row_prototypes = build_row_prototypes(patchcore_gallery, gallery_rows, model.grid_size[0]) if args.memory_mode == "row_proto" else None
+    if args.support_reference_only:
+        reference, names = support_reference_scores(
+            model,
+            train_loader,
+            patchcore_gallery,
+            gallery_rows,
+            gallery_cols,
+            args,
+            device,
+            row_stats,
+            row_prototypes,
+            paired_tta_galleries,
+        )
+        out_root = Path(args.output_root)
+        reference_root = out_root / "support_reference"
+        reference_root.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(
+            reference_root / "public_rf.npz",
+            vit_scores=reference,
+            names=names,
+        )
+        (out_root / "support_reference_protocol.json").write_text(
+            json.dumps(
+                {
+                    "method": "public_rf_vit_patchcore_gallery_cls",
+                    "support_only": True,
+                    "reference_views": ["time_shift_up_large", "time_shift_down_large"],
+                    "selected_normal_count": len(train_loader.dataset),
+                    "support_seed": args.support_seed,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        print(f"wrote support references under {reference_root}")
+        return
+
     rows = evaluate(
         model,
         patchcore_gallery,
@@ -377,8 +564,12 @@ def main():
         "method": "public_rf_vit_patchcore_gallery_cls",
         "checkpoint": args.checkpoint,
         "normal_sampling": args.normal_sampling,
+        "support_seed": args.support_seed,
+        "support_manifest": args.support_manifest,
+        "support_manifest_sha256": getattr(args, "support_manifest_sha256", None),
+        "test_normal_paths_sha256": getattr(args, "test_normal_paths_sha256", None),
         "jsrs_by_signal": parse_jsrs_by_signal(args.jsrs_by_signal),
-        "patch_layer": args.patch_layer,
+        "patch_layer": "concat",
         "coreset_ratio": args.coreset_ratio,
         "coreset_method": args.coreset_method,
         "rowwise_coreset": bool(args.rowwise_coreset),
@@ -405,6 +596,7 @@ def main():
         "paired_tta_crop_ratio": args.paired_tta_crop_ratio,
         "paired_tta_shift_px": args.paired_tta_shift_px,
         "paired_tta_blur_ksize": args.paired_tta_blur_ksize,
+        "paired_tta_background_noise_strength": args.paired_tta_background_noise_strength,
         "selected_normal_count": len(train_loader.dataset),
         "gallery_patch_count": int(patchcore_gallery.shape[0]),
         "gallery_feature_dim": int(patchcore_gallery.shape[1]),
@@ -422,7 +614,7 @@ def main():
         "",
         f"- checkpoint: `{args.checkpoint}`",
         f"- normal sampling: `{args.normal_sampling}`",
-        f"- patch layer: `{args.patch_layer}`",
+        "- patch layer: `concat`",
         f"- support augment: `{args.support_augment}`",
         f"- paired TTA: `{args.paired_tta}`",
         f"- paired TTA fusion: `{args.paired_tta_fusion}`",

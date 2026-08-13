@@ -41,7 +41,10 @@ def fmt(value):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--root", default="analysis_outputs/20260706_sampling_shot_ablation")
+    parser.add_argument(
+        "--root",
+        default="analysis_outputs/20260725_confidence_gate_sampling_ablation",
+    )
     parser.add_argument("--write-readme", action="store_true")
     args = parser.parse_args()
 
@@ -50,13 +53,15 @@ def main():
     for sampling in SAMPLINGS:
         base = root / sampling
         self_vit = load_json(base / "self_vit" / "summary.json")
-        self_cnn = load_json(base / "self_cnn" / "summary.json")
+        self_cnn = load_json(base / "self_aux_cnn" / "summary.json")
         self_fusion = load_json(base / "self_fusion" / "summary.json")
         public_vit = load_json(base / "public_vit" / "summary.json")
-        public_cnn = load_json(base / "public_cnn" / "summary.json")
+        public_cnn = load_json(base / "public_aux_cnn" / "summary.json")
         public_fusion = load_json(base / "public_fusion" / "summary.json")
         spectrum_vit = load_json(base / "spectrum_vit" / "summary.json")
-        spectrum_cnn = load_json(base / "spectrum_cnn" / "summary.json")
+        spectrum_cnn = load_json(
+            base / "spectrum_aux_cnn" / "summary.json"
+        )
         spectrum_fusion = load_json(base / "spectrum_fusion" / "summary.json")
         rows.append(
             {
@@ -67,13 +72,13 @@ def main():
                 "spectrum_available": bool(spectrum_vit and spectrum_cnn and spectrum_fusion),
                 "self_vit_auc": metric(self_vit, "vit_patchcore_max_auc"),
                 "self_cnn_auc": self_cnn.get("image_auroc_macro", "") if self_cnn else "",
-                "self_calibrated_auc": metric(self_fusion, "normal_calibrated_confidence_or_auc"),
+                "self_confidence_gated_auc": metric(self_fusion, "confidence_gated_auc"),
                 "public_vit_auc": metric(public_vit, "vit_patchcore_max_auc"),
                 "public_cnn_auc": public_cnn.get("image_auroc_macro", "") if public_cnn else "",
-                "public_calibrated_auc": metric(public_fusion, "normal_calibrated_confidence_or_auc"),
+                "public_confidence_gated_auc": metric(public_fusion, "confidence_gated_auc"),
                 "spectrum_vit_auc": metric(spectrum_vit, "clip_vit_nn_max_auc"),
                 "spectrum_cnn_auc": spectrum_cnn.get("image_auroc_macro", "") if spectrum_cnn else "",
-                "spectrum_calibrated_auc": metric(spectrum_fusion, "normal_calibrated_confidence_or_auc"),
+                "spectrum_confidence_gated_auc": metric(spectrum_fusion, "confidence_gated_auc"),
             }
         )
 
@@ -87,15 +92,15 @@ def main():
     lines = [
         "# Normal Support Sampling Ablation",
         "",
-        "| sampling | self normals | self ViT | self CNN | self calibrated | public normals | public ViT | public CNN | public calibrated |",
+        "| sampling | self normals | self ViT | self CNN | self confidence gate | public normals | public ViT | public CNN | public confidence gate |",
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in rows:
         lines.append(
             f"| {row['sampling']} | {row['self_selected_normals']} | "
-            f"{fmt(row['self_vit_auc'])} | {fmt(row['self_cnn_auc'])} | {fmt(row['self_calibrated_auc'])} | "
+            f"{fmt(row['self_vit_auc'])} | {fmt(row['self_cnn_auc'])} | {fmt(row['self_confidence_gated_auc'])} | "
             f"{row['public_selected_normals']} | {fmt(row['public_vit_auc'])} | "
-            f"{fmt(row['public_cnn_auc'])} | {fmt(row['public_calibrated_auc'])} |"
+            f"{fmt(row['public_cnn_auc'])} | {fmt(row['public_confidence_gated_auc'])} |"
         )
     lines.extend(
         [

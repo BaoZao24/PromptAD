@@ -1,13 +1,16 @@
 #!/usr/bin/env python
-"""Greedy GPU scheduler for the normal-support sampling ablation.
+"""Greedy GPU scheduler for the historical batch-gate sampling ablation.
 
-Runs 4 samplings x 4 independent GPU jobs + 2 CPU fusion jobs each.
+Runs 4 samplings x 4 independent GPU jobs + 2 CPU fusion jobs each.  The
+fusion jobs explicitly request the legacy transductive gate; the formal paper
+pipeline uses the separate safe support-only evaluator with normal references.
 Pipelines the long public_vit jobs across GPUs 0/2/3 to minimise wall time.
 Idempotent: skips any job whose output marker (summary.json) already exists.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -17,12 +20,22 @@ from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
 from queue import Queue
 
+from datasets.rf_target import (
+    RF_JSR_BY_SIGNAL as JSR_BY_SIGNAL,
+    RF_SCENES as SCENES,
+    RF_TARGET_SIGNALS as SIGNALS,
+    collect_rf_target_samples as collect_samples,
+)
+from utils.rf_scene_support import ensure_rf_target_scene_manifest
+
+
 GPUS = [0, 2, 3]
-ROOT = Path("analysis_outputs/20260706_sampling_shot_ablation")
+DEFAULT_ROOT = Path("analysis_outputs/20260725_confidence_gate_sampling_ablation")
+ROOT = DEFAULT_ROOT
 SAMPLINGS = ["per_frequency", "1shot", "2shot", "4shot"]
 PUB_CKPT = (
-    "analysis_outputs/90_rejected_or_aborted/20260706_cleanup_old_results/"
-    "20260627_method_funnel/runs/pooled_rf_rgb/cls/checkpoint/overall-best.pt"
+    "analysis_outputs/02_current_baselines/promptad_formal_baseline/"
+    "pooled_rf_rgb_cls/checkpoint/overall-best.pt"
 )
 
 # ---- job definitions ---------------------------------------------------------
@@ -35,8 +48,8 @@ def self_vit_cmd(s: str, base: Path) -> list[str]:
     return [
         "python", "tools/eval_cls_vit_patchcore_gallery.py",
         "--output-root", str(base / "self_vit"),
+        "--support-manifest", str(base / "support_manifest.json"),
         "--normal-sampling", s,
-        "--patch-layer", "concat",
         "--coreset-method", "farthest",
         "--coreset-ratio", "0.5",
         "--nn-topk", "5",
@@ -47,12 +60,12 @@ def self_vit_cmd(s: str, base: Path) -> list[str]:
     ]
 
 
-def self_cnn_cmd(s: str, base: Path) -> list[str]:
+def self_aux_cnn_cmd(s: str, base: Path) -> list[str]:
     return [
-        "python", "tools/eval_patchcore_cls.py",
+        "python", "tools/eval_cls_aux_cnn_gallery.py",
         "--protocol", "rf_target",
-        "--rf-train-mode", "pooled",
-        "--output-root", str(base / "self_cnn"),
+        "--support-manifest", str(base / "support_manifest.json"),
+        "--output-root", str(base / "self_aux_cnn"),
         "--normal-sampling", s,
         "--batch-size", "32",
         "--gpu-id", "%GPU%",
@@ -65,7 +78,6 @@ def public_vit_cmd(s: str, base: Path) -> list[str]:
         "--output-root", str(base / "public_vit"),
         "--normal-sampling", s,
         "--checkpoint", PUB_CKPT,
-        "--patch-layer", "concat",
         "--coreset-method", "farthest",
         "--coreset-ratio", "0.5",
         "--nn-topk", "5",
@@ -76,11 +88,11 @@ def public_vit_cmd(s: str, base: Path) -> list[str]:
     ]
 
 
-def public_cnn_cmd(s: str, base: Path) -> list[str]:
+def public_aux_cnn_cmd(s: str, base: Path) -> list[str]:
     return [
-        "python", "tools/eval_patchcore_cls.py",
+        "python", "tools/eval_cls_aux_cnn_gallery.py",
         "--protocol", "public_rf",
-        "--output-root", str(base / "public_cnn"),
+        "--output-root", str(base / "public_aux_cnn"),
         "--normal-sampling", s,
         "--batch-size", "32",
         "--gpu-id", "%GPU%",
@@ -92,7 +104,8 @@ def self_fusion_cmd(s: str, base: Path) -> list[str]:
         "python", "tools/eval_cls_dual_visual_evidence_fusion.py",
         "--protocol", "rf_target",
         "--vit-score-dir", str(base / "self_vit" / "scores"),
-        "--cnn-score-dir", str(base / "self_cnn" / "scores"),
+        "--cnn-score-dir", str(base / "self_aux_cnn" / "scores"),
+        "--gate-protocol", "transductive",
         "--output-root", str(base / "self_fusion"),
     ]
 
@@ -102,7 +115,8 @@ def public_fusion_cmd(s: str, base: Path) -> list[str]:
         "python", "tools/eval_cls_dual_visual_evidence_fusion.py",
         "--protocol", "public_rf",
         "--vit-score-dir", str(base / "public_vit" / "scores"),
-        "--cnn-score-dir", str(base / "public_cnn" / "scores"),
+        "--cnn-score-dir", str(base / "public_aux_cnn" / "scores"),
+        "--gate-protocol", "transductive",
         "--output-root", str(base / "public_fusion"),
     ]
 
@@ -113,17 +127,26 @@ def build_jobs():
     for s in SAMPLINGS:
         base = ROOT / s
         base.mkdir(parents=True, exist_ok=True)
+        ensure_rf_target_scene_manifest(
+            base / "support_manifest.json",
+            collect_samples=collect_samples,
+            signals=SIGNALS,
+            scenes=SCENES,
+            jsr_by_signal=JSR_BY_SIGNAL,
+            normal_sampling=s,
+            seed=111,
+        )
         gpu_jobs.append(("self_vit", s, self_vit_cmd(s, base)))
-        gpu_jobs.append(("self_cnn", s, self_cnn_cmd(s, base)))
+        gpu_jobs.append(("self_aux_cnn", s, self_aux_cnn_cmd(s, base)))
         gpu_jobs.append(("public_vit", s, public_vit_cmd(s, base)))
-        gpu_jobs.append(("public_cnn", s, public_cnn_cmd(s, base)))
+        gpu_jobs.append(("public_aux_cnn", s, public_aux_cnn_cmd(s, base)))
         cpu_jobs.append((
             "self_fusion", s, self_fusion_cmd(s, base),
-            [f"{s}/self_vit", f"{s}/self_cnn"],
+            [f"{s}/self_vit", f"{s}/self_aux_cnn"],
         ))
         cpu_jobs.append((
             "public_fusion", s, public_fusion_cmd(s, base),
-            [f"{s}/public_vit", f"{s}/public_cnn"],
+            [f"{s}/public_vit", f"{s}/public_aux_cnn"],
         ))
     return gpu_jobs, cpu_jobs
 
@@ -141,6 +164,13 @@ def log_path(name: str) -> Path:
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output-root", default="")
+    args = parser.parse_args()
+
+    global ROOT
+    ROOT = Path(args.output_root) if args.output_root else DEFAULT_ROOT
+
     gpu_jobs, cpu_jobs = build_jobs()
 
     gpu_q: Queue = Queue()
@@ -203,7 +233,12 @@ def main():
         return cb
 
     # Submit GPU jobs in LPT-ish order: public_vit (longest) first, then the rest.
-    priority = {"public_vit": 0, "self_vit": 1, "self_cnn": 2, "public_cnn": 3}
+    priority = {
+        "public_vit": 0,
+        "self_vit": 1,
+        "self_aux_cnn": 2,
+        "public_aux_cnn": 3,
+    }
     gpu_jobs_sorted = sorted(gpu_jobs, key=lambda j: (priority[j[0]], j[1]))
 
     for role, s, cmd in gpu_jobs_sorted:
@@ -252,7 +287,14 @@ def main():
     # final table of markers
     print(f"\n[{ts()}] === MARKERS ===", flush=True)
     for s in SAMPLINGS:
-        for role in ["self_vit", "self_cnn", "self_fusion", "public_vit", "public_cnn", "public_fusion"]:
+        for role in [
+            "self_vit",
+            "self_aux_cnn",
+            "self_fusion",
+            "public_vit",
+            "public_aux_cnn",
+            "public_fusion",
+        ]:
             name = f"{s}/{role}"
             mk = marker_path(name)
             print(f"  {name}: {'OK' if mk.exists() else 'MISSING'}", flush=True)

@@ -1,0 +1,77 @@
+{
+  "protocol_name": "ofdma_target_scene_coldstart_v2_realistic",
+  "protocol_version": 2,
+  "base_seed": 111,
+  "simulator_root": "/mnt/data/wangbei/data/ofdma-spectrum-anomalies-simulation",
+  "output_root": "/mnt/data/wangbei/data/ofdma-target-scene-coldstart-v2-realistic",
+  "scene_counts": {
+    "validation": 5,
+    "test": 30
+  },
+  "observations_per_scene": {
+    "normal_support": 4,
+    "normal_test": 100,
+    "anomaly_test_per_type": 20
+  },
+  "jammer_types": [
+    "barrage",
+    "deceptive",
+    "pilot",
+    "sweep",
+    "random_hop"
+  ],
+  "sensing_units": 21,
+  "shot_protocol": [
+    1,
+    2,
+    4
+  ],
+  "normal_context": {
+    "min_legitimate_transmitters": 3,
+    "max_legitimate_transmitters": 10,
+    "slot_utilization_min": 0.3,
+    "slot_utilization_max": 1.0,
+    "fixed_within_scene": [
+      "physical_scene",
+      "legitimate_transmitter_count",
+      "legitimate_transmitter_positions",
+      "sensing_unit_positions",
+      "base_legitimate_frequency_bands",
+      "legitimate_channel_frequency_response",
+      "normal_frequency_allocation",
+      "receiver_gain_baseline",
+      "noise_floor_baseline"
+    ],
+    "varied_per_observation": [
+      "legitimate_data_symbols",
+      "time_slot_activity",
+      "small_legitimate_tx_power_drift"
+    ]
+  },
+  "observation_variation": {
+    "frequency_band_shift_rb": 0,
+    "tx_power_jitter_db": 0.5,
+    "noise_power_jitter_db": 0.25,
+    "receiver_gain_jitter_db": 0.25
+  },
+  "jammer_power_dbm": {
+    "min": -5,
+    "max": 20,
+    "step": 5
+  },
+  "normalization": {
+    "policy": "fixed_official_dataset_range",
+    "min_db": -183.38843,
+    "max_db": 27.147293
+  },
+  "image_format": {
+    "dtype": "uint8",
+    "frequency_bins": 1320,
+    "time_bins": 70
+  },
+  "label_usage": {
+    "support": "normal_only",
+    "validation_anomaly_labels": "method_selection_only",
+    "test_anomaly_labels": "metrics_only"
+  }
+}

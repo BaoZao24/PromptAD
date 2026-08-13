@@ -150,6 +150,10 @@ def evaluate(model, eval_loaders, args, device):
             "vit_map_max_scores": map_max_np,
             "harmonic_text_vit_max": harmonic(text_np, map_max_np),
         }
+        if getattr(args, "support_manifest_sha256", ""):
+            payload["support_manifest_sha256"] = np.asarray(
+                args.support_manifest_sha256
+            )
         for ratio in args.map_top_ratios:
             key = f"{ratio:g}".replace(".", "p")
             values = np.asarray(ratio_scores[ratio], dtype=np.float32)
@@ -170,10 +174,18 @@ def parse_args():
     parser.add_argument("--formal-baseline-csv", default="")
     parser.add_argument("--checkpoint", default="")
     parser.add_argument("--signals", nargs="+", default=SIGNALS, choices=SIGNALS)
+    parser.add_argument("--scenes", nargs="+", default=SCENES, choices=SCENES)
+    parser.add_argument(
+        "--support-manifest",
+        default="",
+        help="Shared target-scene support manifest for the rf_target protocol.",
+    )
     parser.add_argument("--normal-sampling", choices=["first", *NORMAL_SAMPLING_CHOICES], default="per_frequency")
     parser.add_argument("--map-top-ratios", type=float, nargs="+", default=[0.01, 0.05, 0.1])
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--max-test-normals", type=int, default=0)
+    parser.add_argument("--max-abnormals", type=int, default=0)
     parser.add_argument("--gpu-id", type=int, default=0)
     parser.add_argument("--seed", type=int, default=111)
     parser.add_argument("--resolution", type=int, default=400)
@@ -212,10 +224,39 @@ def main():
     if args.checkpoint:
         load_checkpoint(model, args.checkpoint)
 
-    train_loader, train_samples = build_selected_train_loader(args)
-    build_gallery(model, train_loader, device)
+    if args.support_manifest:
+        # PromptAD's original text+ViT score is evaluated with the same
+        # target-scene support and temporally isolated test cells as the
+        # current method. Each scene gets its own normal gallery.
+        from tools.eval_cls_vit_patchcore_gallery import (
+            build_target_scene_eval_loaders,
+            build_target_scene_support_loader,
+            prepare_target_scene_manifest,
+        )
 
-    rows = evaluate(model, build_eval_loaders(args), args, device)
+        manifest = prepare_target_scene_manifest(args)
+        rows = []
+        train_samples = []
+        for scene in args.scenes:
+            train_loader, scene_samples = build_target_scene_support_loader(
+                manifest,
+                scene,
+                args,
+            )
+            build_gallery(model, train_loader, device)
+            rows.extend(
+                evaluate(
+                    model,
+                    build_target_scene_eval_loaders(manifest, scene, args),
+                    args,
+                    device,
+                )
+            )
+            train_samples.extend(scene_samples)
+    else:
+        train_loader, train_samples = build_selected_train_loader(args)
+        build_gallery(model, train_loader, device)
+        rows = evaluate(model, build_eval_loaders(args), args, device)
     rows = attach_formal_baseline(rows, args.formal_baseline_csv)
 
     out_root = Path(args.output_root)
@@ -226,6 +267,10 @@ def main():
     summary = {
         "method": "vit_patch_gallery_cls",
         "checkpoint": args.checkpoint,
+        "support_protocol": "target_scene" if args.support_manifest else "pooled",
+        "support_manifest": args.support_manifest or None,
+        "support_manifest_sha256": getattr(args, "support_manifest_sha256", None),
+        "num_cells": len(rows),
         "normal_sampling": args.normal_sampling,
         "selected_normal_count": len(train_samples),
         "selected_normals": [sample[0] for sample in train_samples],

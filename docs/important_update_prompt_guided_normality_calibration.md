@@ -79,8 +79,8 @@ Macro pixel AUROC:
 | textual only | 89.39 |
 | normal patch only | 89.16 |
 | add beta=0.25 | 90.14 |
-| gate beta=0.5 | 90.94 |
-| gate beta=0.25 | 91.53 |
+| confidence reweighting beta=0.5 | 90.94 |
+| confidence reweighting beta=0.25 | 91.53 |
 
 Best observed improvement:
 
@@ -91,7 +91,7 @@ Best observed improvement:
 
 Per-class pROC:
 
-| class | baseline | gate beta=0.25 | delta |
+| class | baseline | confidence reweighting beta=0.25 | delta |
 |---|---:|---:|---:|
 | burst | 98.04 | 98.17 | +0.13 |
 | chirp | 95.08 | 96.11 | +1.03 |
@@ -120,7 +120,7 @@ Prompt tells the model what kind of region is suspicious.
 Target normal gallery tells the model whether the region really deviates from normal RF spectrograms.
 ```
 
-The segmentation gate result is especially important because direct addition is weaker than gated fusion. That means the normal patch distance should not create anomalies by itself; it should strengthen prompt-suspicious regions.
+The segmentation confidence-reweighting result is especially important because direct addition is weaker than confidence reweighting. That means the normal patch distance should not create anomalies by itself; it should strengthen prompt-suspicious regions.
 
 ## Implementation
 

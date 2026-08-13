@@ -116,7 +116,6 @@ def main():
     patchcore_cmd = [
         sys.executable, "tools/eval_patchcore_cls.py",
         "--protocol", "rf_target",
-        "--rf-train-mode", "pooled",
         "--output-root", str(patchcore_root),
         "--gpu-id", str(args.gpu_id),
         "--seed", str(args.seed),

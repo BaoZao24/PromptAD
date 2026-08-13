@@ -1,0 +1,62 @@
+{
+  "protocol_name": "ofdma_target_scene_coldstart_v1",
+  "protocol_version": 1,
+  "base_seed": 111,
+  "simulator_root": "/mnt/data/wangbei/data/ofdma-spectrum-anomalies-simulation",
+  "output_root": "/mnt/data/wangbei/data/ofdma-target-scene-coldstart-v1",
+  "scene_counts": {
+    "validation": 5,
+    "test": 30
+  },
+  "observations_per_scene": {
+    "normal_support": 4,
+    "normal_test": 100,
+    "anomaly_test_per_type": 20
+  },
+  "jammer_types": [
+    "barrage",
+    "deceptive",
+    "pilot",
+    "sweep",
+    "random_hop"
+  ],
+  "sensing_units": 21,
+  "shot_protocol": [
+    1,
+    2,
+    4
+  ],
+  "normal_context": {
+    "min_legitimate_transmitters": 3,
+    "max_legitimate_transmitters": 10,
+    "slot_utilization_min": 0.3,
+    "slot_utilization_max": 1.0,
+    "fixed_within_scene": [
+      "legitimate_transmitter_count",
+      "legitimate_transmitter_positions",
+      "legitimate_transmitter_frequency_bands",
+      "legitimate_channel_frequency_response",
+      "sensing_unit_positions"
+    ],
+    "varied_per_observation": [
+      "legitimate_data_symbols",
+      "thermal_noise",
+      "time_slot_activity_within_fixed_frequency_bands"
+    ]
+  },
+  "normalization": {
+    "policy": "fixed_official_dataset_range",
+    "min_db": -183.38843,
+    "max_db": 27.147293
+  },
+  "image_format": {
+    "dtype": "uint8",
+    "frequency_bins": 1320,
+    "time_bins": 70
+  },
+  "label_usage": {
+    "support": "normal_only",
+    "validation_anomaly_labels": "method_selection_only",
+    "test_anomaly_labels": "metrics_only"
+  }
+}

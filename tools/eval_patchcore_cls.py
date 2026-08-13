@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import os
 import sys
@@ -30,13 +31,23 @@ import patchcore.common
 import patchcore.patchcore
 import patchcore.sampler
 
-from train_rf_target_pooled_universal import JSR_BY_SIGNAL, SCENES, collect_samples
+from datasets.rf_target import (
+    RF_JSR_BY_SIGNAL as JSR_BY_SIGNAL,
+    RF_SCENES as SCENES,
+    collect_rf_target_samples as collect_samples,
+)
+from tools.ofdma_fewshot_baseline_common import add_ofdma_args, load_sample_image, ofdma_jobs
 from utils.training_utils import setup_seed
 from utils.rf_frequency_sampling import (
     NORMAL_SAMPLING_CHOICES,
     maybe_select_one_per_frequency_band,
-    split_train_test_normals,
 )
+from utils.rf_scene_support import (
+    cell_entry,
+    ensure_rf_target_scene_manifest,
+    scene_support_entry,
+)
+from utils.public_rf_support import select_support_and_test_paths
 
 
 SPECTRUM_ROOT = REPO_ROOT / "datasets" / "spectrum"
@@ -48,6 +59,7 @@ PUBLIC_RF_JSRS = {
     "chirp": ("m40db", "m50db", "m55db"),
     "dsss": ("m30db", "m40db", "m50db"),
     "pulse": ("m30db", "m40db", "m50db"),
+    "deceptive": ("m10db", "m20db", "m30db"),
 }
 
 
@@ -80,7 +92,7 @@ class PatchCorePathDataset(Dataset):
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
-        image = Image.open(sample["path"]).convert("RGB")
+        image = load_sample_image(sample)
         image = self.transform_img(image)
         mask = torch.zeros([1, image.shape[1], image.shape[2]])
         return {
@@ -112,56 +124,6 @@ def bootstrap_support(items, args):
     return [items[int(index)] for index in indices]
 
 
-def top_ratio_score(maps, ratio):
-    flat = maps.reshape(maps.shape[0], -1)
-    k = max(1, int(round(flat.shape[1] * float(ratio))))
-    part = np.partition(flat, flat.shape[1] - k, axis=1)[:, -k:]
-    return part.mean(axis=1)
-
-
-def map_stats(segmentations):
-    maps = np.asarray(segmentations, dtype=np.float32)
-    if maps.ndim == 3:
-        pass
-    elif maps.ndim == 4 and maps.shape[1] == 1:
-        maps = maps[:, 0]
-    elif maps.ndim == 4 and maps.shape[-1] == 1:
-        maps = maps[..., 0]
-    else:
-        maps = maps.reshape(maps.shape[0], -1)
-    flat = maps.reshape(maps.shape[0], -1)
-    max_scores = flat.max(axis=1)
-    mean_scores = flat.mean(axis=1)
-    std_scores = flat.std(axis=1)
-    median_scores = np.median(flat, axis=1)
-    mad_scores = np.median(np.abs(flat - median_scores[:, None]), axis=1)
-    top001 = top_ratio_score(maps, 0.01)
-    top005 = top_ratio_score(maps, 0.05)
-    top010 = top_ratio_score(maps, 0.10)
-    concentration = (max_scores - mean_scores) / (std_scores + 1e-6)
-    top_contrast = (top001 - mean_scores) / (std_scores + 1e-6)
-    # The top 1% mean represents a small connected high-score region more
-    # robustly than a single interpolated map pixel.  MAD normalizes it using
-    # only the current image's background distribution.
-    # A small standard-deviation floor keeps a perfectly flat map with one
-    # interpolated spike from producing an unbounded confidence value.
-    robust_scale = np.maximum(1.4826 * mad_scores, 0.1 * std_scores)
-    top1pct_robust_z = (top001 - median_scores) / (robust_scale + 1e-6)
-    return {
-        "map_max": max_scores.astype(np.float32),
-        "map_mean": mean_scores.astype(np.float32),
-        "map_std": std_scores.astype(np.float32),
-        "map_median": median_scores.astype(np.float32),
-        "map_mad": mad_scores.astype(np.float32),
-        "map_top0p01": top001.astype(np.float32),
-        "map_top0p05": top005.astype(np.float32),
-        "map_top0p10": top010.astype(np.float32),
-        "map_concentration": concentration.astype(np.float32),
-        "map_top_contrast": top_contrast.astype(np.float32),
-        "map_top1pct_robust_z": top1pct_robust_z.astype(np.float32),
-    }
-
-
 def make_sample(path, label, category, name=None):
     return {
         "path": Path(path),
@@ -186,11 +148,40 @@ def public_normal_paths():
 
 def select_public_support_and_test_normals(args):
     normal_paths = public_normal_paths()
-    base_support_paths = maybe_select_one_per_frequency_band(normal_paths, args.normal_sampling)
-    # The test set must stay fixed across bootstrap replicas.
-    support_set = {str(p) for p in base_support_paths}
-    test_normal_paths = [p for p in normal_paths if str(p) not in support_set]
+    base_support_paths, test_normal_paths, manifest = select_support_and_test_paths(
+        normal_paths,
+        normal_sampling=args.normal_sampling,
+        seed=getattr(args, "seed", None),
+        manifest_path=getattr(args, "support_manifest", None) or None,
+    )
+    # The test set must stay fixed across bootstrap replicas.  If a manifest is
+    # supplied, its support/test split is authoritative for every visual
+    # baseline that imports this shared job builder.
     train_normal_paths = bootstrap_support(base_support_paths, args)
+    args.support_manifest_sha256 = (
+        manifest.get("support_paths_sha256")
+        if manifest is not None
+        else hashlib.sha256(
+            "\n".join(str(path) for path in base_support_paths).encode("utf-8")
+        ).hexdigest()
+    )
+    args.test_normal_paths_sha256 = (
+        manifest.get("test_paths_sha256")
+        if manifest is not None
+        else hashlib.sha256(
+            "\n".join(str(path) for path in test_normal_paths).encode("utf-8")
+        ).hexdigest()
+    )
+    args.support_policy = (
+        manifest.get("support_policy")
+        if manifest is not None
+        else str(args.normal_sampling)
+    )
+    args.per_frequency_k = (
+        int(manifest["per_frequency_k"])
+        if manifest is not None and manifest.get("per_frequency_k") is not None
+        else None
+    )
     return train_normal_paths, test_normal_paths
 
 
@@ -202,7 +193,10 @@ def public_rf_jobs(args):
     ]
 
     jobs = []
-    for signal in args.public_rf_signals:
+    signals = getattr(args, "public_rf_signals", None)
+    if signals is None:
+        signals = getattr(args, "rf_signals", tuple(PUBLIC_RF_JSRS))
+    for signal in signals:
         jsrs = PUBLIC_RF_JSRS[signal]
         for jsr in jsrs:
             normals = test_normal_paths[: args.max_test_normals] if args.max_test_normals > 0 else test_normal_paths
@@ -225,6 +219,8 @@ def public_rf_jobs(args):
                     "jsr": jsr,
                     "train_samples": train_samples,
                     "test_samples": test_samples,
+                    "support_policy": getattr(args, "support_policy", None),
+                    "per_frequency_k": getattr(args, "per_frequency_k", None),
                 }
             )
     return jobs
@@ -259,41 +255,30 @@ def spectrum_jobs(args):
     return jobs
 
 
-def collect_rf_target_cell(signal, scene, jsr, args):
-    train_raw = collect_samples(signal, scene, jsr, "train", k_shot=0)
-    train_samples = [
-        make_sample(sample[0], 0, f"{signal}_{scene}_{jsr}", f"{signal}-{scene}-{jsr}-{sample[3]}-{Path(sample[0]).stem}")
-        for sample in train_raw
-    ]
-    base_train_samples = maybe_select_one_per_frequency_band(
-        train_samples,
-        args.normal_sampling,
-        path_getter=lambda sample: sample["path"],
-    )
-    train_samples = bootstrap_support(base_train_samples, args)
-    exclude_support = getattr(args, "exclude_support_from_test", True)
-    support_paths = {str(sample["path"]) for sample in base_train_samples} if exclude_support else set()
-    test_raw = collect_samples(signal, scene, jsr, "test", k_shot=1, exclude_paths=support_paths)
+def collect_rf_target_scene_test_samples(signal, scene, jsr, manifest, args):
+    manifest_cell = cell_entry(manifest, signal, scene, jsr)
+    allowed_normal_paths = {
+        item["path"] for item in manifest_cell["test_normals"]
+    }
+    allowed_abnormal_paths = {
+        item["path"] for item in manifest_cell["test_abnormals"]
+    }
+    test_raw = collect_samples(signal, scene, jsr, "test", k_shot=1)
     test_samples = [
-        make_sample(sample[0], sample[2], f"{signal}_{scene}_{jsr}", f"{signal}-{scene}-{jsr}-{sample[3]}-{Path(sample[0]).stem}")
+        make_sample(
+            sample[0],
+            sample[2],
+            f"{signal}_{scene}_{jsr}",
+            f"{signal}-{scene}-{jsr}-{sample[3]}-{Path(sample[0]).stem}",
+        )
         for sample in test_raw
-    ]
-    if args.max_test_normals > 0:
-        normals = [s for s in test_samples if s["label"] == 0][: args.max_test_normals]
-        abnormals = [s for s in test_samples if s["label"] == 1]
-        test_samples = normals + abnormals
-    if args.max_abnormals > 0:
-        normals = [s for s in test_samples if s["label"] == 0]
-        abnormals = [s for s in test_samples if s["label"] == 1][: args.max_abnormals]
-        test_samples = normals + abnormals
-    return train_samples, test_samples
-
-
-def collect_rf_target_test_samples(signal, scene, jsr, support_paths, args):
-    test_raw = collect_samples(signal, scene, jsr, "test", k_shot=1, exclude_paths=support_paths)
-    test_samples = [
-        make_sample(sample[0], sample[2], f"{signal}_{scene}_{jsr}", f"{signal}-{scene}-{jsr}-{sample[3]}-{Path(sample[0]).stem}")
-        for sample in test_raw
+        if (
+            (int(sample[2]) == 0 and str(sample[0]) in allowed_normal_paths)
+            or (
+                int(sample[2]) == 1
+                and str(sample[0]) in allowed_abnormal_paths
+            )
+        )
     ]
     if args.max_test_normals > 0:
         normals = [s for s in test_samples if s["label"] == 0][: args.max_test_normals]
@@ -306,58 +291,49 @@ def collect_rf_target_test_samples(signal, scene, jsr, support_paths, args):
     return test_samples
 
 
+def prepare_rf_target_scene_manifest(args):
+    manifest_path = (
+        Path(args.support_manifest)
+        if args.support_manifest
+        else Path(args.output_root) / "support_manifest.json"
+    )
+    manifest = ensure_rf_target_scene_manifest(
+        manifest_path,
+        collect_samples=collect_samples,
+        signals=args.rf_signals,
+        scenes=args.rf_scenes,
+        jsr_by_signal=JSR_BY_SIGNAL,
+        normal_sampling=args.normal_sampling,
+        seed=args.seed,
+    )
+    args.support_manifest = str(manifest_path)
+    args.support_manifest_sha256 = manifest["manifest_sha256"]
+    return manifest
+
+
 def rf_target_jobs(args):
     jobs = []
-    if args.rf_train_mode == "pooled":
-        pooled_train_raw = []
-        for signal in args.rf_signals:
-            for scene in args.rf_scenes:
-                for jsr in JSR_BY_SIGNAL[signal]:
-                    cell_train_raw = collect_samples(signal, scene, jsr, "train", k_shot=0)
-                    if args.normal_sampling == "split_75_25":
-                        cell_train_raw, _ = split_train_test_normals(
-                            cell_train_raw,
-                            train_ratio=0.75,
-                            seed=args.seed,
-                            path_getter=lambda sample: sample[0],
-                        )
-                    pooled_train_raw.extend(cell_train_raw)
-        if args.normal_sampling == "split_75_25":
-            base_selected_train_raw = pooled_train_raw
-        else:
-            base_selected_train_raw = maybe_select_one_per_frequency_band(
-                pooled_train_raw,
-                args.normal_sampling,
-                path_getter=lambda sample: sample[0],
-            )
-        if args.max_pooled_train_normals > 0:
-            base_selected_train_raw = base_selected_train_raw[: args.max_pooled_train_normals]
-        selected_train_raw = bootstrap_support(base_selected_train_raw, args)
+    manifest = prepare_rf_target_scene_manifest(args)
+    for scene in args.rf_scenes:
+        support = scene_support_entry(manifest, scene)["support"]
         train_samples = [
-            make_sample(sample[0], 0, "rf_target_pooled", f"pooled-train-{sample[4]}-{Path(sample[0]).stem}")
-            for sample in selected_train_raw
+            make_sample(
+                item["path"],
+                0,
+                f"rf_target_scene_{scene}",
+                f"scene-support-{scene}-{Path(item['path']).stem}",
+            )
+            for item in support
         ]
-        support_paths = {str(sample[0]) for sample in base_selected_train_raw}
         for signal in args.rf_signals:
-            for scene in args.rf_scenes:
-                for jsr in JSR_BY_SIGNAL[signal]:
-                    test_samples = collect_rf_target_test_samples(signal, scene, jsr, support_paths, args)
-                    jobs.append(
-                        {
-                            "dataset": "rf_target",
-                            "category": signal,
-                            "scene": scene,
-                            "jsr": jsr,
-                            "train_samples": train_samples,
-                            "test_samples": test_samples,
-                        }
-                    )
-        return jobs
-
-    for signal in args.rf_signals:
-        for scene in args.rf_scenes:
             for jsr in JSR_BY_SIGNAL[signal]:
-                train_samples, test_samples = collect_rf_target_cell(signal, scene, jsr, args)
+                test_samples = collect_rf_target_scene_test_samples(
+                    signal,
+                    scene,
+                    jsr,
+                    manifest,
+                    args,
+                )
                 jobs.append(
                     {
                         "dataset": "rf_target",
@@ -424,21 +400,23 @@ def predict_job(model, job, args):
         num_workers=args.num_workers,
         pin_memory=True,
     )
-    scores, segmentations, labels, _ = model.predict(test_loader)
+    scores, _segmentations, labels, _ = model.predict(test_loader)
     scores = np.asarray(scores, dtype=np.float32)
     labels = np.asarray(labels, dtype=np.int32)
-    stats = map_stats(segmentations) if args.save_map_stats else {}
 
     score_dir = Path(args.output_root) / "scores"
     score_dir.mkdir(parents=True, exist_ok=True)
     stem = f"{job['dataset']}-{job['category']}-{job['scene']}-{job['jsr']}".replace("/", "_")
-    np.savez_compressed(
-        score_dir / f"{stem}-scores.npz",
-        scores=scores,
-        labels=labels,
-        image_paths=np.asarray([str(s["path"]) for s in job["test_samples"]]),
-        **stats,
-    )
+    score_payload = {
+        "scores": scores,
+        "labels": labels,
+        "image_paths": np.asarray([str(s["path"]) for s in job["test_samples"]]),
+    }
+    if getattr(args, "support_manifest_sha256", ""):
+        score_payload["support_manifest_sha256"] = np.asarray(
+            args.support_manifest_sha256
+        )
+    np.savez_compressed(score_dir / f"{stem}-scores.npz", **score_payload)
     if args.save_map_match:
         map_dir = Path(args.output_root) / "maps"
         map_dir.mkdir(parents=True, exist_ok=True)
@@ -470,7 +448,8 @@ def run_job(job, args, device):
     if not any(s["label"] == 1 for s in job["test_samples"]):
         raise RuntimeError(f"No abnormal samples for {job['dataset']} {job['category']} {job['scene']} {job['jsr']}")
 
-    return predict_job(fit_patchcore(job["train_samples"], args, device), job, args)
+    model = fit_patchcore(job["train_samples"], args, device)
+    return predict_job(model, job, args)
 
 
 def train_signature(job):
@@ -534,7 +513,11 @@ def append_average(rows):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--protocol", choices=["spectrum", "public_rf", "rf_target"], required=True)
+    parser.add_argument(
+        "--protocol",
+        choices=["spectrum", "public_rf", "rf_target", "ofdma"],
+        required=True,
+    )
     parser.add_argument("--output-root", default="analysis_outputs/20260702_patchcore_cls")
     parser.add_argument("--gpu-id", type=int, default=0)
     parser.add_argument("--use-cpu", action="store_true")
@@ -553,7 +536,11 @@ def parse_args():
     parser.add_argument("--coreset-percentage", type=float, default=0.1)
     parser.add_argument("--faiss-num-workers", type=int, default=8)
     parser.add_argument("--normal-sampling", choices=NORMAL_SAMPLING_CHOICES, default="per_frequency")
-    parser.add_argument("--max-pooled-train-normals", type=int, default=0)
+    parser.add_argument(
+        "--support-manifest",
+        default="",
+        help="Shared target-scene support manifest for the rf_target protocol.",
+    )
     parser.add_argument("--max-train-normals", type=int, default=0)
     parser.add_argument("--max-test-normals", type=int, default=0)
     parser.add_argument("--max-abnormals", type=int, default=0)
@@ -562,9 +549,7 @@ def parse_args():
     parser.add_argument("--rf-signals", nargs="+", default=list(JSR_BY_SIGNAL.keys()), choices=list(JSR_BY_SIGNAL.keys()))
     parser.add_argument("--public-rf-signals", nargs="+", default=list(PUBLIC_RF_JSRS.keys()), choices=list(PUBLIC_RF_JSRS.keys()))
     parser.add_argument("--rf-scenes", nargs="+", default=SCENES, choices=SCENES)
-    parser.add_argument("--rf-train-mode", choices=["pooled", "per_cell"], default="pooled")
     parser.add_argument("--support-bootstrap-seed", type=int, default=-1)
-    parser.add_argument("--save-map-stats", action="store_true")
     parser.add_argument("--save-map-match", nargs="*", default=[])
     parser.add_argument(
         "--map-only-cell",
@@ -572,6 +557,7 @@ def parse_args():
         default=[],
         help="Keep only cells encoded as signal:scene:jsr after building the shared gallery.",
     )
+    add_ofdma_args(parser)
     return parser.parse_args()
 
 
@@ -585,6 +571,8 @@ def main():
         jobs = spectrum_jobs(args)
     elif args.protocol == "public_rf":
         jobs = public_rf_jobs(args)
+    elif args.protocol == "ofdma":
+        jobs = ofdma_jobs(args)
     else:
         jobs = rf_target_jobs(args)
 
@@ -606,7 +594,12 @@ def main():
     summary = {
         "method": "patchcore_official",
         "protocol": args.protocol,
-        "rf_train_mode": args.rf_train_mode if args.protocol == "rf_target" else None,
+        "support_protocol": "target_scene" if args.protocol == "rf_target" else None,
+        "support_manifest": getattr(args, "support_manifest", "") or None,
+        "support_manifest_sha256": getattr(args, "support_manifest_sha256", None),
+        "test_normal_paths_sha256": getattr(args, "test_normal_paths_sha256", None),
+        "support_policy": getattr(args, "support_policy", None),
+        "per_frequency_k": getattr(args, "per_frequency_k", None),
         "normal_sampling": args.normal_sampling,
         "num_train_normal": int(rows[0]["num_train_normal"]) if rows else 0,
         "backbone": args.backbone,

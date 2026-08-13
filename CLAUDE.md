@@ -44,15 +44,20 @@ python run_seg.py  # pixel-level for all classes
 - `visa` - VisA dataset
 - `spectrum` - Spectrum dataset
 - `sample` - Sample dataset
-- `deceptive_signal` - Deceptive(stealthy) signal detection (共用 normal 训练数据，测试数据在 /mnt/data/wangbei/data/datasets/deceptive/)
-- `burst_signal` - Burst signal detection (共用 normal 训练数据，测试数据在 /mnt/data/wangbei/data/datasets/burst/)
+- `deceptive_signal` - 已退役的兼容入口；不属于当前正式 self-RF 协议
+- `burst_signal` / `chirp_signal` / `dsss_signal` / `pulse_signal` /
+  `wideband_pulse` - self-RF 目标域数据
 
-场景分类均为：BinBo, CaoChang, ShiJianGuangChang, TiYuGuan
+场景为：WeaponMuseum_spectrum、Playground_spectrum、TimeSquare_spectrum、
+Gymnasium_spectrum。
 
 ### Data Paths
-- 训练数据 (normal): `/mnt/data/wangbei/data/datasets/normal/{scene}/normal/`
-- Deceptive 测试: `/mnt/data/wangbei/data/datasets/deceptive/{scene}/{normal,abnormal,groundtruth}/0db/`
-- Burst 测试: `/mnt/data/wangbei/data/datasets/burst/{scene}/{normal,abnormal,groundtruth}/{m10db,m20db,m30db}/`
+
+- self-RF 单元：`/mnt/data/wangbei/data/datasets/{signal}/{scene}/{normal,abnormal,groundtruth}/{jsr}/`
+- 不存在独立的 `/datasets/normal/{scene}`。
+- 正式协议使用 `datasets/rf_target.py` 和 target-scene manifest：
+  每个场景从 `t=0–4000` 的正常图建立 support；测试只保留
+  `t_start >= 4000` 的正常图和异常图，避免时间窗重叠。
 
 ### Common Arguments
 - `--dataset`: dataset name (mvtec/visa/spectrum/sample/dcase2025)

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Run STFT time-shift TTA v2 ablation for the ViT branch.
 
-This reuses existing CNN local-gallery scores from the sampling ablation and
+This reuses current CNN scores from the sampling ablation and
 only recomputes the ViT score files affected by paired TTA.
 """
 
@@ -19,8 +19,8 @@ from queue import Queue
 
 
 GPUS = [0, 2, 3]
-ROOT = Path("analysis_outputs/20260709_tta_time_shift_v2")
-BASE = Path("analysis_outputs/20260706_sampling_shot_ablation")
+ROOT = Path("analysis_outputs/20260725_confidence_gate_tta_time_shift_v2")
+BASE = Path("analysis_outputs/20260725_confidence_gate_sampling_ablation")
 PUB_CKPT = (
     "analysis_outputs/90_rejected_or_aborted/20260706_cleanup_old_results/"
     "20260627_method_funnel/runs/pooled_rf_rgb/cls/checkpoint/overall-best.pt"
@@ -31,8 +31,9 @@ def self_vit_cmd() -> list[str]:
     return [
         "python", "tools/eval_cls_vit_patchcore_gallery.py",
         "--output-root", str(ROOT / "per_frequency" / "self_vit"),
+        "--support-manifest",
+        str(BASE / "per_frequency" / "support_manifest.json"),
         "--normal-sampling", "per_frequency",
-        "--patch-layer", "concat",
         "--coreset-method", "farthest",
         "--coreset-ratio", "0.5",
         "--nn-topk", "5",
@@ -50,7 +51,6 @@ def public_vit_cmd() -> list[str]:
         "--output-root", str(ROOT / "per_frequency" / "public_vit"),
         "--normal-sampling", "per_frequency",
         "--checkpoint", PUB_CKPT,
-        "--patch-layer", "concat",
         "--coreset-method", "farthest",
         "--coreset-ratio", "0.5",
         "--nn-topk", "5",
@@ -67,7 +67,6 @@ def spectrum_vit_cmd() -> list[str]:
         "python", "tools/eval_cls_spectrum_vit_nn_gallery.py",
         "--output-root", str(ROOT / "4shot" / "spectrum_vit"),
         "--normal-sampling", "4shot",
-        "--patch-layer", "concat",
         "--coreset-method", "farthest",
         "--coreset-ratio", "0.5",
         "--nn-topk", "5",
@@ -84,7 +83,7 @@ def self_fusion_cmd() -> list[str]:
         "python", "tools/eval_cls_dual_visual_evidence_fusion.py",
         "--protocol", "rf_target",
         "--vit-score-dir", str(ROOT / "per_frequency" / "self_vit" / "scores"),
-        "--cnn-score-dir", str(BASE / "per_frequency" / "self_cnn" / "scores"),
+        "--cnn-score-dir", str(BASE / "per_frequency" / "self_aux_cnn" / "scores"),
         "--output-root", str(ROOT / "per_frequency" / "self_fusion"),
     ]
 
@@ -94,7 +93,7 @@ def public_fusion_cmd() -> list[str]:
         "python", "tools/eval_cls_dual_visual_evidence_fusion.py",
         "--protocol", "public_rf",
         "--vit-score-dir", str(ROOT / "per_frequency" / "public_vit" / "scores"),
-        "--cnn-score-dir", str(BASE / "per_frequency" / "public_cnn" / "scores"),
+        "--cnn-score-dir", str(BASE / "per_frequency" / "public_aux_cnn" / "scores"),
         "--output-root", str(ROOT / "per_frequency" / "public_fusion"),
     ]
 
@@ -104,8 +103,7 @@ def spectrum_fusion_cmd() -> list[str]:
         "python", "tools/eval_cls_dual_visual_evidence_fusion.py",
         "--protocol", "spectrum",
         "--vit-score-dir", str(ROOT / "4shot" / "spectrum_vit" / "scores"),
-        "--vit-key", "clip_vit_nn_max_scores",
-        "--cnn-score-dir", str(BASE / "4shot" / "spectrum_cnn" / "scores"),
+        "--cnn-score-dir", str(BASE / "4shot" / "spectrum_aux_cnn" / "scores"),
         "--output-root", str(ROOT / "4shot" / "spectrum_fusion"),
     ]
 
@@ -227,7 +225,7 @@ def summarize() -> None:
             "tta": "stft_time_shift_v2",
             "shift_px": 8,
             "vit_auc": read_metric(ROOT / "per_frequency" / "self_vit" / "summary.json", "vit_patchcore_max_auc_macro"),
-            "calibrated_auc": read_macro_metric(ROOT / "per_frequency" / "self_fusion" / "summary.json", "normal_calibrated_confidence_or_auc"),
+            "confidence_gated_auc": read_macro_metric(ROOT / "per_frequency" / "self_fusion" / "summary.json", "confidence_gated_auc"),
         },
         {
             "dataset": "public_rf",
@@ -235,7 +233,7 @@ def summarize() -> None:
             "tta": "stft_time_shift_v2",
             "shift_px": 8,
             "vit_auc": read_metric(ROOT / "per_frequency" / "public_vit" / "summary.json", "vit_patchcore_max_auc_macro"),
-            "calibrated_auc": read_macro_metric(ROOT / "per_frequency" / "public_fusion" / "summary.json", "normal_calibrated_confidence_or_auc"),
+            "confidence_gated_auc": read_macro_metric(ROOT / "per_frequency" / "public_fusion" / "summary.json", "confidence_gated_auc"),
         },
         {
             "dataset": "spectrum",
@@ -243,7 +241,7 @@ def summarize() -> None:
             "tta": "stft_time_shift_v2",
             "shift_px": 8,
             "vit_auc": read_metric(ROOT / "4shot" / "spectrum_vit" / "summary.json", "clip_vit_nn_max_auc_macro"),
-            "calibrated_auc": read_macro_metric(ROOT / "4shot" / "spectrum_fusion" / "summary.json", "normal_calibrated_confidence_or_auc"),
+            "confidence_gated_auc": read_macro_metric(ROOT / "4shot" / "spectrum_fusion" / "summary.json", "confidence_gated_auc"),
         },
     ]
     out = ROOT / "tta_time_shift_v2_summary.csv"

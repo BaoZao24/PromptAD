@@ -4,7 +4,8 @@ Date: 2026-07-06
 
 ## Objective
 
-补齐 **PromptAD generic baseline** 在不同 normal support 采样下的结果，覆盖三个数据集：
+补齐 **PromptAD generic baseline** 在不同 normal support 采样下的历史结果，覆盖当时的三个数据集
+（不含后来加入的 FedJam；本 handoff 不代表当前论文主表）：
 
 ```text
 self RF
@@ -109,7 +110,7 @@ Spectrum: 3 jobs
 SAMPLING=per_frequency   # or 1shot / 2shot / 4shot
 GPU=0
 ROOT=analysis_outputs/20260706_baseline_sampling_shot_ablation/${SAMPLING}
-PUB_CKPT=analysis_outputs/90_rejected_or_aborted/20260706_cleanup_old_results/20260627_method_funnel/runs/pooled_rf_rgb/cls/checkpoint/overall-best.pt
+PUB_CKPT=analysis_outputs/02_current_baselines/promptad_formal_baseline/pooled_rf_rgb_cls/checkpoint/overall-best.pt
 ```
 
 ### Self RF baseline
@@ -143,7 +144,6 @@ python tools/eval_cls_public_rf_vit_patchcore_gallery.py \
   --input-mode rgb \
   --text-prototype-mode single \
   --cls-score-mode text_only \
-  --patch-layer concat \
   --coreset-method random \
   --coreset-ratio 1.0 \
   --nn-topk 1 \
@@ -172,7 +172,6 @@ python tools/eval_cls_spectrum_vit_nn_gallery.py \
   --input-mode rgb \
   --text-prototype-mode single \
   --cls-score-mode text_only \
-  --patch-layer concat \
   --coreset-method random \
   --coreset-ratio 1.0 \
   --nn-topk 1 \

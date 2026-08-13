@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """Scheduler for the current-method Spectrum supplement.
 
-Extends analysis_outputs/20260706_sampling_shot_ablation/ with spectrum results
+Extends the confidence-gate sampling ablation with spectrum results
 for 1shot/2shot/4shot (no per_frequency — spectrum images carry no RF band labels).
 
-Per sampling: spectrum_vit (GPU) + spectrum_cnn (GPU) independent, then
+Per sampling: spectrum_vit (GPU) + spectrum_aux_cnn (GPU) independent, then
 spectrum_fusion (CPU) once both score dirs exist. Idempotent: skips any job
 whose summary.json already exists.
 """
@@ -20,7 +20,7 @@ from pathlib import Path
 from queue import Queue
 
 GPUS = [0, 2, 3]
-ROOT = Path("analysis_outputs/20260706_sampling_shot_ablation")
+ROOT = Path("analysis_outputs/20260725_confidence_gate_sampling_ablation")
 SAMPLINGS = ["1shot", "2shot", "4shot"]  # no per_frequency for spectrum
 
 
@@ -32,7 +32,6 @@ def vit_cmd(s: str, base: Path) -> list[str]:
         "python", "tools/eval_cls_spectrum_vit_nn_gallery.py",
         "--output-root", str(base / "spectrum_vit"),
         "--normal-sampling", s,
-        "--patch-layer", "concat",
         "--coreset-method", "farthest",
         "--coreset-ratio", "0.5",
         "--nn-topk", "5",
@@ -43,11 +42,11 @@ def vit_cmd(s: str, base: Path) -> list[str]:
     ]
 
 
-def cnn_cmd(s: str, base: Path) -> list[str]:
+def aux_cnn_cmd(s: str, base: Path) -> list[str]:
     return [
-        "python", "tools/eval_patchcore_cls.py",
+        "python", "tools/eval_cls_aux_cnn_gallery.py",
         "--protocol", "spectrum",
-        "--output-root", str(base / "spectrum_cnn"),
+        "--output-root", str(base / "spectrum_aux_cnn"),
         "--normal-sampling", s,
         "--batch-size", "32",
         "--gpu-id", "%GPU%",
@@ -55,15 +54,11 @@ def cnn_cmd(s: str, base: Path) -> list[str]:
 
 
 def fusion_cmd(s: str, base: Path) -> list[str]:
-    # Spectrum vit npz uses 'clip_vit_nn_max_scores' (the NN-gallery patch max),
-    # analogous to RF's 'vit_patchcore_max_scores'. The fusion default vit-key is
-    # the RF name, so override it for spectrum.
     return [
         "python", "tools/eval_cls_dual_visual_evidence_fusion.py",
         "--protocol", "spectrum",
-        "--vit-key", "clip_vit_nn_max_scores",
         "--vit-score-dir", str(base / "spectrum_vit" / "scores"),
-        "--cnn-score-dir", str(base / "spectrum_cnn" / "scores"),
+        "--cnn-score-dir", str(base / "spectrum_aux_cnn" / "scores"),
         "--output-root", str(base / "spectrum_fusion"),
     ]
 
@@ -143,7 +138,7 @@ def main():
         base = ROOT / s
         base.mkdir(parents=True, exist_ok=True)
         gpu_jobs.append(("spectrum_vit", s, vit_cmd(s, base)))
-        gpu_jobs.append(("spectrum_cnn", s, cnn_cmd(s, base)))
+        gpu_jobs.append(("spectrum_aux_cnn", s, aux_cnn_cmd(s, base)))
 
     for role, s, cmd in gpu_jobs:
         name = f"{s}/{role}"
@@ -160,7 +155,7 @@ def main():
     for s in SAMPLINGS:
         base = ROOT / s
         name = f"{s}/spectrum_fusion"
-        deps = [f"{s}/spectrum_vit", f"{s}/spectrum_cnn"]
+        deps = [f"{s}/spectrum_vit", f"{s}/spectrum_aux_cnn"]
         pending_cpu.append((name, fusion_cmd(s, base), deps))
 
     while pending_cpu:
@@ -191,7 +186,11 @@ def main():
         print(f"completed: {sorted(completed)}", flush=True)
         print(f"failed: {sorted(failed)}", flush=True)
     for s in SAMPLINGS:
-        for role in ["spectrum_vit", "spectrum_cnn", "spectrum_fusion"]:
+        for role in [
+            "spectrum_vit",
+            "spectrum_aux_cnn",
+            "spectrum_fusion",
+        ]:
             name = f"{s}/{role}"
             mk = marker_path(name)
             print(f"  {name}: {'OK' if mk.exists() else 'MISSING'}", flush=True)

@@ -15,7 +15,7 @@ per_frequency vs 1shot vs 2shot vs 4shot
 ```text
 ViT Normal Gallery
 + CNN Local Gallery
-+ Normal-calibrated confidence fusion
++ fixed confidence fusion
 ```
 
 本实验只重新生成分数和融合结果，不重新训练模型。
@@ -26,14 +26,13 @@ ViT Normal Gallery
 
 - `utils/rf_frequency_sampling.py`
   - 新增正式采样名 `per_frequency`
-  - 保留旧别名 `frequency_one_per_band`
   - 新增 `1shot / 2shot / 4shot`
+  - 正式 ViT/CNN 入口只暴露 `per_frequency / 1shot / 2shot / 4shot`
 - 已接入主要入口：
   - `tools/eval_cls_vit_patch_gallery.py`
   - `tools/eval_cls_vit_patchcore_gallery.py`
   - `tools/eval_cls_public_rf_vit_patchcore_gallery.py`
-  - `tools/eval_patchcore_cls.py`
-  - `tools/eval_cls_public_rf_dual_gallery.py`
+  - `tools/eval_cls_aux_cnn_gallery.py`
 
 编译检查已通过：
 
@@ -42,16 +41,16 @@ python -m py_compile \
   utils/rf_frequency_sampling.py \
   tools/eval_cls_vit_patch_gallery.py \
   tools/eval_cls_vit_patchcore_gallery.py \
-  tools/eval_cls_public_rf_dual_gallery.py \
+  tools/eval_cls_aux_cnn_gallery.py \
   tools/eval_cls_public_rf_vit_patchcore_gallery.py \
-  tools/eval_patchcore_cls.py
+  tools/eval_cls_dual_visual_evidence_fusion.py
 ```
 
 ## Sampling Definitions
 
 | sampling | meaning |
 |---|---|
-| `per_frequency` | 当前方案名；按频段去重选择 normal support，旧名 `frequency_one_per_band` 等价 |
+| `per_frequency` | 当前方案名；按频段去重选择 normal support |
 | `1shot` | 从候选 normal support 中确定性选择 1 张 |
 | `2shot` | 从候选 normal support 中确定性选择 2 张 |
 | `4shot` | 从候选 normal support 中确定性选择 4 张 |
@@ -63,18 +62,18 @@ python -m py_compile \
 统一输出到：
 
 ```text
-analysis_outputs/20260706_sampling_shot_ablation/
+analysis_outputs/20260725_confidence_gate_sampling_ablation/
 ```
 
 每个采样模式单独建目录：
 
 ```text
-analysis_outputs/20260706_sampling_shot_ablation/{sampling}/
+analysis_outputs/20260725_confidence_gate_sampling_ablation/{sampling}/
   self_vit/
-  self_cnn/
+  self_aux_cnn/
   self_fusion/
   public_vit/
-  public_cnn/
+  public_aux_cnn/
   public_fusion/
 ```
 
@@ -96,7 +95,7 @@ analysis_outputs/20260706_sampling_shot_ablation/{sampling}/
 ```bash
 SAMPLING=per_frequency   # or 1shot / 2shot / 4shot
 GPU=0
-ROOT=analysis_outputs/20260706_sampling_shot_ablation/${SAMPLING}
+ROOT=analysis_outputs/20260725_confidence_gate_sampling_ablation/${SAMPLING}
 ```
 
 ### 1. Self RF: ViT Normal Gallery
@@ -104,8 +103,8 @@ ROOT=analysis_outputs/20260706_sampling_shot_ablation/${SAMPLING}
 ```bash
 python tools/eval_cls_vit_patchcore_gallery.py \
   --output-root ${ROOT}/self_vit \
+  --support-manifest ${ROOT}/support_manifest.json \
   --normal-sampling ${SAMPLING} \
-  --patch-layer concat \
   --coreset-method farthest \
   --coreset-ratio 0.5 \
   --nn-topk 5 \
@@ -119,23 +118,23 @@ python tools/eval_cls_vit_patchcore_gallery.py \
 ### 2. Self RF: CNN Local Gallery
 
 ```bash
-python tools/eval_patchcore_cls.py \
+python tools/eval_cls_aux_cnn_gallery.py \
   --protocol rf_target \
-  --rf-train-mode pooled \
-  --output-root ${ROOT}/self_cnn \
+  --support-manifest ${ROOT}/support_manifest.json \
+  --output-root ${ROOT}/self_aux_cnn \
   --normal-sampling ${SAMPLING} \
   --batch-size 32 \
   --gpu-id ${GPU} \
-  2>&1 | tee ${ROOT}/self_cnn.log
+  2>&1 | tee ${ROOT}/self_aux_cnn.log
 ```
 
-### 3. Self RF: Calibrated Fusion
+### 3. Self RF: Confidence Fusion
 
 ```bash
 python tools/eval_cls_dual_visual_evidence_fusion.py \
   --protocol rf_target \
   --vit-score-dir ${ROOT}/self_vit/scores \
-  --cnn-score-dir ${ROOT}/self_cnn/scores \
+  --cnn-score-dir ${ROOT}/self_aux_cnn/scores \
   --output-root ${ROOT}/self_fusion \
   2>&1 | tee ${ROOT}/self_fusion.log
 ```
@@ -146,7 +145,6 @@ python tools/eval_cls_dual_visual_evidence_fusion.py \
 python tools/eval_cls_public_rf_vit_patchcore_gallery.py \
   --output-root ${ROOT}/public_vit \
   --normal-sampling ${SAMPLING} \
-  --patch-layer concat \
   --coreset-method farthest \
   --coreset-ratio 0.5 \
   --nn-topk 5 \
@@ -160,22 +158,22 @@ python tools/eval_cls_public_rf_vit_patchcore_gallery.py \
 ### 5. Public RF: CNN Local Gallery
 
 ```bash
-python tools/eval_patchcore_cls.py \
+python tools/eval_cls_aux_cnn_gallery.py \
   --protocol public_rf \
-  --output-root ${ROOT}/public_cnn \
+  --output-root ${ROOT}/public_aux_cnn \
   --normal-sampling ${SAMPLING} \
   --batch-size 32 \
   --gpu-id ${GPU} \
-  2>&1 | tee ${ROOT}/public_cnn.log
+  2>&1 | tee ${ROOT}/public_aux_cnn.log
 ```
 
-### 6. Public RF: Calibrated Fusion
+### 6. Public RF: Confidence Fusion
 
 ```bash
 python tools/eval_cls_dual_visual_evidence_fusion.py \
   --protocol public_rf \
   --vit-score-dir ${ROOT}/public_vit/scores \
-  --cnn-score-dir ${ROOT}/public_cnn/scores \
+  --cnn-score-dir ${ROOT}/public_aux_cnn/scores \
   --output-root ${ROOT}/public_fusion \
   2>&1 | tee ${ROOT}/public_fusion.log
 ```
@@ -186,15 +184,14 @@ python tools/eval_cls_dual_visual_evidence_fusion.py \
 
 ```text
 summary.json
-macro.normal_calibrated_confidence_or_auc
+macro.confidence_gated_auc  # legacy output key; display as confidence-fusion AUROC
 macro.vit_auc
-macro.cnn_local_auc
-macro.or_evidence_auc
+macro.cnn_auc
 ```
 
 最终主比较表：
 
-| sampling | self RF ViT | self RF CNN | self RF calibrated | public RF ViT | public RF CNN | public RF calibrated |
+| sampling | self RF ViT | self RF auxiliary CNN | self RF confidence fusion | public RF ViT | public RF auxiliary CNN | public RF confidence fusion |
 |---|---:|---:|---:|---:|---:|---:|
 | per_frequency | | | | | | |
 | 1shot | | | | | | |
@@ -205,7 +202,7 @@ macro.or_evidence_auc
 
 优先看：
 
-1. `normal_calibrated_confidence_or_auc` 是否随 shot 数稳定提升。
+1. `confidence_gated_auc`（legacy output key）是否随 shot 数稳定提升。
 2. `1shot/2shot/4shot` 是否能接近或超过 `per_frequency`。
 3. self RF 和 public RF 是否趋势一致。
 4. CNN 分支是否只在某些采样下有明显补充作用。
@@ -215,14 +212,14 @@ macro.or_evidence_auc
 完成后请写一个汇总文件：
 
 ```text
-analysis_outputs/20260706_sampling_shot_ablation/README.md
+analysis_outputs/20260725_confidence_gate_sampling_ablation/README.md
 ```
 
 可以直接运行汇总脚本：
 
 ```bash
 python tools/summarize_sampling_shot_ablation.py \
-  --root analysis_outputs/20260706_sampling_shot_ablation
+  --root analysis_outputs/20260725_confidence_gate_sampling_ablation
 ```
 
 需要包含：

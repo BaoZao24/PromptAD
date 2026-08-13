@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Unified module ablation for the current visual normality method.
 
-Runs only missing ViT-branch variants and reuses existing CNN score files from
-analysis_outputs/20260706_sampling_shot_ablation.
+Runs only missing ViT-branch variants and reuses current CNN score files from
+the confidence-gate sampling ablation.
 """
 
 from __future__ import annotations
@@ -18,17 +18,17 @@ from queue import Queue
 
 
 GPUS = [0, 2, 3]
-ROOT = Path("analysis_outputs/20260709_module_ablation")
-BASE = Path("analysis_outputs/20260706_sampling_shot_ablation")
+ROOT = Path("analysis_outputs/20260725_confidence_gate_module_ablation")
+BASE = Path("analysis_outputs/20260725_confidence_gate_sampling_ablation")
 PUB_CKPT = (
     "analysis_outputs/90_rejected_or_aborted/20260706_cleanup_old_results/"
     "20260627_method_funnel/runs/pooled_rf_rgb/cls/checkpoint/overall-best.pt"
 )
 
 DATASETS = {
-    "self_rf": {"sampling": "per_frequency", "vit_key": "vit_patchcore_max_scores"},
-    "public_rf": {"sampling": "per_frequency", "vit_key": "vit_patchcore_max_scores"},
-    "spectrum": {"sampling": "4shot", "vit_key": "clip_vit_nn_max_scores"},
+    "self_rf": {"sampling": "per_frequency"},
+    "public_rf": {"sampling": "per_frequency"},
+    "spectrum": {"sampling": "4shot"},
 }
 
 VIT_VARIANTS = {
@@ -81,11 +81,11 @@ def existing_vit_dir(dataset: str) -> Path:
 
 def existing_cnn_dir(dataset: str) -> Path:
     if dataset == "self_rf":
-        return BASE / "per_frequency" / "self_cnn"
+        return BASE / "per_frequency" / "self_aux_cnn"
     if dataset == "public_rf":
-        return BASE / "per_frequency" / "public_cnn"
+        return BASE / "per_frequency" / "public_aux_cnn"
     if dataset == "spectrum":
-        return BASE / "4shot" / "spectrum_cnn"
+        return BASE / "4shot" / "spectrum_aux_cnn"
     raise KeyError(dataset)
 
 
@@ -105,7 +105,6 @@ def vit_cmd(variant: str, dataset: str) -> list[str]:
     common = [
         "--output-root", str(base),
         "--normal-sampling", DATASETS[dataset]["sampling"],
-        "--patch-layer", "concat",
         "--coreset-method", cfg["coreset_method"],
         "--coreset-ratio", cfg["coreset_ratio"],
         "--nn-topk", cfg["nn_topk"],
@@ -115,7 +114,12 @@ def vit_cmd(variant: str, dataset: str) -> list[str]:
         "--gpu-id", "%GPU%",
     ]
     if dataset == "self_rf":
-        return ["python", "tools/eval_cls_vit_patchcore_gallery.py", *common]
+        return [
+            "python", "tools/eval_cls_vit_patchcore_gallery.py",
+            *common,
+            "--support-manifest",
+            str(BASE / "per_frequency" / "support_manifest.json"),
+        ]
     if dataset == "public_rf":
         return [
             "python", "tools/eval_cls_public_rf_vit_patchcore_gallery.py",
@@ -137,8 +141,6 @@ def fusion_cmd(variant: str, dataset: str) -> list[str]:
         "--cnn-score-dir", str(existing_cnn_dir(dataset) / "scores"),
         "--output-root", str(base / "fusion"),
     ]
-    if dataset == "spectrum":
-        cmd.extend(["--vit-key", "clip_vit_nn_max_scores"])
     return cmd
 
 
@@ -280,8 +282,7 @@ def summarize() -> None:
             "variant": "full_current",
             "vit_auc": vit_auc(dataset, current_vit),
             "cnn_auc": read_cnn_auc(dataset, cnn_summary),
-            "or_fusion_auc": fusion_auc(current_fusion, "or_evidence_auc"),
-            "final_auc": fusion_auc(current_fusion, "normal_calibrated_confidence_or_auc"),
+            "final_auc": fusion_auc(current_fusion, "confidence_gated_auc"),
         })
         for variant in VIT_VARIANTS:
             v_path = marker("vit", variant, dataset)
@@ -294,7 +295,6 @@ def summarize() -> None:
                     "variant": variant,
                     "vit_auc": plain_vit_auc,
                     "cnn_auc": None,
-                    "or_fusion_auc": None,
                     "final_auc": plain_vit_auc,
                 })
                 continue
@@ -306,8 +306,7 @@ def summarize() -> None:
                 "variant": variant,
                 "vit_auc": vit_auc(dataset, v_path),
                 "cnn_auc": read_cnn_auc(dataset, cnn_summary),
-                "or_fusion_auc": fusion_auc(f_path, "or_evidence_auc"),
-                "final_auc": fusion_auc(f_path, "normal_calibrated_confidence_or_auc"),
+                "final_auc": fusion_auc(f_path, "confidence_gated_auc"),
             })
 
     out_csv = ROOT / "module_ablation_summary.csv"
@@ -329,29 +328,28 @@ def summarize() -> None:
         "",
         "Variants:",
         "",
-        "- `full_current`: ViT farthest50 + top-k5 + `stft_shift_blur`, CNN top-1, calibrated fusion.",
-        "- `no_all`: plain ViT only: single view + full random gallery + top-1 NN; CNN and calibration are removed too.",
+        "- `full_current`: ViT farthest50 + top-k5 + `stft_shift_blur`, CNN top-1, confidence gate.",
+        "- `no_all`: plain ViT only: single view + full random gallery + top-1 NN; CNN and gate are removed too.",
         "- `no_tta`: disables paired TTA only.",
         "- `no_topk`: changes ViT top-k5 to top-1 only.",
         "- `no_coreset`: changes ViT farthest50 to full random gallery only.",
         "",
         "## Macro Image-AUROC",
         "",
-        "| dataset | variant | ViT | CNN | OR fusion | final score |",
-        "|---|---|---:|---:|---:|---:|",
+        "| dataset | variant | ViT | CNN | final score |",
+        "|---|---|---:|---:|---:|",
     ]
     for row in rows:
         cnn = "-" if row["cnn_auc"] is None else f"{row['cnn_auc']:.4f}"
-        or_fusion = "-" if row["or_fusion_auc"] is None else f"{row['or_fusion_auc']:.4f}"
         lines.append(
             f"| {row['dataset']} | {row['variant']} | {row['vit_auc']:.4f} | "
-            f"{cnn} | {or_fusion} | {row['final_auc']:.4f} |"
+            f"{cnn} | {row['final_auc']:.4f} |"
         )
     lines.extend([
         "",
         "## CNN Branch Ablation",
         "",
-        "Removing the CNN branch also removes dual-branch calibration; the final "
+        "Removing the CNN branch also removes the confidence gate; the final "
         "score is therefore the ViT Normal Gallery score.",
         "",
         "| dataset | full final score | no CNN (ViT only) | delta |",
@@ -369,23 +367,7 @@ def summarize() -> None:
 
 def read_cnn_auc(dataset: str, path: Path) -> float:
     data = read_json(path)
-    if "image_auroc_macro" in data:
-        return float(data["image_auroc_macro"])
-    if "macro_image_auroc" in data:
-        return float(data["macro_image_auroc"])
-    # eval_patchcore_cls writes image_auroc_macro in current summaries, but keep
-    # this fallback for older result files.
-    for key, value in data.items():
-        if key.endswith("image_auroc_macro"):
-            return float(value)
-    # Last-resort: derive from CSV if present.
-    csv_path = path.parent / "results_cls_patchcore.csv"
-    if csv_path.exists():
-        with csv_path.open(newline="", encoding="utf-8") as f:
-            rows = list(csv.DictReader(f))
-        vals = [float(r["image_auroc"]) for r in rows if r.get("image_auroc")]
-        return sum(vals) / len(vals)
-    raise KeyError(f"Cannot find CNN macro AUROC in {path}")
+    return float(data["image_auroc_macro"])
 
 
 def main() -> None:
