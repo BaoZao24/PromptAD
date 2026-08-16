@@ -127,7 +127,7 @@ The segmentation confidence-reweighting result is especially important because d
 New evaluation scripts:
 
 ```bash
-tools/eval_formal_promptad_normal_gallery_fusion_cls.py
+tools/archive/eval_formal_promptad_normal_gallery_fusion_cls.py
 tools/eval_seg_prompt_normal_gallery_fusion.py
 ```
 

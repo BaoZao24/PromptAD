@@ -1,4 +1,8 @@
 # Intermediate screening runs and per-sample score archives are reproducible.
+# Per-sample score archives under any run directory (any depth).
+scores/
+# Per-image feature cache keyed by content hash (rebuilt from model + manifest).
+20260815_candidate_feature_cache/
 20260813_tta_memory_layout_rf_smoke/
 20260813_tta_memory_layout_rf_5signal/
 20260813_tta_memory_layout_rf_full/*/scores/
@@ -8,3 +12,13 @@
 20260813_tta_memory_layout_fedjam_full/*/scores/
 20260813_tta_memory_layout_fedjam_full/*/protocol.json
 20260813_tta_memory_layout_fedjam_full/*/support_manifest.json
+20260813_frequency_response_memory_rf_5signal/
+20260813_frequency_response_memory_rf_full/*/scores/
+20260813_frequency_response_memory_public_rf_k1/*/scores/
+20260813_frequency_response_memory_fedjam_smoke/
+20260813_frequency_response_memory_fedjam_full/*/scores/
+20260813_frequency_response_memory_fedjam_full/*/support_manifest.json
+20260813_ofdma_spectral_response_tta/smoke_none/
+20260813_ofdma_spectral_response_tta/smoke_response/
+20260813_ofdma_spectral_response_tta/full_no_tta/scores/
+20260813_ofdma_spectral_response_tta/full_spectral_response/scores/

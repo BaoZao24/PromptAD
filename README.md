@@ -1,8 +1,9 @@
-# PromptAD for RF Spectrogram Anomaly Detection
+# SpectraMemAD: Training-Free RF Spectrogram Anomaly Detection
 
 > **English** | [中文](./README_zh.md)
 
-This repository adapts PromptAD for radio-frequency (RF) spectrogram anomaly detection.
+This repository uses the visual encoder of PromptAD as an implementation base for
+training-free radio-frequency (RF) spectrogram anomaly detection.
 
 The current research target is **few-shot anomaly detection**.
 
@@ -75,6 +76,11 @@ Important constraints:
 - Use the same core method names across In-house RF, Public RF, OFDMA, and FedJam. The current four-dataset comparison tables contain the completed methods; a future unrun method must be marked explicitly rather than assigned a placeholder score.
 
 ## Current Result Status
+
+Some frozen Ours protocols retain paired TTA as an auxiliary normal-memory
+expansion. It is not a core method innovation; every paper table must state the
+protocol setting and retain a matched no-TTA ablation. External baselines do
+not need to be rerun solely because of this documentation decision.
 
 The current formal support-only RF run achieves
 **91.97/81.80/22.00** (AUROC/AUPRC/FPR@95%TPR) on In-house RF. Public RF uses the main

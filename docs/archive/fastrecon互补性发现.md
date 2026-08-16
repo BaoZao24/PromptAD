@@ -119,5 +119,5 @@ analysis_outputs/20260703_fewshot_fastrecon_complementarity_wide_alpha/
 ```text
 tools/eval_cls_vit_patch_gallery.py
 tools/eval_fastrecon_cls.py
-tools/analyze_fewshot_fastrecon_complementarity.py
+tools/archive/analyze_fewshot_fastrecon_complementarity.py
 ```

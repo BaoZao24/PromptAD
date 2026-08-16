@@ -12,7 +12,8 @@
 - [分数机制说明](method/分数机制说明.md)
 - [置信度融合计算方法](method/置信度计算方法.md)
 - [提示词机制说明](method/提示词机制说明.md)
-- [当前频谱 TTA](method/传统通信基线与频谱TTA.md)
+- [历史探索：频谱 TTA](method/传统通信基线与频谱TTA.md)
+- [已否决探索：支持集驱动的频率虚警控制](method/支持集驱动的频率虚警控制方案.md)
 - [外部 baseline 源码与文献清单](method/baseline_source_inventory.md)
 
 ## 正式研究记录
@@ -21,11 +22,15 @@
 - [OFDMA target-scene cold-start 协议](research/ofdma_target_scene_coldstart_protocol.md)
 - [已发表频谱基线实验记录](research/published_spectrum_baseline_experiment.md)
 - [support 抽样稳定性实验](research/support_stability_experiment.md)
+- [TTA 定位与复核计划](research/TTA定位与复核计划.md)
+- [历史：主线无 TTA 复核计划](research/主线无TTA复核计划.md)
 - [频谱异常检测文献复核与基线筛选](research/频谱异常检测文献复核与基线筛选.md)
 - [审稿意见](research/reviews/审稿意见.md)
 
 ## 结果与历史材料
 
 - [论文图表与结果汇总](../analysis_outputs/20260810_paper_experiment_figures_cited/README.md)
+- [UniVAD RF 适配实验记录](../experiments/exp_univad_rf_comparison_20260815.md)
+- [UniVAD 全部实验结果独立记录](../experiments/exp_univad_all_results_20260816.md)
 - [历史探索、交接记录与代码阅读笔记](archive/README.md)
 - [PromptAD 原始架构图](assets/general/PromptAD.jpg)

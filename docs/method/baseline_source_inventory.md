@@ -17,7 +17,7 @@
 | RD4AD | `references/RD4AD/` | `https://github.com/hq-deng/RD4AD.git` | reverse-distillation baseline | P1 |
 | WinCLIP | `references/WinCLIP/` | `https://github.com/caoyunkang/WinCLIP.git` | zero/few-shot CLIP reference | P2 |
 | AnomalyCLIP | `references/AnomalyCLIP/` | `https://github.com/zqhang/AnomalyCLIP.git` | object-agnostic CLIP reference | P2 |
-| UniVAD | `references/UniVAD/` | `https://github.com/FantasticGNU/UniVAD.git` | recent training-free few-shot reference | P2 |
+| UniVAD | `references/UniVAD/` | `https://github.com/FantasticGNU/UniVAD.git` | recent training-free few-shot reference；论文见 `references/papers/univad_cvpr_2025.pdf` | P0 |
 | FastRecon | `references/FastRecon/` | `https://github.com/FzJun26th/FastRecon.git` | reconstruction-feature complement reference | P2 |
 | APRIL-GAN | `references/VAND-APRIL-GAN/` | `https://github.com/ByChelsea/VAND-APRIL-GAN.git` | CLIP dense map reference | P2 |
 | SimpleNet | `references/SimpleNet/` | `https://github.com/DonaldRR/SimpleNet.git` | simple feature anomaly baseline | P2 |
@@ -58,6 +58,11 @@
    - WinCLIP 结果目录：`analysis_outputs/20260709_winclip_reference_main/`。
    - WinCLIP 结论：Spectrum 上较强，但 RF self/public 明显弱于当前方法；适合作为 CLIP/few-shot anomaly detection 参考项。
    - 注意很多方法是 zero-shot 或需要 auxiliary 数据，不能直接和 normal-only few-shot 主协议混用；只能作为 reference baseline。
+
+   - UniVAD 的 RF 适配已完成三个 In-house 单元 smoke/full-cell 比较，但由于省略了其依赖物体
+     分割的 C³/GECM，并将 DINOv2-G 换为本机 DINOv2-B，结果只能标为
+     `UniVAD-Texture-B-adapted`，暂不进入主表。详见
+     [`exp_univad_rf_comparison_20260815.md`](../../experiments/exp_univad_rf_comparison_20260815.md)。
 
 ## 当前主对比建议（四个数据集统一口径）
 

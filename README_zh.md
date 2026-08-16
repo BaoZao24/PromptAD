@@ -1,8 +1,8 @@
-# PromptAD 射频频谱图异常检测
+# SpectraMemAD：训练免费射频频谱异常检测
 
 > [English](./README.md) | **中文**
 
-本仓库基于 PromptAD 改造，用于射频频谱图（RF spectrogram）异常检测。
+本仓库以 PromptAD 的视觉编码器为实现基础，用于训练免费的射频频谱图（RF spectrogram）异常检测。
 
 当前研究目标是 **少样本 anomaly detection**。
 
@@ -75,6 +75,9 @@ test:
   保留在补充记录中。
 
 ## 当前结果状态
+
+部分冻结的本文方法协议保留 Paired TTA 作为辅助正常记忆扩充。它不属于核心创新；论文表格必须
+如实标明协议设置，并保留同划分的无 TTA 消融。仅因这一文档定位调整，无需重跑外部基线。
 
 当前正式 RF support-only 实验在 In-house RF 上得到
 **91.97/81.80/22.00**（AUROC/AUPRC/FPR@95%TPR）。Public RF 采用主线
