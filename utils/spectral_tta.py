@@ -1,8 +1,13 @@
-"""Physics-aware paired TTA for spectrogram images.
+"""Archived exploratory paired TTA for spectrogram images.
 
 The transforms preserve the semantic axes instead of applying arbitrary image
 flips or rotations.  They are intended for paired use: the same transform is
 applied when constructing a normal support memory and when querying it.
+
+This module is not part of SpectraMemAD's core method or architecture. It is
+available for the explicitly documented auxiliary TTA protocol and its matched
+no-TTA ablation; formal evaluators use the identity view unless that protocol
+is explicitly selected.
 """
 
 from __future__ import annotations

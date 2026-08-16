@@ -50,14 +50,6 @@ from utils.rf_scene_support import (
     ensure_rf_target_scene_manifest,
     scene_support_entry,
 )
-from utils.normal_subspace import (
-    NormalSubspace,
-    SupportScoreCalibrator,
-    fit_normal_subspace,
-    fit_support_score_calibrator,
-    fuse_support_calibrated_scores,
-    leave_one_out_topk_cosine_distance,
-)
 from utils.spectral_tta import SPECTRAL_TTA_BUNDLES, augment_spectrogram
 from utils.training_utils import setup_seed
 
@@ -88,6 +80,12 @@ def _shift_image(arr, dx=0, dy=0):
     h, w = arr.shape[:2]
     mat = np.float32([[1, 0, dx], [0, 1, dy]])
     return cv2.warpAffine(arr, mat, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT_101)
+
+
+def _shift_image_batch(raw_batch, dy=0):
+    """Shift a uint8 raw batch along the RF time axis (vertical)."""
+    shifted = [_shift_image(arr.numpy(), dx=0, dy=int(dy)) for arr in raw_batch]
+    return np.stack(shifted, axis=0)
 
 
 def _center_crop_resize(arr, crop_ratio=0.03):
@@ -252,131 +250,6 @@ def select_gallery_subset_by_rows(gallery, rows, args, cols=None):
     return gallery[idx], rows[idx], out_cols
 
 
-def _farthest_indices(gallery, keep, seed):
-    """Select a fixed number of normalized features by farthest-first search."""
-
-    keep = max(1, min(int(keep), int(gallery.shape[0])))
-    if keep >= gallery.shape[0]:
-        return torch.arange(gallery.shape[0], device=gallery.device)
-    selected = torch.empty(keep, device=gallery.device, dtype=torch.long)
-    generator = torch.Generator(device="cpu").manual_seed(int(seed))
-    selected[0] = int(torch.randint(gallery.shape[0], (1,), generator=generator).item())
-    min_dist = torch.full((gallery.shape[0],), float("inf"), device=gallery.device)
-    for index in range(1, keep):
-        similarity = gallery @ gallery[selected[index - 1]].unsqueeze(-1)
-        distance = (1.0 - similarity.squeeze(-1)) / 2.0
-        min_dist = torch.minimum(min_dist, distance)
-        selected[index] = torch.argmax(min_dist)
-    return selected
-
-
-def _reliable_feature_mask(gallery, groups, args):
-    """Keep features supported by nearby normal features in the same group."""
-
-    mask = torch.ones(gallery.shape[0], dtype=torch.bool, device=gallery.device)
-    drop_ratio = float(getattr(args, "reliability_drop_ratio", 0.0))
-    neighbors = max(1, int(getattr(args, "reliability_neighbors", 5)))
-    if drop_ratio <= 0.0:
-        return mask
-    for group in torch.unique(groups, sorted=True).tolist():
-        indices = torch.nonzero(groups == int(group), as_tuple=False).flatten()
-        if indices.numel() <= 1:
-            continue
-        local = gallery[indices]
-        similarities = local @ local.t()
-        similarities.fill_diagonal_(-float("inf"))
-        k = min(neighbors, int(indices.numel()) - 1)
-        nearest = torch.topk(similarities, k=k, dim=-1).values
-        mean_distance = ((1.0 - nearest) / 2.0).mean(dim=-1)
-        remove = min(int(round(indices.numel() * drop_ratio)), int(indices.numel()) - 1)
-        if remove > 0:
-            rejected = torch.topk(mean_distance, k=remove, dim=-1).indices
-            mask[indices[rejected]] = False
-    return mask
-
-
-def _frequency_balanced_indices(gallery, groups, keep, args, eligible=None):
-    """Allocate a fixed gallery budget across frequency groups."""
-
-    if eligible is None:
-        eligible = torch.ones(gallery.shape[0], dtype=torch.bool, device=gallery.device)
-    eligible_indices = torch.nonzero(eligible, as_tuple=False).flatten()
-    if eligible_indices.numel() == 0:
-        return torch.arange(min(int(keep), gallery.shape[0]), device=gallery.device)
-    target = min(int(keep), int(eligible_indices.numel()))
-    group_values = torch.unique(groups[eligible], sorted=True).tolist()
-    base, remainder = divmod(target, len(group_values))
-    selected_parts = []
-    selected_mask = torch.zeros(gallery.shape[0], dtype=torch.bool, device=gallery.device)
-    for group_index, group in enumerate(group_values):
-        candidates = torch.nonzero(eligible & (groups == int(group)), as_tuple=False).flatten()
-        quota = base + int(group_index < remainder)
-        if quota <= 0 or candidates.numel() == 0:
-            continue
-        local = _farthest_indices(
-            gallery[candidates],
-            min(quota, int(candidates.numel())),
-            int(args.seed) + int(group),
-        )
-        chosen = candidates[local]
-        selected_parts.append(chosen)
-        selected_mask[chosen] = True
-
-    selected_count = sum(int(part.numel()) for part in selected_parts)
-    deficit = target - selected_count
-    if deficit > 0:
-        remaining = eligible & ~selected_mask
-        candidates = torch.nonzero(remaining, as_tuple=False).flatten()
-        if candidates.numel() > 0:
-            local = _farthest_indices(
-                gallery[candidates],
-                min(deficit, int(candidates.numel())),
-                int(args.seed) + 100003,
-            )
-            selected_parts.append(candidates[local])
-    if not selected_parts:
-        return eligible_indices[:target]
-    return torch.cat(selected_parts, dim=0)
-
-
-def select_memory_subset(gallery, rows, cols, args):
-    """Apply the selected normal-memory construction strategy."""
-
-    mode = getattr(args, "memory_selection", "farthest")
-    if args.coreset_ratio >= 1.0:
-        return gallery, rows, cols
-    keep = max(1, int(round(gallery.shape[0] * float(args.coreset_ratio))))
-    if mode == "farthest":
-        if getattr(args, "rowwise_coreset", False):
-            return select_gallery_subset_by_rows(gallery, rows, args, cols)
-        if args.coreset_method == "random":
-            indices, _ = select_gallery_subset(gallery, args)
-        else:
-            indices = _farthest_indices(gallery, keep, args.seed)
-    else:
-        reliable = _reliable_feature_mask(gallery, cols, args)
-        if mode == "frequency_balanced":
-            indices = _frequency_balanced_indices(gallery, cols, keep, args)
-        elif mode == "reliable":
-            candidates = torch.nonzero(reliable, as_tuple=False).flatten()
-            if candidates.numel() >= keep:
-                local = _farthest_indices(gallery[candidates], keep, args.seed)
-                indices = candidates[local]
-            else:
-                rejected = torch.nonzero(~reliable, as_tuple=False).flatten()
-                fill = _farthest_indices(
-                    gallery[rejected],
-                    min(keep - int(candidates.numel()), int(rejected.numel())),
-                    int(args.seed) + 100003,
-                )
-                indices = torch.cat([candidates, rejected[fill]], dim=0)
-        elif mode == "frequency_reliable":
-            indices = _frequency_balanced_indices(gallery, cols, keep, args, reliable)
-        else:
-            raise ValueError(f"Unsupported memory selection: {mode}")
-    return gallery[indices], rows[indices], cols[indices]
-
-
 @torch.no_grad()
 def build_vit_patchcore_gallery(model, train_loader, args, device):
     model.eval_mode()
@@ -481,7 +354,13 @@ def finalize_vit_nn_gallery(gallery, rows, cols, args):
     """Normalize and coreset a gallery after all intended views are present."""
     gallery = F.normalize(gallery.float(), dim=-1)
     if args.coreset_ratio < 1.0:
-        gallery, rows, cols = select_memory_subset(gallery, rows, cols, args)
+        if args.rowwise_coreset:
+            gallery, rows, cols = select_gallery_subset_by_rows(gallery, rows, args, cols)
+        else:
+            idx, _ = select_gallery_subset(gallery, args)
+            gallery = gallery[idx]
+            rows = rows[idx]
+            cols = cols[idx]
     return gallery.contiguous(), rows.contiguous(), cols.contiguous()
 
 
@@ -603,9 +482,6 @@ def compute_patch_map(
     row_prototypes=None,
     paired_tta_mode="identity",
     visual_features=None,
-    normal_subspace: NormalSubspace | None = None,
-    hybrid_calibrator: tuple[SupportScoreCalibrator, SupportScoreCalibrator] | None = None,
-    score_model: str | None = None,
 ):
     if visual_features is None or paired_tta_mode != "identity":
         data_variant = paired_tta_batch(raw_batch, paired_tta_mode, args)
@@ -614,51 +490,6 @@ def compute_patch_map(
     patch_features = prepare_patch_features(visual_features)
     bsz, num_patches, _ = patch_features.shape
     grid_h, grid_w = model.grid_size
-    active_model = score_model or getattr(args, "vit_normal_model", "memory")
-    if active_model == "hybrid":
-        if normal_subspace is None or hybrid_calibrator is None:
-            raise ValueError("Hybrid scoring requires a fitted PCA model and support calibrator")
-        memory_map = compute_patch_map(
-            model,
-            raw_batch,
-            gallery,
-            gallery_rows,
-            gallery_cols,
-            args,
-            device,
-            row_stats=row_stats,
-            row_prototypes=row_prototypes,
-            paired_tta_mode=paired_tta_mode,
-            visual_features=visual_features,
-            normal_subspace=None,
-            hybrid_calibrator=None,
-            score_model="memory",
-        )
-        subspace_map = compute_patch_map(
-            model,
-            raw_batch,
-            gallery,
-            gallery_rows,
-            gallery_cols,
-            args,
-            device,
-            row_stats=row_stats,
-            row_prototypes=row_prototypes,
-            paired_tta_mode=paired_tta_mode,
-            visual_features=visual_features,
-            normal_subspace=normal_subspace,
-            hybrid_calibrator=None,
-            score_model="pca",
-        )
-        return fuse_support_calibrated_scores(
-            memory_map,
-            subspace_map,
-            hybrid_calibrator,
-        )
-    if active_model == "pca":
-        if normal_subspace is None:
-            raise ValueError("PCA scoring requires a fitted normal subspace")
-        return normal_subspace.score(patch_features).reshape(bsz, grid_h, grid_w)
     if args.memory_mode == "row_proto":
         map_t = row_prototype_scores(
             patch_features,
@@ -839,31 +670,13 @@ def prepare_target_scene_manifest(args):
 
 def build_gallery_state(model, train_loader, args, device):
     paired_tta_galleries = None
-    pca_fit_gallery = None
-    normal_model = getattr(args, "vit_normal_model", "memory")
     if args.paired_tta == "none":
-        if normal_model in {"pca", "hybrid"}:
-            raw_gallery, raw_rows, raw_cols = build_vit_nn_gallery_with_rows(
-                model,
-                train_loader,
-                args,
-                device,
-                apply_coreset=False,
-            )
-            pca_fit_gallery = raw_gallery
-            gallery, gallery_rows, gallery_cols = finalize_vit_nn_gallery(
-                raw_gallery,
-                raw_rows,
-                raw_cols,
-                args,
-            )
-        else:
-            gallery, gallery_rows, gallery_cols = build_vit_nn_gallery_with_rows(
-                model,
-                train_loader,
-                args,
-                device,
-            )
+        gallery, gallery_rows, gallery_cols = build_vit_nn_gallery_with_rows(
+            model,
+            train_loader,
+            args,
+            device,
+        )
     elif args.paired_tta_memory_layout == "separate":
         paired_tta_galleries = []
         for mode in _paired_tta_modes(args):
@@ -896,8 +709,6 @@ def build_gallery_state(model, train_loader, args, device):
             gallery_parts.append(tta_gallery)
             row_parts.append(tta_rows)
             col_parts.append(tta_cols)
-        if normal_model in {"pca", "hybrid"}:
-            pca_fit_gallery = torch.cat(gallery_parts, dim=0)
         gallery, gallery_rows, gallery_cols = finalize_vit_nn_gallery(
             torch.cat(gallery_parts, dim=0),
             torch.cat(row_parts, dim=0),
@@ -919,24 +730,6 @@ def build_gallery_state(model, train_loader, args, device):
         if args.memory_mode == "row_proto"
         else None
     )
-    normal_subspace = None
-    if normal_model in {"pca", "hybrid"}:
-        normal_subspace = fit_normal_subspace(
-            pca_fit_gallery if pca_fit_gallery is not None else gallery,
-            variance_threshold=args.pca_variance,
-            max_components=args.pca_max_components,
-            max_fit_samples=args.pca_max_fit_samples,
-            seed=args.seed,
-        ).to(device)
-        print(
-            f"[pca] rank={normal_subspace.rank} "
-            f"fit_samples={normal_subspace.fit_samples} "
-            f"retained_variance={normal_subspace.explained_variance_ratio:.4f}"
-        )
-    # Hybrid calibration is populated in main from held-out transformed
-    # support images, after the state has been built.  Keeping it out of the
-    # gallery constructor ensures the calibration uses image-level max scores.
-    hybrid_calibrator = None
     return {
         "gallery": gallery,
         "gallery_rows": gallery_rows,
@@ -944,8 +737,6 @@ def build_gallery_state(model, train_loader, args, device):
         "row_stats": row_stats,
         "row_prototypes": row_prototypes,
         "paired_tta_galleries": paired_tta_galleries,
-        "normal_subspace": normal_subspace,
-        "hybrid_calibrator": hybrid_calibrator,
     }
 
 
@@ -970,9 +761,6 @@ def compute_fused_patch_map(
     row_prototypes=None,
     paired_tta_galleries=None,
     visual_features=None,
-    normal_subspace: NormalSubspace | None = None,
-    hybrid_calibrator: tuple[SupportScoreCalibrator, SupportScoreCalibrator] | None = None,
-    score_model: str | None = None,
 ):
     if paired_tta_galleries:
         maps = [
@@ -988,9 +776,6 @@ def compute_fused_patch_map(
                 row_prototypes=None,
                 paired_tta_mode=mode,
                 visual_features=(visual_features if mode == "identity" else None),
-                normal_subspace=normal_subspace,
-                hybrid_calibrator=hybrid_calibrator,
-                score_model=score_model,
             )
             for mode, tta_gallery, tta_rows, tta_cols in paired_tta_galleries
         ]
@@ -1012,9 +797,6 @@ def compute_fused_patch_map(
         row_prototypes=row_prototypes,
         paired_tta_mode="identity",
         visual_features=visual_features,
-        normal_subspace=normal_subspace,
-        hybrid_calibrator=hybrid_calibrator,
-        score_model=score_model,
     )
 
 
@@ -1030,8 +812,6 @@ def evaluate(
     row_stats=None,
     row_prototypes=None,
     paired_tta_galleries=None,
-    normal_subspace: NormalSubspace | None = None,
-    hybrid_calibrator: tuple[SupportScoreCalibrator, SupportScoreCalibrator] | None = None,
 ):
     model.eval_mode()
     model.build_text_feature_gallery()
@@ -1039,11 +819,17 @@ def evaluate(
     score_dir = Path(args.output_root) / "scores"
     score_dir.mkdir(parents=True, exist_ok=True)
 
+    max_qs_px = int(getattr(args, "query_consistency_max_px", 0))
+    qs_shifts = [0]
+    if max_qs_px > 0:
+        qs_shifts.extend([dy for dy in range(-max_qs_px, max_qs_px + 1) if dy != 0])
+
     for signal, scene, jsr, loader in eval_loaders:
         labels, names = [], []
         text_scores, max_scores = [], []
         coherent_scores = []
         ratio_scores = {ratio: [] for ratio in args.map_top_ratios}
+        qs_view_scores = []
 
         for data, mask, label, name, img_type in tqdm(loader, desc=f"Eval CLIP-ViT NN {signal}/{scene}/{jsr}", leave=False):
             data_t = to_model_input(model, data, device, rgb_from_bgr=False)
@@ -1062,8 +848,6 @@ def evaluate(
                 row_prototypes,
                 paired_tta_galleries,
                 visual_features=visual_features,
-                normal_subspace=normal_subspace,
-                hybrid_calibrator=hybrid_calibrator,
             )
             map_np = map_t.detach().cpu().numpy().astype(np.float32)
 
@@ -1079,6 +863,31 @@ def evaluate(
                 ratio_scores[ratio].extend(float(x) for x in top_ratio_score(map_np, ratio))
             labels.extend(int(x) for x in label.numpy().tolist())
             names.extend(list(name))
+
+            if max_qs_px > 0:
+                view_max = [map_np.reshape(map_np.shape[0], -1).max(axis=1)]
+                for dy in qs_shifts[1:]:
+                    shifted_batch = paired_tta_batch(
+                        torch.as_tensor(_shift_image_batch(data, dy=dy)),
+                        "identity",
+                        args,
+                    )
+                    shifted_map = compute_fused_patch_map(
+                        model,
+                        shifted_batch,
+                        gallery,
+                        gallery_rows,
+                        gallery_cols,
+                        args,
+                        device,
+                        row_stats,
+                        row_prototypes,
+                        paired_tta_galleries,
+                        visual_features=None,
+                    )
+                    shifted_np = shifted_map.detach().cpu().numpy().astype(np.float32)
+                    view_max.append(shifted_np.reshape(shifted_np.shape[0], -1).max(axis=1))
+                qs_view_scores.append(np.stack(view_max, axis=1))
 
         labels_np = np.asarray(labels, dtype=np.int32)
         text_np = np.asarray(text_scores, dtype=np.float32)
@@ -1097,9 +906,6 @@ def evaluate(
             "nn_agg": args.nn_agg,
             "coreset_method": args.coreset_method,
             "rowwise_coreset": int(args.rowwise_coreset),
-            "memory_selection": getattr(args, "memory_selection", "farthest"),
-            "reliability_neighbors": int(getattr(args, "reliability_neighbors", 5)),
-            "reliability_drop_ratio": float(getattr(args, "reliability_drop_ratio", 0.0)),
             "memory_mode": args.memory_mode,
             "freq_zscore": int(args.freq_zscore),
             "row_proto_zscore": int(args.row_proto_zscore),
@@ -1118,6 +924,22 @@ def evaluate(
             "vit_patchcore_max_scores": max_np,
             "harmonic_text_vit_patchcore_max": harmonic(text_np, max_np),
         }
+        if max_qs_px > 0 and qs_view_scores:
+            view_stack = np.concatenate(qs_view_scores, axis=0).astype(np.float32)
+            qs_min = view_stack.min(axis=1)
+            qs_mean = view_stack.mean(axis=1)
+            qs_median = np.median(view_stack, axis=1).astype(np.float32)
+            qs_max = view_stack.max(axis=1)
+            row["qs_min_max_auc"] = safe_auc(labels_np, qs_min)
+            row["qs_mean_max_auc"] = safe_auc(labels_np, qs_mean)
+            row["qs_median_max_auc"] = safe_auc(labels_np, qs_median)
+            row["qs_max_max_auc"] = safe_auc(labels_np, qs_max)
+            row["harmonic_text_qs_min_max_auc"] = safe_auc(labels_np, harmonic(text_np, qs_min))
+            payload["qs_view_scores"] = view_stack
+            payload["qs_shifts"] = np.asarray(qs_shifts, dtype=np.int32)
+            payload["qs_min_scores"] = qs_min
+            payload["qs_mean_scores"] = qs_mean
+            payload["qs_max_scores"] = qs_max
         if coherent_np is not None:
             row["vit_patchcore_coherent_auc"] = safe_auc(labels, coherent_np)
             row["harmonic_text_vit_patchcore_coherent_auc"] = safe_auc(labels, harmonic(text_np, coherent_np))
@@ -1148,64 +970,46 @@ def support_reference_scores(
     state,
     args,
     device,
-    normal_subspace: NormalSubspace | None = None,
-    hybrid_calibrator: tuple[SupportScoreCalibrator, SupportScoreCalibrator] | None = None,
-    score_model: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Score original support patches after removing each exact self-match."""
+    """Score normal support under held-out shifts for an inductive gate.
 
-    if args.paired_tta != "none":
-        scores, names = [], []
-        for data, _mask, _label, name, _img_type in tqdm(
-            support_loader,
-            desc="Score support-only legacy TTA reference",
-            leave=False,
-        ):
-            for mode in ("time_shift_up_large", "time_shift_down_large"):
-                shifted = paired_tta_batch(data, mode, args)
-                map_t = compute_fused_patch_map(
-                    model,
-                    shifted,
-                    state["gallery"],
-                    state["gallery_rows"],
-                    state["gallery_cols"],
-                    args,
-                    device,
-                    state["row_stats"],
-                    state["row_prototypes"],
-                    state["paired_tta_galleries"],
-                    normal_subspace=normal_subspace,
-                    hybrid_calibrator=hybrid_calibrator,
-                    score_model=score_model,
-                )
-                scores.extend(
-                    map_t.detach().cpu().reshape(map_t.shape[0], -1).max(dim=1).values.tolist()
-                )
-                names.extend(str(value) for value in name)
-        return np.asarray(scores, dtype=np.float32), np.asarray(names)
+    The formal gallery contains identity/blur/\u00b14-pixel views.  The reference
+    distribution uses deterministic \u00b18-pixel shifts of the same normal
+    support, so it contains no test samples and does not reuse an exact
+    gallery image.  This is an exploratory support-only calibration, kept
+    separate from the default test-batch evaluator.
+    """
 
-    features, names = [], []
+    scores, names = [], []
     for data, _mask, _label, name, _img_type in tqdm(
         support_loader,
-        desc="Score support-only ViT leave-one-out reference",
+        desc="Score support-only ViT reference",
         leave=False,
     ):
-        data_t = to_model_input(model, data, device, rgb_from_bgr=False)
-        features.append(prepare_patch_features(model.encode_image(data_t)))
+        view_scores = []
+        for mode in ("time_shift_up_large", "time_shift_down_large"):
+            shifted = paired_tta_batch(data, mode, args)
+            map_t = compute_fused_patch_map(
+                model,
+                shifted,
+                state["gallery"],
+                state["gallery_rows"],
+                state["gallery_cols"],
+                args,
+                device,
+                state["row_stats"],
+                state["row_prototypes"],
+                state["paired_tta_galleries"],
+            )
+            map_np = map_t.detach().cpu().numpy().astype(np.float32)
+            view_scores.extend(
+                map_np.reshape(map_np.shape[0], -1).max(axis=1).tolist()
+            )
+        # Keep the two held-out views as separate reference observations.
+        scores.extend(view_scores)
         names.extend(str(value) for value in name)
-    features = torch.cat(features, dim=0)
-    if score_model == "pca":
-        if normal_subspace is None:
-            raise ValueError("PCA support reference requires a fitted subspace")
-        scores = normal_subspace.score(features).reshape(features.shape[0], -1).max(dim=1).values
-    else:
-        scores = leave_one_out_topk_cosine_distance(
-            features,
-            topk=args.nn_topk,
-            chunk_size=args.gallery_chunk_size,
-            distance_divisor=2.0,
-        ).reshape(features.shape[0], -1).max(dim=1).values
-    return scores.cpu().numpy().astype(np.float32), np.asarray(names)
+        names.extend(str(value) for value in name)
+    return np.asarray(scores, dtype=np.float32), np.asarray(names)
 
 
 def parse_args():
@@ -1227,15 +1031,6 @@ def parse_args():
     )
     parser.add_argument("--coreset-ratio", type=float, default=0.5)
     parser.add_argument("--coreset-method", choices=["random", "farthest"], default="farthest")
-    parser.add_argument(
-        "--vit-normal-model",
-        choices=["memory", "pca", "hybrid"],
-        default="memory",
-        help="Normality score: memory, support-only PCA, or calibrated memory-PCA agreement.",
-    )
-    parser.add_argument("--pca-variance", type=float, default=0.99)
-    parser.add_argument("--pca-max-components", type=int, default=256)
-    parser.add_argument("--pca-max-fit-samples", type=int, default=8192)
     parser.add_argument("--rowwise-coreset", action="store_true")
     parser.add_argument("--memory-mode", choices=["global_nn", "row_nn", "row_proto"], default="global_nn")
     parser.add_argument("--row-proto-zscore", action="store_true")
@@ -1269,7 +1064,7 @@ def parse_args():
             "ofdma_spectral_response_v1",
             "ofdma_spectral_physics_v1",
         ],
-        default="none",
+        default="stft_shift_blur",
     )
     parser.add_argument("--paired-tta-fusion", choices=["mean", "max"], default="max")
     parser.add_argument(
@@ -1294,14 +1089,6 @@ def parse_args():
         help="RMS intensity of the smooth frequency-response calibration view.",
     )
     parser.add_argument("--gallery-chunk-size", type=int, default=4096)
-    parser.add_argument(
-        "--memory-selection",
-        choices=["farthest", "frequency_balanced", "reliable", "frequency_reliable"],
-        default="farthest",
-        help="Normal gallery construction strategy; farthest preserves the formal baseline.",
-    )
-    parser.add_argument("--reliability-neighbors", type=int, default=5)
-    parser.add_argument("--reliability-drop-ratio", type=float, default=0.0)
     parser.add_argument("--freq-window", type=int, default=-1, help="-1 disables frequency-position constraint; 0 uses the same row only.")
     parser.add_argument("--nn-topk", type=int, default=5)
     parser.add_argument("--nn-agg", choices=["mean", "weighted", "adaptive"], default="mean")
@@ -1313,6 +1100,16 @@ def parse_args():
     parser.add_argument("--coherence-alpha", type=float, default=0.0)
     parser.add_argument("--coherence-top-ratio", type=float, default=0.05)
     parser.add_argument("--map-top-ratios", type=float, nargs="+", default=[0.01, 0.05, 0.1])
+    parser.add_argument(
+        "--query-consistency-max-px",
+        type=int,
+        default=2,
+        help=(
+            "Maximum query-side time-axis shift (px) for the cross-view "
+            "consistency sweep; 0 disables the sweep. Views: identity plus "
+            "all dy in [-max_px, max_px] excluding 0."
+        ),
+    )
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--max-test-normals", type=int, default=0)
@@ -1352,14 +1149,6 @@ def main():
     args = parse_args()
     if not (0.0 < args.coreset_ratio <= 1.0):
         raise ValueError("--coreset-ratio must be in (0, 1]")
-    if not (0.0 < args.pca_variance <= 1.0):
-        raise ValueError("--pca-variance must be in (0, 1]")
-    if args.reliability_neighbors < 1:
-        raise ValueError("--reliability-neighbors must be positive")
-    if not (0.0 <= args.reliability_drop_ratio < 1.0):
-        raise ValueError("--reliability-drop-ratio must be in [0, 1)")
-    if args.pca_max_components <= 0 or args.pca_max_fit_samples <= 1:
-        raise ValueError("PCA limits must be positive")
     if args.paired_tta != "none" and args.support_augment != "none":
         raise ValueError("--paired-tta already augments normal support; use it with --support-augment none.")
     setup_seed(args.seed)
@@ -1392,36 +1181,6 @@ def main():
             args,
         )
         state = build_gallery_state(model, train_loader, args, device)
-        if args.vit_normal_model == "hybrid":
-            memory_reference, _ = support_reference_scores(
-                model,
-                train_loader,
-                state,
-                args,
-                device,
-                normal_subspace=state["normal_subspace"],
-                score_model="memory",
-            )
-            pca_reference, _ = support_reference_scores(
-                model,
-                train_loader,
-                state,
-                args,
-                device,
-                normal_subspace=state["normal_subspace"],
-                score_model="pca",
-            )
-            state["hybrid_calibrator"] = (
-                fit_support_score_calibrator(torch.from_numpy(memory_reference)),
-                fit_support_score_calibrator(torch.from_numpy(pca_reference)),
-            )
-            print(
-                "[hybrid] support_calibration "
-                f"memory_center={state['hybrid_calibrator'][0].center:.6f} "
-                f"memory_scale={state['hybrid_calibrator'][0].scale:.6f} "
-                f"pca_center={state['hybrid_calibrator'][1].center:.6f} "
-                f"pca_scale={state['hybrid_calibrator'][1].scale:.6f}"
-            )
         if args.support_reference_only:
             reference, names = support_reference_scores(
                 model,
@@ -1429,8 +1188,6 @@ def main():
                 state,
                 args,
                 device,
-                state["normal_subspace"],
-                state["hybrid_calibrator"],
             )
             reference_root = Path(args.output_root) / "support_reference"
             reference_root.mkdir(parents=True, exist_ok=True)
@@ -1457,8 +1214,6 @@ def main():
                     state["row_stats"],
                     state["row_prototypes"],
                     paired_tta_galleries=state["paired_tta_galleries"],
-                    normal_subspace=state["normal_subspace"],
-                    hybrid_calibrator=state["hybrid_calibrator"],
                 )
             )
         train_samples.extend(scene_train_samples)
@@ -1472,11 +1227,7 @@ def main():
                 {
                     "method": "vit_patchcore_gallery_cls",
                     "support_only": True,
-                    "support_reference_protocol": (
-                        "original_support_patch_leave_one_out"
-                        if args.paired_tta == "none"
-                        else "legacy_tta_reference_views"
-                    ),
+                    "reference_views": ["time_shift_up_large", "time_shift_down_large"],
                     "support_manifest": args.support_manifest,
                     "support_manifest_sha256": args.support_manifest_sha256,
                     "num_scenes": len(args.scenes),
@@ -1510,16 +1261,9 @@ def main():
         or None,
         "normal_sampling": args.normal_sampling,
         "patch_layer": "concat",
-        "vit_normal_model": args.vit_normal_model,
-        "pca_variance": args.pca_variance,
-        "pca_max_components": args.pca_max_components,
-        "pca_max_fit_samples": args.pca_max_fit_samples,
         "coreset_ratio": args.coreset_ratio,
         "coreset_method": args.coreset_method,
         "rowwise_coreset": bool(args.rowwise_coreset),
-        "memory_selection": getattr(args, "memory_selection", "farthest"),
-        "reliability_neighbors": int(getattr(args, "reliability_neighbors", 5)),
-        "reliability_drop_ratio": float(getattr(args, "reliability_drop_ratio", 0.0)),
         "memory_mode": args.memory_mode,
         "freq_window": args.freq_window,
         "nn_topk": args.nn_topk,
@@ -1532,6 +1276,7 @@ def main():
         "position_soft_weight": args.position_soft_weight,
         "coherence_alpha": args.coherence_alpha,
         "coherence_top_ratio": args.coherence_top_ratio,
+        "query_consistency_max_px": args.query_consistency_max_px,
         "support_augment": args.support_augment,
         "support_shift_px": args.support_shift_px,
         "support_crop_ratio": args.support_crop_ratio,

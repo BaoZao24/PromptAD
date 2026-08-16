@@ -12,7 +12,7 @@ Protocol
 * support: deterministic reservoir sample of benign train rows only;
 * shots: nested 1/2/4-shot subsets of that support pool;
 * ViT: layer1+layer2 concatenated patch features, 50% farthest coreset,
-  5-NN mean distance, identity/blur/time-shift paired-TTA with max fusion;
+  5-NN mean distance, and the identity view only in the formal protocol;
 * CNN: frozen ImageNet ResNet18 layer3, complete normal patch gallery,
   top-10% patch distance;
 * gate: the frozen support-only rule in ``utils.confidence_gate``;
@@ -61,6 +61,15 @@ from tools.eval_cls_vit_patchcore_gallery import (
 from tools.eval_seg_resnet_gallery_fusion import ResNet18LocalEncoder, load_checkpoint
 from train_rf_target_pooled_universal import to_model_input
 from utils.confidence_gate import safe_support_only_gate
+from utils.normal_subspace import (
+    NormalSubspace,
+    SupportScoreCalibrator,
+    fit_normal_subspace,
+    fit_support_score_calibrator,
+    fuse_support_calibrated_scores,
+    leave_one_out_topk_cosine_distance,
+)
+from utils.spectral_tta import SPECTRAL_TTA_BUNDLES, augment_spectrogram
 from utils.training_utils import setup_seed
 
 
@@ -185,13 +194,21 @@ def raw_tensor(records: list[RawRecord]) -> torch.Tensor:
     return torch.from_numpy(np.stack([record.image_bgr for record in records], axis=0))
 
 
-def _augment_bgr(image: np.ndarray, mode: str, shift_px: int = 4) -> np.ndarray:
+def vit_tta_modes(args) -> tuple[str, ...]:
+    if args.vit_tta == "none":
+        return ("identity",)
+    if args.vit_tta == "stft_shift_blur":
+        return VIT_TTA_MODES
+    return tuple(SPECTRAL_TTA_BUNDLES[args.vit_tta])
+
+
+def _augment_bgr(image: np.ndarray, mode: str, args) -> np.ndarray:
     if mode == "identity":
         return image
     if mode == "blur":
         return cv2.GaussianBlur(image, (3, 3), 0)
     if mode in {"time_shift_up", "time_shift_down", "time_shift_up_large", "time_shift_down_large"}:
-        magnitude = shift_px
+        magnitude = args.shift_px
         if mode.endswith("_large"):
             magnitude *= 2
         dy = -magnitude if "up" in mode else magnitude
@@ -204,12 +221,46 @@ def _augment_bgr(image: np.ndarray, mode: str, shift_px: int = 4) -> np.ndarray:
             flags=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_REFLECT_101,
         )
+    if mode in SPECTRAL_TTA_BUNDLES["rf_spectral_response_v1"]:
+        return augment_spectrogram(
+            image,
+            mode,
+            shift_px=args.shift_px,
+            frequency_response_strength=args.vit_tta_frequency_response_strength,
+        )
     raise ValueError(f"Unsupported FedJam augmentation: {mode}")
 
 
-def augment_records(records: list[RawRecord], mode: str, shift_px: int) -> torch.Tensor:
-    images = [_augment_bgr(record.image_bgr, mode, shift_px) for record in records]
+def augment_records(records: list[RawRecord], mode: str, args) -> torch.Tensor:
+    images = [_augment_bgr(record.image_bgr, mode, args) for record in records]
     return torch.from_numpy(np.stack(images, axis=0))
+
+
+def shift_raw_batch(raw: torch.Tensor, dy: int) -> torch.Tensor:
+    """Shift a BGR batch along the time axis (vertical for RF spectrograms)."""
+    if dy == 0:
+        return raw
+    height, width = raw.shape[1:3]
+    matrix = np.float32([[1, 0, 0], [0, 1, dy]])
+    shifted = np.stack(
+        [
+            cv2.warpAffine(
+                image,
+                matrix,
+                (width, height),
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_REFLECT_101,
+            )
+            for image in raw.numpy()
+        ],
+        axis=0,
+    )
+    return torch.from_numpy(np.ascontiguousarray(shifted))
+
+
+def qs_shift_values(max_px: int) -> tuple[int, ...]:
+    """Query-side consistency shift magnitudes: nonzero dy in [-max_px, max_px]."""
+    return tuple(dy for dy in range(-max_px, max_px + 1) if dy != 0)
 
 
 def vit_features(model, raw: torch.Tensor, device: torch.device):
@@ -223,11 +274,11 @@ def encode_vit_views(model, raw: torch.Tensor, args, device: torch.device):
 
     features = {}
     text_scores = None
-    for mode in VIT_TTA_MODES:
+    for mode in vit_tta_modes(args):
         viewed = augment_records(
             [RawRecord(image.numpy(), 0, "") for image in raw],
             mode,
-            args.shift_px,
+            args,
         )
         data_t = to_model_input(model, viewed, device, rgb_from_bgr=True)
         visual = model.encode_image(data_t)
@@ -251,8 +302,8 @@ def build_vit_galleries(
 
     support_features = {}
     with torch.inference_mode():
-        for mode in VIT_TTA_MODES:
-            raw = augment_records(support, mode, args.shift_px)
+        for mode in vit_tta_modes(args):
+            raw = augment_records(support, mode, args)
             support_features[mode] = vit_features(model, raw, device).float()
 
     galleries = {}
@@ -263,18 +314,19 @@ def build_vit_galleries(
             seed=args.seed + shot,
         )
         if args.vit_tta_memory_layout == "merged":
-            per_view_count = support_features[VIT_TTA_MODES[0]][:shot].numel() // support_features[VIT_TTA_MODES[0]].shape[-1]
+            modes = vit_tta_modes(args)
+            per_view_count = support_features[modes[0]][:shot].numel() // support_features[modes[0]].shape[-1]
             # Match the total number retained by four separately rounded
             # coresets.  This matters for 1-shot, where 4 * round(225 * .5)
             # is 448 rather than round(4 * 225 * .5) = 450.
             merged_keep = sum(
                 max(1, int(round(per_view_count * args.coreset_ratio)))
-                for _mode in VIT_TTA_MODES
+                for _mode in modes
             )
             features = torch.cat(
                 [
                     support_features[mode][:shot].reshape(-1, support_features[mode].shape[-1])
-                    for mode in VIT_TTA_MODES
+                    for mode in modes
                 ],
                 dim=0,
             )
@@ -291,7 +343,7 @@ def build_vit_galleries(
             continue
 
         galleries[shot] = {}
-        for mode in VIT_TTA_MODES:
+        for mode in vit_tta_modes(args):
             features = support_features[mode][:shot].reshape(-1, support_features[mode].shape[-1])
             features = F.normalize(features.float(), dim=-1).contiguous()
             if args.coreset_ratio < 1.0:
@@ -326,9 +378,161 @@ def build_cnn_galleries(
     return galleries
 
 
+def build_vit_subspaces(
+    model,
+    support: list[RawRecord],
+    shots: list[int],
+    args,
+    device: torch.device,
+):
+    """Fit support-only PCA subspaces for the requested nested shots."""
+
+    if args.vit_normal_model not in {"pca", "hybrid"}:
+        return {shot: None for shot in shots}
+    subspaces = {}
+    modes = vit_tta_modes(args)
+    with torch.inference_mode():
+        encoded = {}
+        for mode in modes:
+            raw = augment_records(support, mode, args)
+            encoded[mode] = vit_features(model, raw, device).float()
+    for shot in shots:
+        if args.vit_tta_memory_layout == "merged":
+            features = torch.cat(
+                [encoded[mode][:shot].reshape(-1, encoded[mode].shape[-1]) for mode in modes],
+                dim=0,
+            )
+        else:
+            # The formal PCA path is normally run with --vit-tta none.  If a
+            # paired bundle is explicitly requested, use all support views
+            # as the normal variation model while keeping the query protocol
+            # unchanged.
+            features = torch.cat(
+                [encoded[mode][:shot].reshape(-1, encoded[mode].shape[-1]) for mode in modes],
+                dim=0,
+            )
+        subspaces[shot] = fit_normal_subspace(
+            features,
+            variance_threshold=args.pca_variance,
+            max_components=args.pca_max_components,
+            max_fit_samples=args.pca_max_fit_samples,
+            seed=args.seed + shot,
+        ).to(device)
+        print(
+            f"[vit_subspace] shot={shot} rank={subspaces[shot].rank} "
+            f"fit_samples={subspaces[shot].fit_samples} "
+            f"retained_variance={subspaces[shot].explained_variance_ratio:.4f}"
+        )
+    return subspaces
+
+
+def build_vit_calibrators(
+    model,
+    support: list[RawRecord],
+    shots: list[int],
+    args,
+    device: torch.device,
+    galleries: dict,
+    subspaces: dict,
+):
+    """Fit support-only scales for the memory/PCA agreement score."""
+
+    if args.vit_normal_model != "hybrid":
+        return {shot: None for shot in shots}
+    calibrators = {}
+    for shot in shots:
+        selected = support[:shot]
+        if args.vit_tta != "none":
+            memory_support = []
+            subspace_support = []
+            for reference_mode in VIT_REFERENCE_MODES:
+                raw = augment_records(selected, reference_mode, args)
+                if args.vit_tta_memory_layout == "merged":
+                    features = {"identity": vit_features(model, raw, device)}
+                else:
+                    features, _text = encode_vit_views(model, raw, args, device)
+                memory_support.extend(
+                    vit_query_scores(features, galleries[shot], args, score_model="memory").tolist()
+                )
+                subspace_support.extend(
+                    vit_query_scores(
+                        features,
+                        galleries[shot],
+                        args,
+                        normal_subspace=subspaces[shot],
+                        score_model="pca",
+                    ).tolist()
+                )
+            memory_support = torch.as_tensor(memory_support, dtype=torch.float32)
+            subspace_support = torch.as_tensor(subspace_support, dtype=torch.float32)
+        else:
+            raw = raw_tensor(selected)
+            features = vit_features(model, raw, device)
+            memory_patch_scores = leave_one_out_topk_cosine_distance(
+                features,
+                topk=args.nn_topk,
+                chunk_size=args.distance_chunk_size,
+                distance_divisor=2.0,
+            ).reshape(shot, -1)
+            memory_support = memory_patch_scores.max(dim=1).values
+            subspace_support = subspaces[shot].score(features).reshape(shot, -1).max(dim=1).values
+        calibrators[shot] = (
+            fit_support_score_calibrator(memory_support),
+            fit_support_score_calibrator(subspace_support),
+        )
+        print(
+            f"[hybrid] shot={shot} support_calibration "
+            f"memory_center={calibrators[shot][0].center:.6f} "
+            f"memory_scale={calibrators[shot][0].scale:.6f} "
+            f"pca_center={calibrators[shot][1].center:.6f} "
+            f"pca_scale={calibrators[shot][1].scale:.6f}"
+        )
+    return calibrators
+
+
 @torch.inference_mode()
-def vit_query_scores(patch_features: torch.Tensor, galleries: dict, args):
+def vit_query_scores(
+    patch_features: torch.Tensor,
+    galleries: dict,
+    args,
+    normal_subspace: NormalSubspace | None = None,
+    hybrid_calibrator: tuple[SupportScoreCalibrator, SupportScoreCalibrator] | None = None,
+    score_model: str | None = None,
+):
     """Return paired-TTA ViT max-patch scores for one query batch."""
+
+    active_model = score_model or getattr(args, "vit_normal_model", "memory")
+    if active_model == "hybrid":
+        if normal_subspace is None or hybrid_calibrator is None:
+            raise ValueError("Hybrid scoring requires a fitted PCA model and support calibrator")
+        memory_scores = vit_query_scores(
+            patch_features,
+            galleries,
+            args,
+            normal_subspace=None,
+            hybrid_calibrator=None,
+            score_model="memory",
+        )
+        subspace_scores = vit_query_scores(
+            patch_features,
+            galleries,
+            args,
+            normal_subspace=normal_subspace,
+            hybrid_calibrator=None,
+            score_model="pca",
+        )
+        fused = fuse_support_calibrated_scores(
+            torch.from_numpy(memory_scores),
+            torch.from_numpy(subspace_scores),
+            hybrid_calibrator,
+        )
+        return fused.numpy().astype(np.float32)
+    if active_model == "pca":
+        if normal_subspace is None:
+            raise ValueError("PCA scoring requires a fitted normal subspace")
+        probes = patch_features["identity"]
+        residual = normal_subspace.score(probes).reshape(probes.shape[0], -1)
+        return residual.max(dim=1).values.cpu().numpy().astype(np.float32)
 
     if args.vit_tta_memory_layout == "merged":
         probes = patch_features["identity"].reshape(-1, patch_features["identity"].shape[-1])
@@ -341,7 +545,7 @@ def vit_query_scores(patch_features: torch.Tensor, galleries: dict, args):
         return distances.max(dim=1).values.cpu().numpy().astype(np.float32)
 
     scores = []
-    for mode in VIT_TTA_MODES:
+    for mode in vit_tta_modes(args):
         gallery = galleries[mode]
         probes = patch_features[mode].reshape(-1, patch_features[mode].shape[-1])
         distances = topk_cosine_distance_chunked(
@@ -355,14 +559,28 @@ def vit_query_scores(patch_features: torch.Tensor, galleries: dict, args):
 
 
 @torch.inference_mode()
-def score_vit_batch(model, raw: torch.Tensor, gallery: dict, args, device: torch.device):
+def score_vit_batch(
+    model,
+    raw: torch.Tensor,
+    gallery: dict,
+    args,
+    device: torch.device,
+    normal_subspace: NormalSubspace | None = None,
+    hybrid_calibrator: tuple[SupportScoreCalibrator, SupportScoreCalibrator] | None = None,
+):
     if args.vit_tta_memory_layout == "merged":
         # A merged gallery is queried once.  ``raw`` may already be a held-out
         # shifted support view when constructing the fixed gate reference.
         features = {"identity": vit_features(model, raw, device)}
     else:
         features, _text_scores = encode_vit_views(model, raw, args, device)
-    scores = vit_query_scores(features, gallery, args)
+    scores = vit_query_scores(
+        features,
+        gallery,
+        args,
+        normal_subspace,
+        hybrid_calibrator,
+    )
     return scores
 
 
@@ -379,6 +597,93 @@ def score_cnn_batch(encoder, raw: torch.Tensor, gallery: torch.Tensor, args, dev
     ).astype(np.float32)
 
 
+@torch.inference_mode()
+def encode_query_views(model, raw: torch.Tensor, args, device: torch.device):
+    """Encode one query batch into the per-mode patch-feature dict."""
+    if args.vit_tta_memory_layout == "merged":
+        visual = model.encode_image(to_model_input(model, raw, device, rgb_from_bgr=True))
+        return {"identity": prepare_patch_features(visual)}
+    features, _text_scores = encode_vit_views(model, raw, args, device)
+    return features
+
+
+@torch.inference_mode()
+def build_shifted_query_features(model, raw: torch.Tensor, args, device: torch.device):
+    """Encode query-side shifted views: dy -> patch-feature dict."""
+    features = {}
+    for dy in qs_shift_values(args.query_consistency_max_px):
+        shifted = shift_raw_batch(raw, dy)
+        features[dy] = encode_query_views(model, shifted, args, device)
+    return features
+
+
+@torch.inference_mode()
+def score_batch(
+    model,
+    encoder,
+    raw,
+    vit_gallery,
+    cnn_gallery,
+    args,
+    device,
+    qs_features=None,
+    normal_subspace: NormalSubspace | None = None,
+    hybrid_calibrator: tuple[SupportScoreCalibrator, SupportScoreCalibrator] | None = None,
+):
+    """Score one batch; optionally also score shifted query views."""
+    if args.vit_tta_memory_layout == "merged":
+        visual = model.encode_image(to_model_input(model, raw, device, rgb_from_bgr=True))
+        vit_features_by_mode = {"identity": prepare_patch_features(visual)}
+        text_scores = np.asarray(
+            model.calculate_textual_anomaly_score(visual, "cls"),
+            dtype=np.float32,
+        )
+    else:
+        vit_features_by_mode, text_scores = encode_vit_views(model, raw, args, device)
+    cnn_raw = raw.permute(0, 3, 1, 2).to(device, non_blocking=True)
+    cnn_layer3 = encoder(cnn_raw)["layer3"]
+    vit_scores = vit_query_scores(
+        vit_features_by_mode,
+        vit_gallery,
+        args,
+        normal_subspace,
+        hybrid_calibrator,
+    )
+    cnn_scores = resnet_patch_image_scores(
+        cnn_layer3,
+        cnn_gallery,
+        args.distance_chunk_size,
+        args.cnn_top_ratio,
+        args.cnn_nn_topk,
+    ).astype(np.float32)
+    out = {
+        "vit_scores": vit_scores,
+        "cnn_scores": cnn_scores,
+        "text_scores": text_scores,
+    }
+    if qs_features:
+        shifted = np.stack(
+            [
+                vit_query_scores(
+                    features,
+                    vit_gallery,
+                    args,
+                    normal_subspace,
+                    hybrid_calibrator,
+                )
+                for features in qs_features.values()
+            ],
+            axis=0,
+        )
+        combined = np.concatenate([vit_scores[None, :], shifted], axis=0)
+        out["qs_min"] = combined.min(axis=0)
+        out["qs_mean"] = combined.mean(axis=0)
+        out["qs_median"] = np.median(combined, axis=0)
+        out["qs_max"] = combined.max(axis=0)
+        out["qs_views"] = combined.T.astype(np.float32)
+    return out
+
+
 def support_reference_scores(
     model,
     encoder,
@@ -388,26 +693,60 @@ def support_reference_scores(
     cnn_gallery: torch.Tensor,
     args,
     device: torch.device,
+    normal_subspace: NormalSubspace | None = None,
+    hybrid_calibrator: tuple[SupportScoreCalibrator, SupportScoreCalibrator] | None = None,
 ):
-    """Score held-out support views for the fixed inductive gate."""
+    """Score original support with an exact patch-level leave-one-out rule."""
 
-    vit_reference = []
-    cnn_reference = []
     selected = support[:shot]
-    with torch.inference_mode():
-        for mode in VIT_REFERENCE_MODES:
-            raw = augment_records(selected, mode, args.shift_px)
-            # The formal paired-TTA evaluator applies the same paired query
-            # views against the corresponding support galleries, then maxes.
-            vit_values = score_vit_batch(model, raw, vit_gallery, args, device)
-            vit_reference.extend(vit_values.tolist())
+    if args.vit_tta != "none":
+        vit_reference = []
+        cnn_reference = []
+        with torch.inference_mode():
+            for mode in VIT_REFERENCE_MODES:
+                raw = augment_records(selected, mode, args)
+                vit_values = score_vit_batch(
+                    model,
+                    raw,
+                    vit_gallery,
+                    args,
+                    device,
+                    normal_subspace,
+                    hybrid_calibrator,
+                )
+                vit_reference.extend(vit_values.tolist())
+            for mode in CNN_REFERENCE_MODES:
+                raw = augment_records(selected, mode, args)
+                cnn_reference.extend(score_cnn_batch(encoder, raw, cnn_gallery, args, device).tolist())
+        return np.asarray(vit_reference, dtype=np.float32), np.asarray(cnn_reference, dtype=np.float32)
 
-        for mode in CNN_REFERENCE_MODES:
-            raw = augment_records(selected, mode, args.shift_px)
-            cnn_reference.extend(
-                score_cnn_batch(encoder, raw, cnn_gallery, args, device).tolist()
-            )
-    return np.asarray(vit_reference, dtype=np.float32), np.asarray(cnn_reference, dtype=np.float32)
+    with torch.inference_mode():
+        raw = raw_tensor(selected)
+        vit_features_original = vit_features(model, raw, device)
+        vit_patch_scores = leave_one_out_topk_cosine_distance(
+            vit_features_original,
+            topk=args.nn_topk,
+            chunk_size=args.distance_chunk_size,
+            distance_divisor=2.0,
+        ).reshape(shot, -1)
+        vit_reference = vit_patch_scores.max(dim=1).values.cpu().numpy().astype(np.float32)
+
+        cnn_raw = raw.permute(0, 3, 1, 2).to(device, non_blocking=True)
+        cnn_features = encoder(cnn_raw)["layer3"].float()
+        cnn_patch_features = cnn_features.permute(0, 2, 3, 1).reshape(
+            cnn_features.shape[0], -1, cnn_features.shape[1]
+        )
+        cnn_patch_scores = leave_one_out_topk_cosine_distance(
+            cnn_patch_features,
+            topk=args.cnn_nn_topk,
+            chunk_size=args.distance_chunk_size,
+            distance_divisor=1.0,
+        ).reshape(cnn_features.shape[0], -1)
+        keep = max(1, int(round(cnn_patch_scores.shape[1] * args.cnn_top_ratio)))
+        cnn_reference = (
+            cnn_patch_scores.topk(keep, dim=1).values.mean(dim=1).cpu().numpy().astype(np.float32)
+        )
+    return vit_reference, cnn_reference
 
 
 def metric(labels, scores):
@@ -503,11 +842,27 @@ def main():
     parser.add_argument("--cnn-top-ratio", type=float, default=0.1)
     parser.add_argument("--cnn-nn-topk", type=int, default=1)
     parser.add_argument("--coreset-ratio", type=float, default=0.5)
+    parser.add_argument(
+        "--vit-normal-model",
+        choices=["memory", "pca", "hybrid"],
+        default="memory",
+        help="Normality score: memory, support-only PCA, or calibrated memory-PCA agreement.",
+    )
+    parser.add_argument("--pca-variance", type=float, default=0.99)
+    parser.add_argument("--pca-max-components", type=int, default=256)
+    parser.add_argument("--pca-max-fit-samples", type=int, default=8192)
     parser.add_argument("--shift-px", type=int, default=4)
+    parser.add_argument(
+        "--vit-tta",
+        choices=["none", "stft_shift_blur", "rf_spectral_response_v1"],
+        default="none",
+        help="Normal-memory view bundle; the formal default uses the identity view only.",
+    )
+    parser.add_argument("--vit-tta-frequency-response-strength", type=float, default=5.0)
     parser.add_argument(
         "--vit-tta-memory-layout",
         choices=["separate", "merged"],
-        default="separate",
+        default="merged",
         help=(
             "separate: query each augmented view against its paired normal gallery; "
             "merged: combine augmented normal features and query each test view once."
@@ -515,6 +870,16 @@ def main():
     )
     parser.add_argument("--seed", type=int, default=111)
     parser.add_argument("--gpu-id", type=int, default=0)
+    parser.add_argument(
+        "--query-consistency-max-px",
+        type=int,
+        default=0,
+        help=(
+            "Query-side time-axis shift sweep magnitude (px); 0 disables. "
+            "Each test image is additionally queried under all nonzero dy in "
+            "[-max_px, max_px] and min/mean/max aggregates are recorded."
+        ),
+    )
     parser.add_argument(
         "--include-promptad-text",
         action="store_true",
@@ -530,6 +895,10 @@ def main():
         raise ValueError("--shots must contain positive integers")
     if not (0.0 < args.coreset_ratio <= 1.0):
         raise ValueError("--coreset-ratio must be in (0, 1]")
+    if not (0.0 < args.pca_variance <= 1.0):
+        raise ValueError("--pca-variance must be in (0, 1]")
+    if args.pca_max_components <= 0 or args.pca_max_fit_samples <= 1:
+        raise ValueError("PCA limits must be positive")
     shots = sorted(set(int(value) for value in args.shots))
     max_shot = max(shots)
     data_root = Path(args.data_root).resolve()
@@ -598,6 +967,16 @@ def main():
     encoder = ResNet18LocalEncoder().to(device).eval()
 
     vit_galleries = build_vit_galleries(model, support, shots, args, device)
+    vit_subspaces = build_vit_subspaces(model, support, shots, args, device)
+    vit_calibrators = build_vit_calibrators(
+        model,
+        support,
+        shots,
+        args,
+        device,
+        vit_galleries,
+        vit_subspaces,
+    )
     cnn_galleries = build_cnn_galleries(encoder, support, shots, device)
 
     references = {}
@@ -611,6 +990,8 @@ def main():
             cnn_galleries[shot],
             args,
             device,
+            vit_subspaces[shot],
+            vit_calibrators[shot],
         )
         references[shot] = {"vit": vit_reference, "cnn": cnn_reference}
         print(
@@ -630,6 +1011,13 @@ def main():
         }
         for shot in shots
     }
+    if args.query_consistency_max_px > 0:
+        for shot in shots:
+            score_bank[shot]["qs_min_vit_scores"] = []
+            score_bank[shot]["qs_mean_vit_scores"] = []
+            score_bank[shot]["qs_median_vit_scores"] = []
+            score_bank[shot]["qs_max_vit_scores"] = []
+            score_bank[shot]["qs_view_vit_scores"] = []
     if args.include_promptad_text:
         for shot in shots:
             score_bank[shot]["promptad_text_scores"] = []
@@ -647,42 +1035,43 @@ def main():
             batch_labels = [record.label for record in pending]
             batch_names = [record.name for record in pending]
 
-            if args.vit_tta_memory_layout == "merged":
-                visual = model.encode_image(to_model_input(model, raw, device, rgb_from_bgr=True))
-                vit_features_by_mode = {"identity": prepare_patch_features(visual)}
-                text_scores = np.asarray(
-                    model.calculate_textual_anomaly_score(visual, "cls"),
-                    dtype=np.float32,
-                )
-            else:
-                vit_features_by_mode, text_scores = encode_vit_views(
-                    model, raw, args, device
-                )
-            cnn_raw = raw.permute(0, 3, 1, 2).to(device, non_blocking=True)
-            cnn_layer3 = encoder(cnn_raw)["layer3"]
-
+            qs_features = (
+                build_shifted_query_features(model, raw, args, device)
+                if args.query_consistency_max_px > 0
+                else None
+            )
             for shot in shots:
-                vit_scores = vit_query_scores(vit_features_by_mode, vit_galleries[shot], args)
-                cnn_scores = resnet_patch_image_scores(
-                    cnn_layer3,
+                batch_scores = score_batch(
+                    model,
+                    encoder,
+                    raw,
+                    vit_galleries[shot],
                     cnn_galleries[shot],
-                    args.distance_chunk_size,
-                    args.cnn_top_ratio,
-                    args.cnn_nn_topk,
-                ).astype(np.float32)
+                    args,
+                    device,
+                    qs_features,
+                    vit_subspaces[shot],
+                    vit_calibrators[shot],
+                )
                 gated = safe_support_only_gate(
-                    vit_scores,
-                    cnn_scores,
+                    batch_scores["vit_scores"],
+                    batch_scores["cnn_scores"],
                     references[shot]["vit"],
                     references[shot]["cnn"],
                 )
-                score_bank[shot]["vit_patchcore_max_scores"].extend(vit_scores.tolist())
-                score_bank[shot]["resnet18_layer3_top0.1_scores"].extend(cnn_scores.tolist())
+                score_bank[shot]["vit_patchcore_max_scores"].extend(batch_scores["vit_scores"].tolist())
+                score_bank[shot]["resnet18_layer3_top0.1_scores"].extend(batch_scores["cnn_scores"].tolist())
                 if args.include_promptad_text:
-                    score_bank[shot]["promptad_text_scores"].extend(text_scores.tolist())
+                    score_bank[shot]["promptad_text_scores"].extend(batch_scores["text_scores"].tolist())
                 score_bank[shot]["confidence_gated_score"].extend(gated["score"].astype(np.float32).tolist())
                 score_bank[shot]["cnn_gate"].extend(gated["gate"].astype(np.float32).tolist())
                 score_bank[shot]["cnn_rank"].extend(gated["cnn_rank"].astype(np.float32).tolist())
+                if qs_features:
+                    score_bank[shot]["qs_min_vit_scores"].extend(batch_scores["qs_min"].tolist())
+                    score_bank[shot]["qs_mean_vit_scores"].extend(batch_scores["qs_mean"].tolist())
+                    score_bank[shot]["qs_median_vit_scores"].extend(batch_scores["qs_median"].tolist())
+                    score_bank[shot]["qs_max_vit_scores"].extend(batch_scores["qs_max"].tolist())
+                    score_bank[shot]["qs_view_vit_scores"].append(batch_scores["qs_views"])
 
             labels.extend(batch_labels)
             names.extend(batch_names)
@@ -694,40 +1083,43 @@ def main():
             raw = raw_tensor(pending)
             batch_labels = [record.label for record in pending]
             batch_names = [record.name for record in pending]
-            if args.vit_tta_memory_layout == "merged":
-                visual = model.encode_image(to_model_input(model, raw, device, rgb_from_bgr=True))
-                vit_features_by_mode = {"identity": prepare_patch_features(visual)}
-                text_scores = np.asarray(
-                    model.calculate_textual_anomaly_score(visual, "cls"),
-                    dtype=np.float32,
-                )
-            else:
-                vit_features_by_mode, text_scores = encode_vit_views(
-                    model, raw, args, device
-                )
-            cnn_layer3 = encoder(raw.permute(0, 3, 1, 2).to(device, non_blocking=True))["layer3"]
+            qs_features = (
+                build_shifted_query_features(model, raw, args, device)
+                if args.query_consistency_max_px > 0
+                else None
+            )
             for shot in shots:
-                vit_scores = vit_query_scores(vit_features_by_mode, vit_galleries[shot], args)
-                cnn_scores = resnet_patch_image_scores(
-                    cnn_layer3,
+                batch_scores = score_batch(
+                    model,
+                    encoder,
+                    raw,
+                    vit_galleries[shot],
                     cnn_galleries[shot],
-                    args.distance_chunk_size,
-                    args.cnn_top_ratio,
-                    args.cnn_nn_topk,
-                ).astype(np.float32)
+                    args,
+                    device,
+                    qs_features,
+                    vit_subspaces[shot],
+                    vit_calibrators[shot],
+                )
                 gated = safe_support_only_gate(
-                    vit_scores,
-                    cnn_scores,
+                    batch_scores["vit_scores"],
+                    batch_scores["cnn_scores"],
                     references[shot]["vit"],
                     references[shot]["cnn"],
                 )
-                score_bank[shot]["vit_patchcore_max_scores"].extend(vit_scores.tolist())
-                score_bank[shot]["resnet18_layer3_top0.1_scores"].extend(cnn_scores.tolist())
+                score_bank[shot]["vit_patchcore_max_scores"].extend(batch_scores["vit_scores"].tolist())
+                score_bank[shot]["resnet18_layer3_top0.1_scores"].extend(batch_scores["cnn_scores"].tolist())
                 if args.include_promptad_text:
-                    score_bank[shot]["promptad_text_scores"].extend(text_scores.tolist())
+                    score_bank[shot]["promptad_text_scores"].extend(batch_scores["text_scores"].tolist())
                 score_bank[shot]["confidence_gated_score"].extend(gated["score"].astype(np.float32).tolist())
                 score_bank[shot]["cnn_gate"].extend(gated["gate"].astype(np.float32).tolist())
                 score_bank[shot]["cnn_rank"].extend(gated["cnn_rank"].astype(np.float32).tolist())
+                if qs_features:
+                    score_bank[shot]["qs_min_vit_scores"].extend(batch_scores["qs_min"].tolist())
+                    score_bank[shot]["qs_mean_vit_scores"].extend(batch_scores["qs_mean"].tolist())
+                    score_bank[shot]["qs_median_vit_scores"].extend(batch_scores["qs_median"].tolist())
+                    score_bank[shot]["qs_max_vit_scores"].extend(batch_scores["qs_max"].tolist())
+                    score_bank[shot]["qs_view_vit_scores"].append(batch_scores["qs_views"])
             labels.extend(batch_labels)
             names.extend(batch_names)
             for label in batch_labels:
@@ -749,10 +1141,23 @@ def main():
         "train_counts": train_counts,
         "support_only": True,
         "test_batch_statistics_used": False,
-        "vit_tta_modes": list(VIT_TTA_MODES),
+        "vit_tta": args.vit_tta,
+        "vit_tta_modes": list(vit_tta_modes(args)),
+        "query_consistency_max_px": args.query_consistency_max_px,
+        "qs_shifts": list(qs_shift_values(args.query_consistency_max_px)),
+        "vit_tta_frequency_response_strength": args.vit_tta_frequency_response_strength,
         "vit_tta_memory_layout": args.vit_tta_memory_layout,
-        "vit_reference_modes": list(VIT_REFERENCE_MODES),
-        "cnn_reference_modes": list(CNN_REFERENCE_MODES),
+        "vit_normal_model": args.vit_normal_model,
+        "pca_variance": args.pca_variance,
+        "pca_max_components": args.pca_max_components,
+        "pca_max_fit_samples": args.pca_max_fit_samples,
+        "support_reference_protocol": (
+            "original_support_patch_leave_one_out"
+            if args.vit_tta == "none"
+            else "legacy_tta_reference_views"
+        ),
+        "vit_reference_modes": list(VIT_REFERENCE_MODES) if args.vit_tta != "none" else [],
+        "cnn_reference_modes": list(CNN_REFERENCE_MODES) if args.vit_tta != "none" else [],
         "vit_feature": "normalized ViT layer1+layer2 concat",
         "cnn_feature": "ImageNet ResNet18 layer3",
         "vit_coreset_ratio": args.coreset_ratio,
@@ -766,6 +1171,8 @@ def main():
     score_dir.mkdir(parents=True, exist_ok=True)
     for shot in shots:
         arrays = {key: np.asarray(values, dtype=np.float32) for key, values in score_bank[shot].items()}
+        if "qs_view_vit_scores" in arrays:
+            arrays["qs_view_vit_scores"] = np.concatenate(arrays["qs_view_vit_scores"], axis=0)
         np.savez_compressed(
             score_dir / f"fedjam_{shot}shot_scores.npz",
             labels=labels_np,
@@ -777,6 +1184,14 @@ def main():
             "cnn_layer3_top0.1": "resnet18_layer3_top0.1_scores",
             "confidence_gated_dual_visual": "confidence_gated_score",
         }
+        if args.query_consistency_max_px > 0:
+            method_map = {
+                "qs_min_vit_patchcore": "qs_min_vit_scores",
+                "qs_mean_vit_patchcore": "qs_mean_vit_scores",
+                "qs_median_vit_patchcore": "qs_median_vit_scores",
+                "qs_max_vit_patchcore": "qs_max_vit_scores",
+                **method_map,
+            }
         if args.include_promptad_text:
             method_map = {
                 "promptad_text": "promptad_text_scores",

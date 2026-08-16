@@ -41,6 +41,7 @@ from tools.eval_cls_vit_patchcore_gallery import (
     build_row_prototypes,
     build_vit_nn_gallery_with_rows,
     connected_region_score,
+    finalize_vit_nn_gallery,
     min_cosine_distance_chunked,
     paired_tta_batch,
     prepare_patch_features,
@@ -49,6 +50,14 @@ from tools.eval_cls_vit_patchcore_gallery import (
 )
 from tools.eval_seg_resnet_gallery_fusion import load_checkpoint
 from train_rf_target_pooled_universal import build_gallery, to_model_input
+from utils.normal_subspace import (
+    NormalSubspace,
+    SupportScoreCalibrator,
+    fit_normal_subspace,
+    fit_support_score_calibrator,
+    fuse_support_calibrated_scores,
+    leave_one_out_topk_cosine_distance,
+)
 from utils.training_utils import setup_seed
 
 
@@ -91,6 +100,9 @@ def compute_public_patch_map(
     row_prototypes=None,
     paired_tta_mode="identity",
     visual_features=None,
+    normal_subspace: NormalSubspace | None = None,
+    hybrid_calibrator: tuple[SupportScoreCalibrator, SupportScoreCalibrator] | None = None,
+    score_model: str | None = None,
 ):
     if visual_features is None or paired_tta_mode != "identity":
         data_variant = paired_tta_batch(raw_batch, paired_tta_mode, args)
@@ -99,6 +111,51 @@ def compute_public_patch_map(
     patch_features = prepare_patch_features(visual_features)
     bsz, num_patches, _ = patch_features.shape
     grid_h, grid_w = model.grid_size
+    active_model = score_model or getattr(args, "vit_normal_model", "memory")
+    if active_model == "hybrid":
+        if normal_subspace is None or hybrid_calibrator is None:
+            raise ValueError("Hybrid scoring requires a fitted PCA model and support calibrator")
+        memory_map = compute_public_patch_map(
+            model,
+            raw_batch,
+            gallery,
+            gallery_rows,
+            gallery_cols,
+            args,
+            device,
+            row_stats=row_stats,
+            row_prototypes=row_prototypes,
+            paired_tta_mode=paired_tta_mode,
+            visual_features=visual_features,
+            normal_subspace=None,
+            hybrid_calibrator=None,
+            score_model="memory",
+        )
+        subspace_map = compute_public_patch_map(
+            model,
+            raw_batch,
+            gallery,
+            gallery_rows,
+            gallery_cols,
+            args,
+            device,
+            row_stats=row_stats,
+            row_prototypes=row_prototypes,
+            paired_tta_mode=paired_tta_mode,
+            visual_features=visual_features,
+            normal_subspace=normal_subspace,
+            hybrid_calibrator=None,
+            score_model="pca",
+        )
+        return fuse_support_calibrated_scores(
+            memory_map,
+            subspace_map,
+            hybrid_calibrator,
+        )
+    if active_model == "pca":
+        if normal_subspace is None:
+            raise ValueError("PCA scoring requires a fitted normal subspace")
+        return normal_subspace.score(patch_features).reshape(bsz, grid_h, grid_w)
     if args.memory_mode == "row_proto":
         return row_prototype_scores(
             patch_features,
@@ -140,6 +197,9 @@ def compute_public_fused_map(
     row_prototypes=None,
     paired_tta_galleries=None,
     visual_features=None,
+    normal_subspace: NormalSubspace | None = None,
+    hybrid_calibrator: tuple[SupportScoreCalibrator, SupportScoreCalibrator] | None = None,
+    score_model: str | None = None,
 ):
     if paired_tta_galleries:
         maps = [
@@ -155,6 +215,9 @@ def compute_public_fused_map(
                 row_prototypes=None,
                 paired_tta_mode=mode,
                 visual_features=(visual_features if mode == "identity" else None),
+                normal_subspace=normal_subspace,
+                hybrid_calibrator=hybrid_calibrator,
+                score_model=score_model,
             )
             for mode, tta_gallery, tta_rows, tta_cols in paired_tta_galleries
         ]
@@ -176,6 +239,9 @@ def compute_public_fused_map(
         row_prototypes,
         paired_tta_mode="identity",
         visual_features=visual_features,
+        normal_subspace=normal_subspace,
+        hybrid_calibrator=hybrid_calibrator,
+        score_model=score_model,
     )
 
 
@@ -191,6 +257,8 @@ def evaluate(
     row_stats=None,
     row_prototypes=None,
     paired_tta_galleries=None,
+    normal_subspace: NormalSubspace | None = None,
+    hybrid_calibrator: tuple[SupportScoreCalibrator, SupportScoreCalibrator] | None = None,
 ):
     model.eval_mode()
     model.build_text_feature_gallery()
@@ -226,6 +294,8 @@ def evaluate(
                 row_prototypes,
                 paired_tta_galleries,
                 visual_features=visual_features,
+                normal_subspace=normal_subspace,
+                hybrid_calibrator=hybrid_calibrator,
             )
             pc_map = pc_t.detach().cpu().numpy().astype(np.float32)
 
@@ -330,40 +400,64 @@ def support_reference_scores(
     row_stats=None,
     row_prototypes=None,
     paired_tta_galleries=None,
+    normal_subspace: NormalSubspace | None = None,
+    hybrid_calibrator: tuple[SupportScoreCalibrator, SupportScoreCalibrator] | None = None,
+    score_model: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Score held-out shifts of the normal support only.
+    """Score original support patches after removing each exact self-match."""
 
-    The two \u00b18-pixel shifts are not part of the formal support gallery.  They
-    provide a small normal reference distribution without consulting any
-    public-RF test image or test label.
-    """
+    if args.paired_tta != "none":
+        scores, names = [], []
+        for data, _mask, _label, name, _img_type in tqdm(
+            support_loader,
+            desc="Score support-only public legacy TTA reference",
+            leave=False,
+        ):
+            for mode in ("time_shift_up_large", "time_shift_down_large"):
+                shifted = paired_tta_batch(data, mode, args)
+                map_t = compute_public_fused_map(
+                    model,
+                    shifted,
+                    patchcore_gallery,
+                    gallery_rows,
+                    gallery_cols,
+                    args,
+                    device,
+                    row_stats,
+                    row_prototypes,
+                    paired_tta_galleries,
+                    normal_subspace=normal_subspace,
+                    hybrid_calibrator=hybrid_calibrator,
+                    score_model=score_model,
+                )
+                scores.extend(
+                    map_t.detach().cpu().reshape(map_t.shape[0], -1).max(dim=1).values.tolist()
+                )
+                names.extend(str(value) for value in name)
+        return np.asarray(scores, dtype=np.float32), np.asarray(names)
 
-    scores, names = [], []
+    features, names = [], []
     for data, _mask, _label, name, _img_type in tqdm(
         support_loader,
-        desc="Score support-only public ViT reference",
+        desc="Score support-only public ViT leave-one-out reference",
         leave=False,
     ):
-        for mode in ("time_shift_up_large", "time_shift_down_large"):
-            shifted = paired_tta_batch(data, mode, args)
-            map_t = compute_public_fused_map(
-                model,
-                shifted,
-                patchcore_gallery,
-                gallery_rows,
-                gallery_cols,
-                args,
-                device,
-                row_stats,
-                row_prototypes,
-                paired_tta_galleries,
-            )
-            map_np = map_t.detach().cpu().numpy().astype(np.float32)
-            scores.extend(
-                map_np.reshape(map_np.shape[0], -1).max(axis=1).tolist()
-            )
-            names.extend(str(value) for value in name)
-    return np.asarray(scores, dtype=np.float32), np.asarray(names)
+        data_t = to_model_input(model, data, device, rgb_from_bgr=True)
+        features.append(prepare_patch_features(model.encode_image(data_t)))
+        names.extend(str(value) for value in name)
+    features = torch.cat(features, dim=0)
+    if score_model == "pca":
+        if normal_subspace is None:
+            raise ValueError("PCA support reference requires a fitted subspace")
+        scores = normal_subspace.score(features).reshape(features.shape[0], -1).max(dim=1).values
+    else:
+        scores = leave_one_out_topk_cosine_distance(
+            features,
+            topk=args.nn_topk,
+            chunk_size=args.gallery_chunk_size,
+            distance_divisor=2.0,
+        ).reshape(features.shape[0], -1).max(dim=1).values
+    return scores.cpu().numpy().astype(np.float32), np.asarray(names)
 
 
 def main():
@@ -384,6 +478,15 @@ def main():
     parser.add_argument("--max-abnormals", type=int, default=0)
     parser.add_argument("--coreset-ratio", type=float, default=0.5)
     parser.add_argument("--coreset-method", choices=["random", "farthest"], default="farthest")
+    parser.add_argument(
+        "--vit-normal-model",
+        choices=["memory", "pca", "hybrid"],
+        default="memory",
+        help="Normality score: memory, support-only PCA, or calibrated memory-PCA agreement.",
+    )
+    parser.add_argument("--pca-variance", type=float, default=0.99)
+    parser.add_argument("--pca-max-components", type=int, default=64)
+    parser.add_argument("--pca-max-fit-samples", type=int, default=8192)
     parser.add_argument("--rowwise-coreset", action="store_true")
     parser.add_argument("--memory-mode", choices=["global_nn", "row_nn", "row_proto"], default="global_nn")
     parser.add_argument("--row-proto-zscore", action="store_true")
@@ -421,9 +524,15 @@ def main():
             "stft_physical_cfo_v1",
             "stft_physical_nuisance_v1",
         ],
-        default="stft_shift_blur",
+        default="none",
     )
     parser.add_argument("--paired-tta-fusion", choices=["mean", "max"], default="max")
+    parser.add_argument(
+        "--paired-tta-memory-layout",
+        choices=["separate", "merged"],
+        default="separate",
+        help="Keep paired view memories separate, or merge all normal TTA views into one memory.",
+    )
     parser.add_argument("--paired-tta-contrast", type=float, default=1.04)
     parser.add_argument("--paired-tta-brightness", type=float, default=1.0)
     parser.add_argument("--paired-tta-crop-ratio", type=float, default=0.02)
@@ -480,6 +589,10 @@ def main():
 
     if not (0.0 < args.coreset_ratio <= 1.0):
         raise ValueError("--coreset-ratio must be in (0, 1]")
+    if not (0.0 < args.pca_variance <= 1.0):
+        raise ValueError("--pca-variance must be in (0, 1]")
+    if args.pca_max_components <= 0 or args.pca_max_fit_samples <= 1:
+        raise ValueError("PCA limits must be positive")
     setup_seed(args.seed)
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
     device = "cpu" if args.use_cpu else "cuda:0"
@@ -497,21 +610,121 @@ def main():
 
     train_loader = build_train_loader(args)
     build_gallery(model, train_loader, device)
+    pca_fit_gallery = None
     paired_tta_galleries = None
     if args.paired_tta == "none":
-        patchcore_gallery, gallery_rows, gallery_cols = build_vit_nn_gallery_with_rows(model, train_loader, args, device)
+        if args.vit_normal_model in {"pca", "hybrid"}:
+            raw_gallery, raw_rows, raw_cols = build_vit_nn_gallery_with_rows(
+                model,
+                train_loader,
+                args,
+                device,
+                apply_coreset=False,
+            )
+            pca_fit_gallery = raw_gallery
+            patchcore_gallery, gallery_rows, gallery_cols = finalize_vit_nn_gallery(
+                raw_gallery,
+                raw_rows,
+                raw_cols,
+                args,
+            )
+        else:
+            patchcore_gallery, gallery_rows, gallery_cols = build_vit_nn_gallery_with_rows(model, train_loader, args, device)
     else:
         if args.support_augment != "none":
             raise ValueError("--paired-tta and --support-augment should not be enabled together")
-        paired_tta_galleries = []
-        for mode in _paired_tta_modes(args):
-            tta_gallery, tta_rows, tta_cols = build_vit_nn_gallery_with_rows(model, train_loader, args, device, paired_tta_mode=mode)
-            paired_tta_galleries.append((mode, tta_gallery, tta_rows, tta_cols))
-        patchcore_gallery, gallery_rows, gallery_cols = paired_tta_galleries[0][1:]
+        modes = _paired_tta_modes(args)
+        if args.paired_tta_memory_layout == "merged":
+            raw_galleries = [
+                build_vit_nn_gallery_with_rows(
+                    model,
+                    train_loader,
+                    args,
+                    device,
+                    paired_tta_mode=mode,
+                    apply_coreset=False,
+                )
+                for mode in modes
+            ]
+            if args.vit_normal_model in {"pca", "hybrid"}:
+                pca_fit_gallery = torch.cat(
+                    [gallery for gallery, _, _ in raw_galleries],
+                    dim=0,
+                )
+            patchcore_gallery, gallery_rows, gallery_cols = finalize_vit_nn_gallery(
+                torch.cat([gallery for gallery, _, _ in raw_galleries], dim=0),
+                torch.cat([rows for _, rows, _ in raw_galleries], dim=0),
+                torch.cat([cols for _, _, cols in raw_galleries], dim=0),
+                args,
+            )
+        else:
+            paired_tta_galleries = []
+            for mode in modes:
+                tta_gallery, tta_rows, tta_cols = build_vit_nn_gallery_with_rows(model, train_loader, args, device, paired_tta_mode=mode)
+                paired_tta_galleries.append((mode, tta_gallery, tta_rows, tta_cols))
+            patchcore_gallery, gallery_rows, gallery_cols = paired_tta_galleries[0][1:]
     if args.memory_mode == "row_nn" and args.freq_window < 0:
         args.freq_window = 0
+    normal_subspace = None
+    if args.vit_normal_model in {"pca", "hybrid"}:
+        normal_subspace = fit_normal_subspace(
+            pca_fit_gallery if pca_fit_gallery is not None else patchcore_gallery,
+            variance_threshold=args.pca_variance,
+            max_components=args.pca_max_components,
+            max_fit_samples=args.pca_max_fit_samples,
+            seed=args.seed,
+        ).to(device)
+        print(
+            f"[pca] rank={normal_subspace.rank} "
+            f"fit_samples={normal_subspace.fit_samples} "
+            f"retained_variance={normal_subspace.explained_variance_ratio:.4f}"
+        )
+    # Hybrid calibration is populated below from held-out transformed support
+    # images, so both branches are calibrated at the same image-level max
+    # score granularity used by evaluation.
+    hybrid_calibrator = None
     row_stats = build_frequency_row_stats(patchcore_gallery, gallery_rows, args, model.grid_size[0]) if args.freq_zscore else None
     row_prototypes = build_row_prototypes(patchcore_gallery, gallery_rows, model.grid_size[0]) if args.memory_mode == "row_proto" else None
+    if args.vit_normal_model == "hybrid":
+        memory_reference, _ = support_reference_scores(
+            model,
+            train_loader,
+            patchcore_gallery,
+            gallery_rows,
+            gallery_cols,
+            args,
+            device,
+            row_stats,
+            row_prototypes,
+            paired_tta_galleries,
+            normal_subspace=normal_subspace,
+            score_model="memory",
+        )
+        pca_reference, _ = support_reference_scores(
+            model,
+            train_loader,
+            patchcore_gallery,
+            gallery_rows,
+            gallery_cols,
+            args,
+            device,
+            row_stats,
+            row_prototypes,
+            paired_tta_galleries,
+            normal_subspace=normal_subspace,
+            score_model="pca",
+        )
+        hybrid_calibrator = (
+            fit_support_score_calibrator(torch.from_numpy(memory_reference)),
+            fit_support_score_calibrator(torch.from_numpy(pca_reference)),
+        )
+        print(
+            "[hybrid] support_calibration "
+            f"memory_center={hybrid_calibrator[0].center:.6f} "
+            f"memory_scale={hybrid_calibrator[0].scale:.6f} "
+            f"pca_center={hybrid_calibrator[1].center:.6f} "
+            f"pca_scale={hybrid_calibrator[1].scale:.6f}"
+        )
     if args.support_reference_only:
         reference, names = support_reference_scores(
             model,
@@ -524,6 +737,8 @@ def main():
             row_stats,
             row_prototypes,
             paired_tta_galleries,
+            normal_subspace=normal_subspace,
+            hybrid_calibrator=hybrid_calibrator,
         )
         out_root = Path(args.output_root)
         reference_root = out_root / "support_reference"
@@ -538,7 +753,11 @@ def main():
                 {
                     "method": "public_rf_vit_patchcore_gallery_cls",
                     "support_only": True,
-                    "reference_views": ["time_shift_up_large", "time_shift_down_large"],
+                    "support_reference_protocol": (
+                        "original_support_patch_leave_one_out"
+                        if args.paired_tta == "none"
+                        else "legacy_tta_reference_views"
+                    ),
                     "selected_normal_count": len(train_loader.dataset),
                     "support_seed": args.support_seed,
                 },
@@ -562,6 +781,8 @@ def main():
         row_stats,
         row_prototypes,
         paired_tta_galleries=paired_tta_galleries,
+        normal_subspace=normal_subspace,
+        hybrid_calibrator=hybrid_calibrator,
     )
 
     out_root = Path(args.output_root)
@@ -578,6 +799,10 @@ def main():
         "test_normal_paths_sha256": getattr(args, "test_normal_paths_sha256", None),
         "jsrs_by_signal": parse_jsrs_by_signal(args.jsrs_by_signal),
         "patch_layer": "concat",
+        "vit_normal_model": args.vit_normal_model,
+        "pca_variance": args.pca_variance,
+        "pca_max_components": args.pca_max_components,
+        "pca_max_fit_samples": args.pca_max_fit_samples,
         "coreset_ratio": args.coreset_ratio,
         "coreset_method": args.coreset_method,
         "rowwise_coreset": bool(args.rowwise_coreset),
@@ -598,6 +823,7 @@ def main():
         "coherence_top_ratio": args.coherence_top_ratio,
         "paired_tta": args.paired_tta,
         "paired_tta_fusion": args.paired_tta_fusion,
+        "paired_tta_memory_layout": args.paired_tta_memory_layout,
         "paired_tta_modes": _paired_tta_modes(args),
         "paired_tta_contrast": args.paired_tta_contrast,
         "paired_tta_brightness": args.paired_tta_brightness,
@@ -605,6 +831,7 @@ def main():
         "paired_tta_shift_px": args.paired_tta_shift_px,
         "paired_tta_blur_ksize": args.paired_tta_blur_ksize,
         "paired_tta_background_noise_strength": args.paired_tta_background_noise_strength,
+        "paired_tta_frequency_response_strength": args.paired_tta_frequency_response_strength,
         "selected_normal_count": len(train_loader.dataset),
         "gallery_patch_count": int(patchcore_gallery.shape[0]),
         "gallery_feature_dim": int(patchcore_gallery.shape[1]),
@@ -623,9 +850,11 @@ def main():
         f"- checkpoint: `{args.checkpoint}`",
         f"- normal sampling: `{args.normal_sampling}`",
         "- patch layer: `concat`",
+        f"- ViT normal model: `{args.vit_normal_model}`",
         f"- support augment: `{args.support_augment}`",
         f"- paired TTA: `{args.paired_tta}`",
         f"- paired TTA fusion: `{args.paired_tta_fusion}`",
+        f"- paired TTA memory layout: `{args.paired_tta_memory_layout}`",
         f"- gallery patches: `{int(patchcore_gallery.shape[0])}`",
         f"- cells: `{len(rows)}`",
         "",

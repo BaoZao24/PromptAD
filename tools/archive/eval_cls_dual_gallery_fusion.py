@@ -23,7 +23,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from PromptAD import PromptAD
 from tools.eval_cls_resnet_gallery_fusion import resnet_patch_image_scores
-from tools.eval_formal_promptad_normal_gallery_fusion_cls import (
+from tools.archive.eval_formal_promptad_normal_gallery_fusion_cls import (
     encode_target_normal_gallery,
     topk_distance,
 )

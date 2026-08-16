@@ -44,6 +44,7 @@ from utils.rf_scene_support import (
     ensure_rf_target_scene_manifest,
     scene_support_entry,
 )
+from utils.normal_subspace import leave_one_out_topk_cosine_distance
 from utils.training_utils import setup_seed
 
 
@@ -507,26 +508,48 @@ def evaluate_job(encoder, gallery, job, args, device) -> dict:
 
 @torch.no_grad()
 def support_reference_scores(encoder, gallery, job, args, device) -> tuple[np.ndarray, np.ndarray]:
-    """Score held-out normal-support shifts without reading test samples."""
+    """Score original support patches after removing each exact self-match."""
 
-    scores, names = [], []
+    if args.support_reference_protocol == "legacy_views":
+        scores, names = [], []
+        loader = make_loader(job["train_samples"], args, job["square_resize"])
+        for data, _mask, _label, name, _sample_type in tqdm(
+            loader,
+            desc=f"Score support-only CNN legacy TTA reference/{job['scene']}",
+            leave=False,
+        ):
+            for mode in ("time_shift_up", "time_shift_down", "blur"):
+                data_variant = cnn_tta_batch(data, mode, args)
+                raw = data_variant.permute(0, 3, 1, 2).to(device, non_blocking=True)
+                features = cnn_feature_map(encoder(raw), args.cnn_feature_mode)
+                values = image_scores(features, gallery, args.distance_chunk_size)
+                scores.extend(float(value) for value in values)
+                names.extend(str(value) for value in name)
+        return np.asarray(scores, dtype=np.float32), np.asarray(names)
+
+    feature_chunks, names = [], []
     loader = make_loader(job["train_samples"], args, job["square_resize"])
     for data, _mask, _label, name, _sample_type in tqdm(
         loader,
-        desc=f"Score support-only CNN reference/{job['scene']}",
+        desc=f"Score support-only CNN leave-one-out reference/{job['scene']}",
         leave=False,
     ):
-        for mode in ("time_shift_up", "time_shift_down", "blur"):
-            data_variant = cnn_tta_batch(data, mode, args)
-            raw = data_variant.permute(0, 3, 1, 2).to(device, non_blocking=True)
-            features = cnn_feature_map(
-                encoder(raw),
-                args.cnn_feature_mode,
-            )
-            values = image_scores(features, gallery, args.distance_chunk_size)
-            scores.extend(float(value) for value in values)
-            names.extend(str(value) for value in name)
-    return np.asarray(scores, dtype=np.float32), np.asarray(names)
+        raw = data.permute(0, 3, 1, 2).to(device, non_blocking=True)
+        features = cnn_feature_map(encoder(raw), args.cnn_feature_mode)
+        feature_chunks.append(
+            features.permute(0, 2, 3, 1).reshape(features.shape[0], -1, features.shape[1])
+        )
+        names.extend(str(value) for value in name)
+    features = torch.cat(feature_chunks, dim=0)
+    patch_scores = leave_one_out_topk_cosine_distance(
+        features,
+        topk=1,
+        chunk_size=args.distance_chunk_size,
+        distance_divisor=1.0,
+    ).reshape(features.shape[0], -1)
+    keep = max(1, int(round(patch_scores.shape[1] * 0.1)))
+    scores = patch_scores.topk(keep, dim=1).values.mean(dim=1)
+    return scores.cpu().numpy().astype(np.float32), np.asarray(names)
 
 
 def train_signature(job) -> tuple[str, ...]:
@@ -679,6 +702,12 @@ def parse_args():
         action="store_true",
         help="Build only the support-only calibration reference and skip test scoring.",
     )
+    parser.add_argument(
+        "--support-reference-protocol",
+        choices=("leave_one_out", "legacy_views"),
+        default="leave_one_out",
+        help="Use original support patch leave-one-out by default; legacy views are explicit.",
+    )
     return parser.parse_args()
 
 
@@ -705,7 +734,7 @@ def main():
                 {
                     "method": "resnet18_auxiliary_cnn",
                     "support_only": True,
-                    "reference_views": ["time_shift_up", "time_shift_down", "blur"],
+                    "support_reference_protocol": args.support_reference_protocol,
                     "protocol": args.protocol,
                     "support_manifest": getattr(args, "support_manifest", None),
                     "support_manifest_sha256": getattr(args, "support_manifest_sha256", None),

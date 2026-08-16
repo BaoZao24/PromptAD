@@ -25,7 +25,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from PromptAD import PromptAD
-from tools.eval_cls_dual_gallery_fusion import (
+from tools.archive.eval_cls_dual_gallery_fusion import (
     fuse_dual_scores,
     safe_auc,
     topk_distance,

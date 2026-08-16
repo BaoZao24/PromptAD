@@ -47,6 +47,7 @@ from tools.eval_cls_vit_patchcore_gallery import (
     _paired_tta_modes,
     build_vit_nn_gallery_with_rows,
     compute_patch_map,
+    finalize_vit_nn_gallery,
     prepare_patch_features,
     spectrogram_nn_scores,
 )
@@ -64,6 +65,7 @@ from utils.confidence_gate import (
     confidence_gated_or,
     safe_support_only_gate,
 )
+from utils.normal_subspace import leave_one_out_topk_cosine_distance
 from utils.training_utils import setup_seed
 
 
@@ -95,10 +97,12 @@ FORMAL = {
     "rowwise_coreset": False,
     "memory_mode": "global_nn",
     "support_augment": "none",
-    "paired_tta": "ofdma_time_shift_blur",
+    "paired_tta": "none",
     "paired_tta_fusion": "max",
+    "paired_tta_memory_layout": "merged",
     "paired_tta_shift_px": 4,
     "paired_tta_blur_ksize": 3,
+    "paired_tta_frequency_response_strength": 3.0,
     "gallery_chunk_size": 4096,
     "patch_score_rank": 3,
     "freq_window": -1,
@@ -123,7 +127,8 @@ FORMAL = {
 # These views are part of the existing OFDMA support-only protocol.  The
 # exploratory bundle changes only the query/gallery TTA views; it does not
 # rewrite this calibration protocol.
-SUPPORT_REFERENCE_VIEWS = (
+SUPPORT_REFERENCE_PROTOCOL = "original_support_patch_leave_one_out"
+LEGACY_SUPPORT_REFERENCE_VIEWS = (
     "time_shift_up",
     "time_shift_down",
     "time_shift_up_large",
@@ -193,7 +198,7 @@ def parse_args() -> argparse.Namespace:
         "--support-reference-only",
         action="store_true",
         help=(
-            "Score held-out views of normal support only and write reference "
+            "Score original normal support with patch leave-one-out and write reference "
             "branch scores; do not evaluate test observations."
         ),
     )
@@ -206,12 +211,35 @@ def parse_args() -> argparse.Namespace:
             "within each target scene. Omitted keeps the formal nested first-k rule."
         ),
     )
+    parser.add_argument(
+        "--vit-tta-ablation",
+        choices=["formal", "none", "spectral_response"],
+        default="none",
+        help=(
+            "none is the current formal method and uses original normal support; "
+            "formal is retained only to reproduce the historical paired-TTA protocol; "
+            "spectral_response merges original, time-left/right, and frequency-response "
+            "normal views, then queries each test image once."
+        ),
+    )
     return parser.parse_args()
 
 
 def formal_args(cli: argparse.Namespace) -> SimpleNamespace:
     values = vars(cli).copy()
     values.update(FORMAL)
+    if cli.vit_tta_ablation == "none":
+        values.update({"paired_tta": "none", "paired_tta_memory_layout": "merged"})
+    elif cli.vit_tta_ablation == "formal":
+        values.update({"paired_tta": "ofdma_time_shift_blur", "paired_tta_memory_layout": "merged"})
+    elif cli.vit_tta_ablation == "spectral_response":
+        values.update(
+            {
+                "paired_tta": "ofdma_spectral_response_v1",
+                "paired_tta_memory_layout": "merged",
+                "paired_tta_frequency_response_strength": 3.0,
+            }
+        )
     return SimpleNamespace(**values)
 
 
@@ -245,25 +273,62 @@ def patch_map_image_score(patch_map: torch.Tensor) -> np.ndarray:
     return ranked[:, rank - 1].cpu().numpy().astype(np.float32)
 
 
+@torch.no_grad()
+def build_memories(model, encoder, support_loader, args, device):
+    modes = _paired_tta_modes(args)
+    if args.paired_tta_memory_layout == "merged" and len(modes) > 1:
+        raw_views = [
+            build_vit_nn_gallery_with_rows(
+                model,
+                support_loader,
+                args,
+                device,
+                paired_tta_mode=mode,
+                apply_coreset=False,
+            )
+            for mode in modes
+        ]
+        gallery, rows, cols = finalize_vit_nn_gallery(
+            torch.cat([view[0] for view in raw_views], dim=0),
+            torch.cat([view[1] for view in raw_views], dim=0),
+            torch.cat([view[2] for view in raw_views], dim=0),
+            args,
+        )
+        # A merged normal gallery is queried by the original test image once.
+        paired_galleries = [("identity", gallery, rows, cols)]
+    else:
+        paired_galleries = []
+        for mode in modes:
+            gallery, rows, cols = build_vit_nn_gallery_with_rows(
+                model,
+                support_loader,
+                args,
+                device,
+                paired_tta_mode=mode,
+            )
+            paired_galleries.append((mode, gallery, rows, cols))
+    cnn_galleries = build_resnet_gallery(
+        encoder,
+        support_loader,
+        args,
+        device,
+        tta_mode="identity",
+    )
+    return paired_galleries, cnn_galleries[args.resnet_layers[0]]
+
+
 def support_reference_view_batch(raw_batch: torch.Tensor, mode: str, args) -> torch.Tensor:
-    """Apply a deterministic held-out view to an OFDMA support batch."""
+    """Apply one explicitly requested legacy OFDMA reference view."""
 
     shift = int(args.paired_tta_shift_px)
+    if mode.endswith("_large"):
+        shift *= 2
+    dy = -shift if "up" in mode else shift
     variants = []
     for arr_tensor in raw_batch:
         arr = arr_tensor.numpy()
-        if mode == "time_shift_up":
-            dx, dy = 0, -shift
-        elif mode == "time_shift_down":
-            dx, dy = 0, shift
-        elif mode == "time_shift_up_large":
-            dx, dy = 0, -2 * shift
-        elif mode == "time_shift_down_large":
-            dx, dy = 0, 2 * shift
-        else:
-            raise ValueError(f"Unsupported OFDMA support reference view: {mode}")
-        matrix = np.float32([[1, 0, dx], [0, 1, dy]])
         height, width = arr.shape[:2]
+        matrix = np.float32([[1, 0, 0], [0, 1, dy]])
         variants.append(
             cv2.warpAffine(
                 arr,
@@ -277,25 +342,78 @@ def support_reference_view_batch(raw_batch: torch.Tensor, mode: str, args) -> to
 
 
 @torch.no_grad()
-def build_memories(model, encoder, support_loader, args, device):
-    paired_galleries = []
-    for mode in _paired_tta_modes(args):
-        gallery, rows, cols = build_vit_nn_gallery_with_rows(
-            model,
-            support_loader,
-            args,
-            device,
-            paired_tta_mode=mode,
-        )
-        paired_galleries.append((mode, gallery, rows, cols))
-    cnn_galleries = build_resnet_gallery(
-        encoder,
-        support_loader,
-        args,
-        device,
-        tta_mode="identity",
+def evaluate_legacy_support_reference_scores(
+    model,
+    encoder,
+    paired_galleries,
+    cnn_gallery,
+    loader,
+    args,
+    device,
+) -> dict[str, np.ndarray]:
+    """Preserve the old shifted-reference protocol for explicit TTA replay."""
+
+    model.eval_mode()
+    encoder.eval()
+    identity_gallery = next(
+        (item for item in paired_galleries if item[0] == "identity"),
+        paired_galleries[0],
     )
-    return paired_galleries, cnn_galleries[args.resnet_layers[0]]
+    _, gallery, gallery_rows, gallery_cols = identity_gallery
+    reference_parts = []
+    for mode in LEGACY_SUPPORT_REFERENCE_VIEWS:
+        names: list[str] = []
+        labels: list[int] = []
+        jammer_types: list[str] = []
+        vit_scores: list[float] = []
+        cnn_scores: list[float] = []
+        for data, _, label, name, jammer_type in tqdm(
+            loader,
+            desc=f"Score OFDMA legacy support reference/{mode}",
+            leave=False,
+        ):
+            viewed = support_reference_view_batch(data, mode, args)
+            data_t = to_model_input(model, viewed, device, rgb_from_bgr=True)
+            patches = prepare_patch_features(model.encode_image(data_t))
+            vit_map = spectrogram_nn_scores(
+                patches,
+                gallery,
+                gallery_rows,
+                args,
+                model.grid_size[0],
+                model.grid_size[1],
+                gallery_cols=gallery_cols,
+            )
+            vit_scores.extend(patch_map_image_score(vit_map).tolist())
+            raw = viewed.permute(0, 3, 1, 2).to(device, non_blocking=True)
+            cnn_features = encoder(raw)[args.resnet_layers[0]]
+            cnn_bank = resnet_patch_score_bank(
+                cnn_features,
+                cnn_gallery,
+                args.distance_chunk_size,
+                [args.cnn_image_top_ratio],
+                nn_topk=args.cnn_nn_topk,
+            )
+            cnn_scores.extend(cnn_bank[f"top{args.cnn_image_top_ratio:g}"].astype(np.float32).tolist())
+            names.extend(str(value) for value in name)
+            labels.extend(int(value) for value in label.numpy().tolist())
+            jammer_types.extend(str(value) for value in jammer_type)
+        reduced = reduce_observations(
+            {
+                "names": np.asarray(names),
+                "labels": np.asarray(labels, dtype=np.int32),
+                "jammer_types": np.asarray(jammer_types),
+                VIT_BRANCH: np.asarray(vit_scores, dtype=np.float32),
+                CNN_BRANCH: np.asarray(cnn_scores, dtype=np.float32),
+            }
+        )
+        reference_parts.append(reduced)
+    return {
+        VIT_BRANCH: np.concatenate([part[VIT_BRANCH] for part in reference_parts]),
+        CNN_BRANCH: np.concatenate([part[CNN_BRANCH] for part in reference_parts]),
+        "support_reference_protocol": np.asarray("legacy_tta_reference_views"),
+        "support_observations": np.asarray(len(reference_parts[0][VIT_BRANCH]), dtype=np.int32),
+    }
 
 
 @torch.no_grad()
@@ -465,78 +583,73 @@ def evaluate_support_reference_scores(
     args,
     device,
 ) -> dict[str, np.ndarray]:
-    """Score held-out views of normal support and reduce them by observation."""
+    """Score original support patches after removing each exact self-match."""
+
+    if args.vit_tta_ablation != "none":
+        return evaluate_legacy_support_reference_scores(
+            model,
+            encoder,
+            paired_galleries,
+            cnn_gallery,
+            loader,
+            args,
+            device,
+        )
 
     model.eval_mode()
     encoder.eval()
-    identity_gallery = next(
-        (item for item in paired_galleries if item[0] == "identity"),
-        paired_galleries[0],
-    )
-    _, gallery, gallery_rows, gallery_cols = identity_gallery
-    reference_parts = []
-    for mode in SUPPORT_REFERENCE_VIEWS:
-        names: list[str] = []
-        labels: list[int] = []
-        jammer_types: list[str] = []
-        vit_scores: list[float] = []
-        cnn_scores: list[float] = []
-        for data, _, label, name, jammer_type in tqdm(
-            loader,
-            desc=f"Score OFDMA support reference/{mode}",
-            leave=False,
-        ):
-            viewed = support_reference_view_batch(data, mode, args)
-            data_t = to_model_input(model, viewed, device, rgb_from_bgr=True)
-            visual_features = model.encode_image(data_t)
-            patches = prepare_patch_features(visual_features)
-            vit_map = spectrogram_nn_scores(
-                patches,
-                gallery,
-                gallery_rows,
-                args,
-                model.grid_size[0],
-                model.grid_size[1],
-                gallery_cols=gallery_cols,
+    vit_features = []
+    cnn_features = []
+    names: list[str] = []
+    labels: list[int] = []
+    jammer_types: list[str] = []
+    for data, _, label, name, jammer_type in tqdm(
+        loader,
+        desc="Score OFDMA original support leave-one-out",
+        leave=False,
+    ):
+        data_t = to_model_input(model, data, device, rgb_from_bgr=True)
+        vit_features.append(prepare_patch_features(model.encode_image(data_t)))
+        raw = data.permute(0, 3, 1, 2).to(device, non_blocking=True)
+        feature_map = encoder(raw)[args.resnet_layers[0]].float()
+        cnn_features.append(
+            feature_map.permute(0, 2, 3, 1).reshape(
+                feature_map.shape[0], -1, feature_map.shape[1]
             )
-            vit_scores.extend(patch_map_image_score(vit_map).tolist())
-
-            raw = viewed.permute(0, 3, 1, 2).to(device, non_blocking=True)
-            cnn_features = encoder(raw)[args.resnet_layers[0]]
-            cnn_bank = resnet_patch_score_bank(
-                cnn_features,
-                cnn_gallery,
-                args.distance_chunk_size,
-                [args.cnn_image_top_ratio],
-                nn_topk=args.cnn_nn_topk,
-            )
-            cnn_scores.extend(
-                cnn_bank[f"top{args.cnn_image_top_ratio:g}"].astype(np.float32).tolist()
-            )
-            names.extend(str(value) for value in name)
-            labels.extend(int(value) for value in label.numpy().tolist())
-            jammer_types.extend(str(value) for value in jammer_type)
-        reduced = reduce_observations(
-            {
-                "names": np.asarray(names),
-                "labels": np.asarray(labels, dtype=np.int32),
-                "jammer_types": np.asarray(jammer_types),
-                VIT_BRANCH: np.asarray(vit_scores, dtype=np.float32),
-                CNN_BRANCH: np.asarray(cnn_scores, dtype=np.float32),
-            }
         )
-        reduced["reference_view"] = np.asarray(mode)
-        reference_parts.append(reduced)
+        names.extend(str(value) for value in name)
+        labels.extend(int(value) for value in label.numpy().tolist())
+        jammer_types.extend(str(value) for value in jammer_type)
 
+    vit_patch_scores = leave_one_out_topk_cosine_distance(
+        torch.cat(vit_features, dim=0),
+        topk=FORMAL["nn_topk"],
+        chunk_size=FORMAL["gallery_chunk_size"],
+        distance_divisor=2.0,
+    )
+    vit_scores = patch_map_image_score(vit_patch_scores).tolist()
+    cnn_patch_scores = leave_one_out_topk_cosine_distance(
+        torch.cat(cnn_features, dim=0),
+        topk=FORMAL["cnn_nn_topk"],
+        chunk_size=FORMAL["distance_chunk_size"],
+        distance_divisor=1.0,
+    )
+    keep = max(1, int(round(cnn_patch_scores.shape[1] * FORMAL["cnn_image_top_ratio"])))
+    cnn_scores = cnn_patch_scores.topk(keep, dim=1).values.mean(dim=1).cpu().numpy().tolist()
+    reduced = reduce_observations(
+        {
+            "names": np.asarray(names),
+            "labels": np.asarray(labels, dtype=np.int32),
+            "jammer_types": np.asarray(jammer_types),
+            VIT_BRANCH: np.asarray(vit_scores, dtype=np.float32),
+            CNN_BRANCH: np.asarray(cnn_scores, dtype=np.float32),
+        }
+    )
     return {
-        VIT_BRANCH: np.concatenate([part[VIT_BRANCH] for part in reference_parts]),
-        CNN_BRANCH: np.concatenate([part[CNN_BRANCH] for part in reference_parts]),
-        "reference_views": np.asarray(
-            [part["reference_view"] for part in reference_parts]
-        ),
-        "support_observations": np.asarray(
-            len(reference_parts[0][VIT_BRANCH]), dtype=np.int32
-        ),
+        VIT_BRANCH: reduced[VIT_BRANCH],
+        CNN_BRANCH: reduced[CNN_BRANCH],
+        "support_reference_protocol": np.asarray(SUPPORT_REFERENCE_PROTOCOL),
+        "support_observations": np.asarray(len(reduced[VIT_BRANCH]), dtype=np.int32),
     }
 
 
@@ -655,10 +768,18 @@ def build_run_protocol(args, source_protocol, scene_ids, manifest) -> dict:
         "uses_test_batch_statistics": args.gate_protocol == "transductive",
         "support_reference_only": bool(args.support_reference_only),
         "support_reference_root": args.support_reference_root or None,
-        "support_reference_views": list(SUPPORT_REFERENCE_VIEWS),
+        "support_reference_protocol": (
+            SUPPORT_REFERENCE_PROTOCOL
+            if args.vit_tta_ablation == "none"
+            else "legacy_tta_reference_views"
+        ),
         "method": METHOD,
         "branches": [VIT_BRANCH, CNN_BRANCH],
-        "method_config": FORMAL,
+        "method_config": {
+            key: getattr(args, key)
+            for key in FORMAL
+        },
+        "vit_tta_ablation": args.vit_tta_ablation,
         "checkpoint": str(Path(args.checkpoint).resolve()),
         "smoke_limits": {
             "max_normal_observations": args.max_normal_observations,
