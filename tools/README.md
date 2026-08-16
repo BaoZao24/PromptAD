@@ -68,6 +68,8 @@
 | `eval_fedjam_fewshot_dual.py` | FedJam few-shot 双分支；默认 identity-only、无 TTA |
 | `eval_fedjam_visual_baselines.py` | FedJam 视觉基线 |
 | `eval_fedjam_traditional_spectral.py` | FedJam 传统频谱基线 |
+| `eval_fedjam_four_branches.py` | FedJam 四个独立视觉分支：ViT-local、ViT-global、CNN-local、DINO-local；不做融合 |
+| `monitor_gpu_and_run_fedjam_branches.py` | 安全轮询空闲 GPU，满足阈值后自动启动四分支实验 |
 
 ## 频谱 TTA（辅助记忆扩充，不属于核心创新）
 
