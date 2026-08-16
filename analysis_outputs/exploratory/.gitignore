@@ -22,3 +22,14 @@ scores/
 20260813_ofdma_spectral_response_tta/smoke_response/
 20260813_ofdma_spectral_response_tta/full_no_tta/scores/
 20260813_ofdma_spectral_response_tta/full_spectral_response/scores/
+
+# Generated repeat-run logs and intermediate exploratory roots stay local.
+# Their conclusions are recorded under experiments/ or docs/.
+*.log
+20260813_frequency_response_memory_*/
+20260813_ofdma_spectral_response_tta/
+20260814_*/
+20260815_freq_reliable_*/
+20260815_no_tta_recheck_smoke/
+20260815_feature_interpolation_m3r25.json
+20260815_fpr_calibration_*.json
