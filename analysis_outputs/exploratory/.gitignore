@@ -33,3 +33,6 @@ scores/
 20260815_no_tta_recheck_smoke/
 20260815_feature_interpolation_m3r25.json
 20260815_fpr_calibration_*.json
+20260814_method_direction_findings.md
+20260815_tta_position_no_tta/
+20260815_tta_three_metrics.json
