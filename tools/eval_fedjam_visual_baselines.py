@@ -59,6 +59,8 @@ METHOD_NAMES = {
     "stfpm": "stfpm_resnet18",
     "winclip": "winclip_fewshot",
     "patchcore": "patchcore_official",
+    "spade": "spade_knn",
+    "tfam": "tfam_aae_spectrogram",
 }
 ALL_METHODS = tuple(METHOD_NAMES)
 
@@ -93,6 +95,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--img-resize", type=int, default=240)
     parser.add_argument("--img-cropsize", type=int, default=240)
     parser.add_argument("--faiss-num-workers", type=int, default=2)
+    parser.add_argument("--top-k", type=int, default=5)
     return parser.parse_args()
 
 
@@ -128,6 +131,8 @@ def install_fedjam_loaders() -> dict[str, object]:
         "stfpm": "tools.eval_stfpm_cls",
         "winclip": "tools.eval_winclip_main",
         "patchcore": "tools.eval_patchcore_cls",
+        "spade": "tools.eval_spade_cls",
+        "tfam": "tools.eval_tfam_spectral",
     }
     modules = {
         method: importlib.import_module(module_name)
@@ -268,6 +273,8 @@ def common_cfg(args, output_root: Path) -> SimpleNamespace:
         rep_dim=args.rep_dim,
         lr=1e-3,
         discriminator_lr=2.5e-5,
+        discriminator_hidden_dim=128,
+        discriminator_dropout=0.0,
         adversarial_weight=1.0,
         weight_decay=1e-6,
         score_mode="mse_mean",
@@ -285,6 +292,8 @@ def common_cfg(args, output_root: Path) -> SimpleNamespace:
         momentum=0.9,
         stfpm_lr=0.05,
         faiss_num_workers=args.faiss_num_workers,
+        top_k=args.top_k,
+        pixel_level=False,
         backbone="wideresnet50",
         layers=["layer2", "layer3"],
         pretrain_embed_dimension=1024,
@@ -394,6 +403,17 @@ def evaluate_one(method: str, jobs: list[dict], args, modules, device) -> list[d
                 history[-1]["reconstruction_loss"] if history else None
             )
             del model
+        elif method == "tfam":
+            # TFAM's own make_loader/TFAMPathDataset consumes the in-memory
+            # image_bgr buffers directly; safe_metrics reduces the four FedJam
+            # labels to benign-vs-any-jammer internally.
+            model, history = module.fit_tfam(job["train_samples"], cfg, device)
+            module.predict_job(model, job, cfg, device)
+            payload = load_payload(output_root, job)
+            cfg.train_loss_final = (
+                history[-1]["reconstruction_loss"] if history else None
+            )
+            del model
         elif method == "padim":
             context = module.ResNetFeatureExtractor(cfg.weights).to(device).eval()
             stats = module.fit_padim(context, job["train_samples"], cfg, device)
@@ -428,6 +448,12 @@ def evaluate_one(method: str, jobs: list[dict], args, modules, device) -> list[d
             module.predict_job(model, job, cfg)
             payload = load_payload(output_root, job)
             del model
+        elif method == "spade":
+            cfg.batch_size = args.batch_size
+            gallery_model = module.fit_spade(job["train_samples"], cfg, device)
+            module.predict_job(gallery_model, job, cfg)
+            payload = load_payload(output_root, job)
+            del gallery_model
         else:
             raise ValueError(method)
 
