@@ -39,6 +39,12 @@ PUBLIC_RF_K_ROOT = ROOT / "analysis_outputs/20260810_public_rf_k_per_frequency"
 IAD_RF_ROOT = ROOT / "analysis_outputs/20260811_iad_per_rf_target_formal"
 UDMA_RF_ROOT = ROOT / "analysis_outputs/20260811_udma_resnet18_rf_target_formal"
 KLD_ICA_RF_ROOT = ROOT / "analysis_outputs/20260811_kld_ica_rf_target_formal"
+GRETEL_INHOUSE_ROOT = ROOT / "analysis_outputs/20260826_gretel_inhouse_rf_formal"
+GRETEL_PUBLIC_ROOTS = {
+    1: ROOT / "analysis_outputs/20260826_gretel_public_rf_k1_formal",
+    2: ROOT / "analysis_outputs/20260826_gretel_public_rf_k2_formal",
+    4: ROOT / "analysis_outputs/20260826_gretel_public_rf_k4_formal",
+}
 DEFAULT_OFDMA_BASELINE_ROOT = (
     ROOT / "analysis_outputs/20260811_ofdma_v2_realistic_unified_published"
 )
@@ -53,6 +59,8 @@ FEDJAM_TRAD_ROOT = ROOT / "analysis_outputs/20260810_fedjam_traditional_fewshot_
 IAD_FEDJAM_ROOT = ROOT / "analysis_outputs/20260811_iad_per_fedjam_formal/iad_per"
 UDMA_FEDJAM_ROOT = ROOT / "analysis_outputs/20260811_udma_resnet18_fedjam_formal/udma"
 KLD_ICA_FEDJAM_ROOT = ROOT / "analysis_outputs/20260811_kld_ica_fedjam_formal"
+GRETEL_OFDMA_ROOT = ROOT / "analysis_outputs/20260826_gretel_ofdma_formal"
+GRETEL_FEDJAM_ROOT = ROOT / "analysis_outputs/20260826_gretel_fedjam_formal"
 RF_STABILITY_ROOT = ROOT / "autoresearch/support-stability-rf-20-fixedtest/summary"
 
 RF_SIGNAL_ORDER = ("burst", "chirp", "dsss", "pulse", "deceptive")
@@ -80,7 +88,7 @@ PURPLE = "#CC79A7"
 
 VISUAL_METHOD_ORDER = [
     "iad_per",
-    "saife_reconstruction",
+    "gretel_spectral",
     "udma_reimplementation",
     "patchcore_official",
     "winclip_fewshot",
@@ -102,7 +110,7 @@ METHOD_ORDER = [
 METHOD_LABEL = {
     "vae_reconstruction": "VAE-MSE [6]",
     "iad_per": "IAD-PER [6]",
-    "saife_reconstruction": "SAIFE [7]",
+    "gretel_spectral": "GRETEL [7]",
     "deep_svdd": "Deep SVDD [8]",
     "padim_diag_resnet18": "PaDiM [9]",
     "stfpm_resnet18": "STFPM [10]",
@@ -124,7 +132,7 @@ METHOD_LABEL = {
 METHOD_COLOR = {
     "vae_reconstruction": "#A9A9A9",
     "iad_per": "#4E79A7",
-    "saife_reconstruction": "#6F6F6F",
+    "gretel_spectral": "#6F6F6F",
     "deep_svdd": "#C9C9C9",
     "padim_diag_resnet18": PURPLE,
     "stfpm_resnet18": ORANGE,
@@ -146,7 +154,7 @@ METHOD_COLOR = {
 METHOD_MARKER = {
     "vae_reconstruction": "v",
     "iad_per": "D",
-    "saife_reconstruction": "^",
+    "gretel_spectral": "^",
     "deep_svdd": "<",
     "padim_diag_resnet18": ">",
     "stfpm_resnet18": "P",
@@ -362,11 +370,24 @@ def add_published_rf_metrics(
             dataset="rf_target",
         )
 
+    gretel_rows = [
+        row
+        for row in read_csv(GRETEL_INHOUSE_ROOT / "summary_gretel_spectral.csv")
+        if row.get("scope") == "overall"
+    ]
+    if len(gretel_rows) != 1:
+        raise RuntimeError("GRETEL In-house RF summary must contain one overall row")
+    gretel_row = gretel_rows[0]
+    metrics["self_rf"]["gretel_spectral"] = {
+        "auroc": float(gretel_row["auroc_mean"]),
+        "auprc": float(gretel_row["auprc_mean"]),
+        "fpr95": float(gretel_row["fpr95_mean"]),
+    }
+
     public_summary = PUBLIC_RF_K_ROOT / "full_test_metrics_summary.csv"
     public_rows = {row["method"]: row for row in read_csv(public_summary)}
     for method in (
         "iad_per",
-        "saife_reconstruction",
         "kld_reference",
         "ica_frozen",
         "udma_reimplementation",
@@ -383,6 +404,20 @@ def add_published_rf_metrics(
             metric: float(row[f"k1_{metric}"])
             for metric in ("auroc", "auprc", "fpr95")
         }
+
+    gretel_rows = [
+        row
+        for row in read_csv(GRETEL_PUBLIC_ROOTS[1] / "summary_gretel_spectral.csv")
+        if row.get("scope") == "overall"
+    ]
+    if len(gretel_rows) != 1:
+        raise RuntimeError("GRETEL Public RF summary must contain one overall row")
+    gretel_row = gretel_rows[0]
+    metrics["public_rf"]["gretel_spectral"] = {
+        "auroc": float(gretel_row["auroc_mean"]),
+        "auprc": float(gretel_row["auprc_mean"]),
+        "fpr95": float(gretel_row["fpr95_mean"]),
+    }
 
 
 def signal_from_score_path(path: Path, dataset: str) -> str:
@@ -418,7 +453,6 @@ def current_main_metrics() -> dict[str, dict[str, dict[str, float]]]:
     method_key = {
         "VAE": "vae_reconstruction",
         "VAE-MSE": "vae_reconstruction",
-        "SAIFE": "saife_reconstruction",
         "Deep SVDD": "deep_svdd",
         "PaDiM": "padim_diag_resnet18",
         "STFPM": "stfpm_resnet18",
@@ -524,6 +558,16 @@ def load_ofdma_metrics(ofdma_root: Path) -> tuple[
             "fpr95": float(row["fpr95"]),
         }
 
+    for row in read_csv(GRETEL_OFDMA_ROOT / "summary_gretel_spectral.csv"):
+        if row.get("scope") != "overall":
+            continue
+        shot = int(row["shot_or_protocol"])
+        by_shot[shot]["gretel_spectral"] = {
+            "auroc": float(row["auroc_mean"]),
+            "auprc": float(row["auprc_mean"]),
+            "fpr95": float(row["fpr95_mean"]),
+        }
+
     # The formal OFDMA table is a macro mean over 30 target scenes.  For the
     # plot, use the same per-scene rows to show the scene-to-scene spread as
     # +/- one sample standard deviation.  This keeps the error bars aligned
@@ -592,6 +636,16 @@ def load_ofdma_metrics(ofdma_root: Path) -> tuple[
             "auprc": float(row["auprc"]),
             "fpr95": float(row["fpr95"]),
         }
+    for row in read_csv(GRETEL_OFDMA_ROOT / "summary_gretel_spectral.csv"):
+        if row.get("scope") not in {"barrage", "deceptive", "pilot", "random_hop", "sweep"}:
+            continue
+        if row.get("shot_or_protocol") != "4":
+            continue
+        jammer.setdefault(row["scope"], {})["gretel_spectral"] = {
+            "auroc": float(row["auroc_mean"]),
+            "auprc": float(row["auprc_mean"]),
+            "fpr95": float(row["fpr95_mean"]),
+        }
     expected = set(METHOD_ORDER)
     for shot, values in by_shot.items():
         missing = expected - set(values)
@@ -617,7 +671,6 @@ def load_public_rf_k_scaling() -> dict[str, dict[str, dict[str, list[float]]]]:
         "ica_frozen": "ica_frozen",
         "vae_reconstruction": "vae_reconstruction",
         "iad_per": "iad_per",
-        "saife_reconstruction": "saife_reconstruction",
         "udma_reimplementation": "udma_reimplementation",
         "deep_svdd": "deep_svdd",
         "padim_diag_resnet18": "padim_diag_resnet18",
@@ -645,6 +698,24 @@ def load_public_rf_k_scaling() -> dict[str, dict[str, dict[str, list[float]]]]:
                 ]
                 for metric in ("auroc", "auprc", "fpr95")
             }
+
+    for shot, root in GRETEL_PUBLIC_ROOTS.items():
+        rows = [
+            row
+            for row in read_csv(root / "summary_gretel_spectral.csv")
+            if row.get("scope") == "overall"
+        ]
+        if len(rows) != 1:
+            raise RuntimeError(f"GRETEL Public RF {shot}-shot summary is incomplete")
+        row = rows[0]
+        result["full-test"].setdefault(
+            "gretel_spectral",
+            {metric: [] for metric in ("auroc", "auprc", "fpr95")},
+        )
+        for metric in ("auroc", "auprc", "fpr95"):
+            result["full-test"]["gretel_spectral"][metric].append(
+                float(row[f"{metric}_mean"])
+            )
     required = {
         "full-test": {
             "energy_detector",
@@ -652,7 +723,7 @@ def load_public_rf_k_scaling() -> dict[str, dict[str, dict[str, list[float]]]]:
             "statistical_fusion",
             "kld_reference",
             "iad_per",
-            "saife_reconstruction",
+            "gretel_spectral",
             "udma_reimplementation",
             "patchcore_official",
             "winclip_fewshot",
@@ -688,7 +759,7 @@ def plot_public_rf_k_scaling(
         "statistical_fusion": "SCSE [1–5]",
         "kld_reference": "KLD-Ref [16]",
         "iad_per": "IAD-PER [6]",
-        "saife_reconstruction": "SAIFE [7]",
+        "gretel_spectral": "GRETEL [7]",
         "udma_reimplementation": "UDMA [17]",
         "patchcore_official": "PatchCore [12]",
         "winclip_fewshot": "WinCLIP [11]",
@@ -923,7 +994,7 @@ def plot_ofdma_shots(
 def plot_ofdma_jammer(jammer: dict[str, dict[str, dict[str, float]]], output: Path) -> None:
     scopes = ["barrage", "deceptive", "pilot", "random_hop", "sweep"]
     candidate_methods = [
-        "saife_reconstruction",
+        "gretel_spectral",
         "winclip_fewshot",
         "patchcore_official",
         "confidence_gated_fusion",
@@ -1336,7 +1407,6 @@ def load_fedjam_metrics() -> tuple[
 
     visual_dirs = {
         "vae": "vae_reconstruction",
-        "saife": "saife_reconstruction",
         "deep_svdd": "deep_svdd",
         "padim": "padim_diag_resnet18",
         "stfpm": "stfpm_resnet18",
@@ -1390,6 +1460,16 @@ def load_fedjam_metrics() -> tuple[
                 metric: float(row[metric])
                 for metric in ("auroc", "auprc", "fpr95")
             }
+
+    for row in read_csv(GRETEL_FEDJAM_ROOT / "summary_gretel_spectral.csv"):
+        if row.get("scope") != "overall":
+            continue
+        shot = int(row["shot_or_protocol"])
+        by_shot[shot]["gretel_spectral"] = {
+            "auroc": float(row["auroc_mean"]),
+            "auprc": float(row["auprc_mean"]),
+            "fpr95": float(row["fpr95_mean"]),
+        }
 
     information_summary = KLD_ICA_FEDJAM_ROOT / "summary.json"
     if not information_summary.is_file():
@@ -1560,7 +1640,7 @@ def plot_shot_scaling(
     fig.text(
         0.5,
         0.005,
-        "Main comparison: ED, CA-CFAR, SCSE, KLD-Ref, IAD-PER, SAIFE, UDMA, PatchCore, WinCLIP, and Ours",
+        "Main comparison: ED, CA-CFAR, SCSE, KLD-Ref, IAD-PER, GRETEL, UDMA, PatchCore, WinCLIP, and Ours",
         ha="center",
         va="bottom",
         fontsize=7.0,
@@ -1643,7 +1723,7 @@ def build_manifest(output: Path, figures: Iterable[str], ofdma_root: Path) -> No
         f"OFDMA values use the completed common target-scene merge under `{ofdma_root.relative_to(ROOT)}`; PatchCore remains sourced from `20260810_ofdma_patchcore_formal/`.",
         "The ROC/PR figure is a pooled-score visualization; the numeric tables in the experiment document remain the required scene/cell macro metrics.",
         "OFDMA error bars are the sample standard deviation across the same 30 target scenes used by the macro tables.",
-        "Main-method labels are unified as ED, CA-CFAR, SCSE, KLD-Ref, IAD-PER, SAIFE, UDMA, PatchCore, WinCLIP, and Ours. ViT/CNN branch labels appear only in dedicated ablation/type figures; legacy VAE-MSE and other exploratory rows remain supplementary.",
+        "Main-method labels are unified as ED, CA-CFAR, SCSE, KLD-Ref, IAD-PER, GRETEL, UDMA, PatchCore, WinCLIP, and Ours. ViT/CNN branch labels appear only in dedicated ablation/type figures; legacy VAE-MSE and other exploratory rows remain supplementary.",
         "Every figure is dataset-specific: no current main or ablation figure combines two datasets. ViT-only and CNN-only are internal ablations and are kept out of main-method rankings.",
         "Ungated OR is retained only for numeric diagnostics/tables and is intentionally omitted from every generated figure.",
         "Reproduce with: `python tools/plot_paper_experiment_figures.py --output-dir analysis_outputs/20260810_paper_experiment_figures_cited`.",

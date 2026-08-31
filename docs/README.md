@@ -32,5 +32,7 @@
 - [论文图表与结果汇总](../analysis_outputs/20260810_paper_experiment_figures_cited/README.md)
 - [UniVAD RF 适配实验记录](../experiments/exp_univad_rf_comparison_20260815.md)
 - [UniVAD 全部实验结果独立记录](../experiments/exp_univad_all_results_20260816.md)
+- [UniVAD DINOv2-B/14 公平规模复现实验](../experiments/exp_univad_b14_fair_comparison_20260818.md)
+- [GRETEL 频谱图适配正式实验](../experiments/exp_gretel_spectral_20260826.md)
 - [历史探索、交接记录与代码阅读笔记](archive/README.md)
 - [PromptAD 原始架构图](assets/general/PromptAD.jpg)

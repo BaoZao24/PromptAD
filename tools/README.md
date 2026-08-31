@@ -9,7 +9,7 @@
 | `build_rf_target_scene_support_manifest.py` | 生成 self-RF target-scene support manifest（正式协议入口） |
 | `eval_cls_vit_patchcore_gallery.py` | ViT patch normal memory 主证据（farthest-first coreset + top-k） |
 | `eval_cls_aux_cnn_gallery.py` | CNN 局部 memory 辅助证据（完整 memory + 单近邻） |
-| `eval_cls_dual_visual_evidence_fusion.py` | 置信度融合（ViT 主 + CNN 门控补充），当前正式方法；不启用 TTA |
+| `eval_cls_dual_visual_evidence_fusion.py` | 置信度融合（ViT 主 + CNN 门控补充），当前正式方法；ViT 主线启用频谱 TTA，CNN 不启用 |
 
 ## 正式基线（论文对照）
 
@@ -24,8 +24,9 @@
 | `eval_traditional_spectral_baselines.py` | 传统频谱统计（ED/谱熵/谱平坦度/峰度/CA-CFAR） |
 | `eval_information_theoretic_baselines.py` | 信息论基线 |
 | `eval_udma_cls.py` | UDMA |
+| `eval_gretel_spectral.py` | GRETEL（PNG 频谱图域适配） |
 | `eval_fastrecon_cls.py` | FastRecon |
-| `eval_saife_rf_cls.py` | SAIFE |
+| `eval_saife_rf_cls.py` | SAIFE（历史补充 baseline） |
 
 ## Ours 各数据集变体（内部消融/对照）
 
@@ -54,7 +55,7 @@
 | `build_ofdma_support_manifest.py` / `build_public_rf_support_manifest.py` / `build_public_rf_k_per_frequency_manifests.py` | support manifest 生成 |
 | `ofdma_fewshot_baseline_common.py` | few-shot baseline 公共代码 |
 | `eval_cls_ofdma_fewshot_comparison.py` | OFDMA few-shot 对比 |
-| `eval_cls_ofdma_target_scene_ours.py` | target-scene Ours 评估；默认 identity-only、无 TTA |
+| `eval_cls_ofdma_target_scene_ours.py` | target-scene Ours 评估；默认启用 OFDMA 频谱 TTA，无 TTA 需显式指定 |
 | `eval_ofdma_target_scene_baselines.py` | target-scene 基线评估 |
 | `eval_ofdma_support_only_gate.py` | support-only 门控 |
 | `eval_saife_ofdma_fewshot.py` | SAIFE few-shot |
@@ -65,7 +66,7 @@
 
 | 脚本 | 作用 |
 |---|---|
-| `eval_fedjam_fewshot_dual.py` | FedJam few-shot 双分支；默认 identity-only、无 TTA |
+| `eval_fedjam_fewshot_dual.py` | FedJam few-shot 双分支；默认启用 RF 频谱 TTA，无 TTA 需显式指定 |
 | `eval_fedjam_visual_baselines.py` | FedJam 视觉基线 |
 | `eval_fedjam_traditional_spectral.py` | FedJam 传统频谱基线 |
 | `eval_fedjam_four_branches.py` | FedJam 四个独立视觉分支：ViT-local、ViT-global、CNN-local、DINO-local；不做融合 |
@@ -91,7 +92,7 @@
 | `eval_univad_rf_fewshot.py` | 尝试官方 DINOv2-G/UniVAD 入口；需要约 4.23 GB 权重，不作为默认实验入口 |
 | `eval_univad_public_rf.py` | Public RF `k=1/2/4-per-frequency` 全量纹理适配；复用固定正常 test 池，避免重复编码 |
 | `eval_univad_fedjam.py` | FedJam spectrogram-only benign 1/2/4-shot 全量 test 适配 |
-| `eval_univad_ofdma.py` | OFDMA v2-realistic 21-SU observation 聚合适配；默认先跑一个完整 target scene |
+| `eval_univad_ofdma.py` | OFDMA v2-realistic 21-SU observation 聚合适配；默认先跑一个完整 target scene；支持 `--dino-model dinov2_vitb14` 公平规模重跑 |
 
 ## 汇总 / 图表 / 报告
 

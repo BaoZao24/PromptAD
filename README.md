@@ -58,8 +58,9 @@ Current experiments must use a few-shot normal-only protocol:
 ```text
 support / gallery:
   target normal samples only
-  dataset-specific normal support: one image per RF frequency band and 1/2/4-shot
-  normal observations for OFDMA/FedJam
+  dataset-specific normal support: one wideband normal observation per In-house RF
+  scene (1-shot; frequency crops are not counted separately), 1/2/4 observations per
+  Public RF frequency band, and 1/2/4-shot normal observations for OFDMA/FedJam
   no target abnormal samples
 
 test:
@@ -77,10 +78,11 @@ Important constraints:
 
 ## Current Result Status
 
-Some frozen Ours protocols retain paired TTA as an auxiliary normal-memory
+The current formal Ours protocol enables paired TTA as an auxiliary normal-memory
 expansion. It is not a core method innovation; every paper table must state the
-protocol setting and retain a matched no-TTA ablation. External baselines do
-not need to be rerun solely because of this documentation decision.
+protocol setting and retain a matched no-TTA ablation. External baselines do not
+need to be rerun solely because of this protocol choice, but missing TTA-on Ours
+main results must be completed.
 
 The current formal support-only RF run achieves
 **91.97/81.80/22.00** (AUROC/AUPRC/FPR@95%TPR) on In-house RF. Public RF uses the main
@@ -112,7 +114,9 @@ interference. OFDMA is derived by adapting the released paper, source code, and 
 The formal In-house RF protocol contains four scenes (`WeaponMuseum_spectrum`,
 `Playground_spectrum`, `TimeSquare_spectrum`, and `Gymnasium_spectrum`), five synthetic
 injection types (burst, chirp, DSSS, pulse, deceptive), and 60 signal/scene/strength cells.
-It uses 24 candidate frequency bands per scene for `per_frequency` support. The formal strength
+Each scene uses one wideband normal observation (1-shot), which is split into 24 frequency crops
+only to fit the network input; these crops are not independent shots. The internal manifest keeps
+the historical `per_frequency` name. The formal strength
 sets are −10/−20/−30 dB for burst/chirp/DSSS, −20/−30/−40 dB for pulse, and
 strong/medium/weak for deceptive; `wideband_pulse` is not part of the five-type main comparison.
 Detailed scene and injection parameters are recorded in

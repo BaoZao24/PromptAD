@@ -4,7 +4,8 @@
 The renderer is intentionally local and deterministic: Markdown is converted
 to HTML, display equations are embedded as local SVGs, and Chrome's print
 engine emits the final PDF.  The document uses a US-Letter, two-column, 10 pt layout with
-Times New Roman for Latin text and a CJK fallback for Chinese glyphs.
+Times New Roman for Latin text and a CJK fallback for Chinese glyphs.  Display
+and inline equations are rendered with the same Times New Roman math settings.
 """
 
 from __future__ import annotations
@@ -38,10 +39,12 @@ TIMES_FONT_FILES = (
 for _font_path in TIMES_FONT_FILES:
     if _font_path.is_file():
         fontManager.addfont(str(_font_path))
+FORMULA_SIZE_PT = 9.5
 FORMULA_FONT = FontProperties(
     fname=str(TIMES_FONT_FILES[0]) if TIMES_FONT_FILES[0].is_file() else None,
     family="Times New Roman",
-    size=10,
+    math_fontfamily="custom",
+    size=FORMULA_SIZE_PT,
 )
 
 CSS = r"""
@@ -57,7 +60,7 @@ body {
   background: #fff;
   font-family: "Times New Roman", "Noto Serif CJK SC", "Noto Serif CJK TC", serif;
   font-size: 10pt;
-  line-height: 1.13;
+  line-height: 1.17;
   text-align: justify;
   -webkit-print-color-adjust: exact;
   print-color-adjust: exact;
@@ -87,6 +90,7 @@ h2 {
   font-size: 11pt;
   line-height: 1.1;
   margin: 9pt 0 4pt;
+  text-align: center;
 }
 h3 {
   font-size: 10pt;
@@ -94,9 +98,10 @@ h3 {
   margin: 7pt 0 3pt;
 }
 h4 { font-size: 10pt; margin: 5pt 0 2pt; }
-p { margin: 0 0 4pt; orphans: 2; widows: 2; }
-ul, ol { margin: 2pt 0 5pt 15pt; padding-left: 9pt; }
-li { margin: 1pt 0; }
+p { margin: 0 0 0.5pt; orphans: 2; widows: 2; text-indent: 2em; }
+ul, ol { margin: 2pt 0 5pt; padding-left: 2em; }
+li { margin: 1pt 0; padding-left: 0; text-indent: 0; }
+li p { margin: 0; text-indent: 0; }
 blockquote {
   margin: 5pt 8pt;
   padding-left: 7pt;
@@ -139,7 +144,7 @@ table {
   margin: 5pt 0 7pt;
 }
 .table-block.wide-table { column-span: all; }
-.table-block p { margin: 0 0 2pt; text-align: left; }
+.table-block p { margin: 0 0 2pt; text-align: left; text-indent: 0; }
 .table-block table { margin: 0; }
 th, td {
   padding: 2.5pt 3pt;
@@ -158,27 +163,61 @@ img {
   break-inside: avoid;
   -webkit-column-break-inside: avoid;
 }
-p:not(.equation):has(> img:not(.inline-equation)),
-p:not(.equation):has(> img:not(.inline-equation)) + p {
-  column-span: all;
+.figure-block {
   text-align: center;
   break-inside: avoid;
+  -webkit-column-break-inside: avoid;
+  margin: 6pt 0;
 }
-p:not(.equation):has(> img:not(.inline-equation)) { margin: 7pt 0 2pt; }
-p:not(.equation):has(> img:not(.inline-equation)) + p { margin: 0 0 7pt; font-size: 8.5pt; }
+.figure-block.wide-figure { column-span: all; }
+.figure-block.compact-figure {
+  margin: 3pt 0 5pt;
+}
+.figure-block.compact-figure img {
+  width: auto;
+  max-width: 100%;
+  max-height: 2.25in;
+  margin: 2pt auto;
+}
+.figure-block p { margin: 0; text-align: center; text-indent: 0; }
+.figure-block p + p { margin-top: 2pt; font-size: 8.5pt; }
 
 hr { border: 0; border-top: 0.5pt solid #000; margin: 6pt 0; }
 strong { font-weight: bold; }
 em { font-style: italic; }
 
 /* Keep equations in the current text column, as in a standard two-column paper. */
-.equation { column-span: none; text-align: center; margin: 5pt 0; }
-.equation img { max-width: 92%; }
+.equation {
+  column-span: none;
+  font-family: "Times New Roman", serif;
+  font-size: 9.5pt;
+  line-height: 1;
+  text-align: center;
+  text-indent: 0;
+  margin: 7pt 0;
+}
+.equation img { width: auto; max-width: 90%; margin: 0 auto; }
+.equation.numbered {
+  position: relative;
+  padding: 0 18pt;
+  box-sizing: border-box;
+}
+.equation.numbered img { max-width: calc(100% - 24pt); }
+.equation-number {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  font-family: "Times New Roman", serif;
+  font-size: 9.5pt;
+  font-style: normal;
+}
 .inline-equation {
-  display: inline;
+  display: inline-block;
   width: auto;
-  height: 1.05em;
+  height: auto;
   margin: 0 1pt;
+  line-height: 1;
   vertical-align: -0.18em;
 }
 .figure-section {
@@ -186,6 +225,72 @@ em { font-style: italic; }
   break-inside: avoid;
   page-break-inside: avoid;
 }
+"""
+
+
+# The scheme overview contains wide comparison tables and architecture figures.
+# A single-column layout keeps these elements readable and avoids Chromium's
+# column balancing placing a wide table across two narrow columns.
+SINGLE_COLUMN_CSS = CSS + r"""
+@page {
+  size: A4;
+  margin: 0.62in 0.55in 0.72in;
+}
+
+body {
+  font-size: 10.5pt;
+  line-height: 1.38;
+  text-align: left;
+}
+
+.paper {
+  column-count: 1;
+  column-gap: 0;
+}
+
+p { margin: 0 0 7pt; }
+h2 { margin-top: 12pt; }
+h3 { margin-top: 9pt; }
+
+/* Give equations enough vertical and horizontal room in the single-column
+   manuscript. This prevents tall symbols and fractions from crowding the
+   surrounding Chinese text. */
+.equation {
+  line-height: 1.25;
+  margin: 10pt 0 11pt;
+  overflow: visible;
+}
+
+.equation img {
+  max-width: 96%;
+  margin: 1pt auto;
+}
+
+table {
+  font-size: 8.4pt;
+  line-height: 1.15;
+}
+
+.table-block.wide-table {
+  width: 100%;
+}
+
+.table-block.wide-table table {
+  width: 100%;
+  table-layout: auto;
+}
+
+.table-block.wide-table th,
+.table-block.wide-table td {
+  padding: 3pt 3.5pt;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+img {
+  max-width: 100%;
+}
+
 """
 
 
@@ -198,7 +303,7 @@ def find_chrome() -> str:
 
 
 def write_math_svg(formula: str, equation_path: Path) -> None:
-    """Write all equations with the same Times New Roman, 10 pt settings."""
+    """Write all equations with the same Times New Roman, 9.5 pt settings."""
 
     # Markdown display equations may wrap across source lines.  Matplotlib's
     # mathtext parser treats a literal newline as an end-of-expression, so
@@ -211,7 +316,9 @@ def write_math_svg(formula: str, equation_path: Path) -> None:
             "mathtext.rm": "Times New Roman",
             "mathtext.it": "Times New Roman:italic",
             "mathtext.bf": "Times New Roman:bold",
+            "mathtext.sf": "Times New Roman",
             "mathtext.tt": "Times New Roman",
+            "mathtext.cal": "Times New Roman:italic",
             "svg.fonttype": "none",
         }
     ):
@@ -223,16 +330,58 @@ def write_math_svg(formula: str, equation_path: Path) -> None:
             format="svg",
         )
 
+    # Matplotlib crops math SVGs tightly to their glyph bounds. Descenders,
+    # fraction denominators, and stacked subscripts can then lose their bottom
+    # edge when Chrome embeds the SVG in a line box. Expand the SVG canvas
+    # uniformly while preserving the rendered formula size.
+    svg = equation_path.read_text(encoding="utf-8")
+    root_pattern = re.compile(
+        r'(<svg\b[^>]*\bwidth=")([0-9.]+)pt(" height=")([0-9.]+)pt'
+        r'(" viewBox=")0 0 ([0-9.]+) ([0-9.]+)(")'
+    )
+
+    def padded_root(match: re.Match[str]) -> str:
+        width = float(match.group(2))
+        height = float(match.group(4))
+        view_width = float(match.group(6))
+        view_height = float(match.group(7))
+        pad_x = 0.75
+        pad_y = 1.5
+        return (
+            f'{match.group(1)}{width + 2 * pad_x:g}pt'
+            f'{match.group(3)}{height + 2 * pad_y:g}pt'
+            f'{match.group(5)}{-pad_x:g} {-pad_y:g} '
+            f'{view_width + 2 * pad_x:g} {view_height + 2 * pad_y:g}'
+            f'{match.group(8)}'
+        )
+
+    svg, count = root_pattern.subn(padded_root, svg, count=1)
+    if count != 1:
+        raise RuntimeError(f"Could not pad math SVG canvas: {equation_path}")
+    equation_path.write_text(svg, encoding="utf-8")
+
 
 def replace_display_math(source: str, temp_dir: Path) -> str:
     """Replace Markdown ``$$...$$`` blocks with crisp local SVG equations."""
 
     def replacement(match: re.Match[str]) -> str:
         formula = match.group(1).strip()
+        tag_match = re.search(r"\\tag\{([^{}]+)\}\s*$", formula)
+        tag = None
+        if tag_match:
+            tag = tag_match.group(1).strip()
+            formula = formula[: tag_match.start()].rstrip()
         equation_path = temp_dir / f"equation_{replacement.counter:02d}.svg"
         replacement.counter += 1
         write_math_svg(formula, equation_path)
         encoded = base64.b64encode(equation_path.read_bytes()).decode("ascii")
+        if tag is not None:
+            return (
+                '<p class="equation numbered">'
+                f'<img src="data:image/svg+xml;base64,{encoded}" alt="equation">'
+                f'<span class="equation-number">({html.escape(tag)})</span>'
+                "</p>"
+            )
         return (
             '<p class="equation">'
             f'<img src="data:image/svg+xml;base64,{encoded}" alt="equation">'
@@ -261,6 +410,55 @@ def replace_inline_math(source: str, temp_dir: Path) -> str:
     return re.sub(r"(?<!\$)\$(?!\$)(.+?)(?<!\$)\$(?!\$)", replacement, source)
 
 
+def collapse_chinese_soft_wraps(source: str) -> str:
+    """Remove editor-only line wraps inside Chinese paragraphs.
+
+    Markdown converts a single newline to a whitespace character.  This is
+    useful for wrapped English prose, but the manuscript is written as Chinese
+    paragraphs whose source lines are manually wrapped; retaining that
+    whitespace produces visible gaps between Chinese words in Chromium's PDF.
+    Paragraph breaks and Markdown block boundaries remain untouched.
+    """
+
+    def is_cjk(text: str) -> bool:
+        return any("\u3400" <= char <= "\u9fff" for char in text)
+
+    def is_structural_line(text: str) -> bool:
+        stripped = text.lstrip()
+        return (
+            not stripped
+            or stripped.startswith(("#", "|", "```", "$$", ">", "![", "---", "***"))
+        )
+
+    def starts_new_block(text: str) -> bool:
+        stripped = text.lstrip()
+        return is_structural_line(text) or bool(re.match(r"^[-+*]\s+", stripped)) or bool(
+            re.match(r"^\d+[.)]\s+", stripped)
+        )
+
+    lines = source.splitlines()
+    collapsed: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        while index + 1 < len(lines):
+            next_line = lines[index + 1]
+            current = line.strip()
+            if (
+                not current
+                or current.endswith("  ")
+                or is_structural_line(current)
+                or starts_new_block(next_line)
+                or not is_cjk(current)
+            ):
+                break
+            line += next_line.strip()
+            index += 1
+        collapsed.append(line)
+        index += 1
+    return "\n".join(collapsed) + ("\n" if source.endswith("\n") else "")
+
+
 def group_table_captions(body: str) -> str:
     """Keep each Markdown table caption attached to its table."""
 
@@ -276,22 +474,30 @@ def group_table_captions(body: str) -> str:
     return pattern.sub(replacement, body)
 
 
-def group_figure_section(body: str) -> str:
-    """Keep the anomaly-type heading with its first figure."""
+def group_figure_blocks(body: str) -> str:
+    """Keep figures with captions and span wide multi-panel figures across columns."""
 
     pattern = re.compile(
-        r"(<h2>4\.4 不同异常类型分析</h2>\s*"
-        r"<p><img.*?</p>\s*<p><em>.*?</em></p>)",
+        r"(<p><img.*?</p>\s*<p><em>(.*?)</em></p>)",
         re.DOTALL,
     )
-    return pattern.sub(r'<div class="figure-section">\1</div>', body, count=1)
+
+    def replacement(match: re.Match[str]) -> str:
+        caption = re.sub(r"<.*?>", "", match.group(2)).strip()
+        figure_html = match.group(1)
+        is_wide = caption.startswith("图1")
+        class_name = "figure-block wide-figure" if is_wide else "figure-block compact-figure"
+        return f'<div class="{class_name}">{match.group(1)}</div>'
+
+    return pattern.sub(replacement, body)
 
 
-def render(input_path: Path, output_path: Path) -> None:
+def render(input_path: Path, output_path: Path, single_column: bool = False) -> None:
     input_path = input_path.resolve()
     output_path = output_path.resolve()
     base_uri = input_path.parent.as_uri() + "/"
     raw_source = input_path.read_text(encoding="utf-8")
+    raw_source = collapse_chinese_soft_wraps(raw_source)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="experiment_pdf_") as temp_dir_name:
@@ -304,15 +510,15 @@ def render(input_path: Path, output_path: Path) -> None:
             output_format="html5",
         )
         body = group_table_captions(body)
-        body = group_figure_section(body)
+        body = group_figure_blocks(body)
         document = f'''<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>论文实验部分</title>
+<title>{html.escape(input_path.stem)}</title>
 <base href="{html.escape(base_uri, quote=True)}">
-<style>{CSS}</style>
+<style>{SINGLE_COLUMN_CSS if single_column else CSS}</style>
 </head>
 <body><main class="paper">{body}</main></body>
 </html>
@@ -345,8 +551,13 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=DEFAULT_INPUT)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--single-column",
+        action="store_true",
+        help="Use a readable single-column A4 layout for scheme overviews",
+    )
     args = parser.parse_args()
-    render(args.input, args.output)
+    render(args.input, args.output, single_column=args.single_column)
     print(args.output.resolve())
 
 

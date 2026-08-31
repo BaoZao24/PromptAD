@@ -53,8 +53,9 @@ ViT Normal Gallery
 ```text
 support / gallery:
   只使用 target normal 样本
-  按数据集协议从 target normal 样本建立 support；RF 每频段选 1 张，OFDMA/FedJam
-  使用 1/2/4-shot
+  按数据集协议从 target normal 样本建立 support；In-house RF 每场景使用 1 个宽带正常
+  观测（1-shot，频率裁切块不单独计数），Public RF 使用每频段 1/2/4 个正常观测，
+  OFDMA/FedJam 使用 1/2/4-shot
   不使用 target abnormal 样本
 
 test:
@@ -76,8 +77,9 @@ test:
 
 ## 当前结果状态
 
-部分冻结的本文方法协议保留 Paired TTA 作为辅助正常记忆扩充。它不属于核心创新；论文表格必须
-如实标明协议设置，并保留同划分的无 TTA 消融。仅因这一文档定位调整，无需重跑外部基线。
+当前正式主线启用 Paired TTA 作为辅助正常记忆扩充。它不属于核心创新；论文表格必须如实标明
+协议设置，并保留同划分的无 TTA 消融。仅因这一协议调整，无需重跑外部基线，但缺少带 TTA 主线
+结果的数据集需要补跑 Ours。
 
 当前正式 RF support-only 实验在 In-house RF 上得到
 **91.97/81.80/22.00**（AUROC/AUPRC/FPR@95%TPR）。Public RF 采用主线
@@ -104,8 +106,9 @@ ViT-only、CNN-only、Direct OR 等内部支线不作为独立主方法，统一
 
 In-house RF 正式协议包含 4 个场景（`WeaponMuseum_spectrum`、`Playground_spectrum`、
 `TimeSquare_spectrum`、`Gymnasium_spectrum`）、5 类合成注入（burst、chirp、DSSS、pulse、
-deceptive）和 60 个 signal/scene/strength 单元；每个场景有 24 个候选频段，使用
-`per_frequency` 建立正常 support。正式强度为：burst/chirp/DSSS 使用 −10/−20/−30 dB，
+deceptive）和 60 个 signal/scene/strength 单元；每个场景使用 1 个宽带正常观测
+（1-shot），并因网络输入尺寸限制裁切为 24 个频率窗口。代码中的 `per_frequency` 仅为
+裁切块的内部组织名称。正式强度为：burst/chirp/DSSS 使用 −10/−20/−30 dB，
 pulse 使用 −20/−30/−40 dB，deceptive 使用 strong/medium/weak；`wideband_pulse` 不进入
 当前五类主比较。场景、频谱切片和各类注入参数详见
 [`docs/paper/论文实验部分.md`](./docs/paper/论文实验部分.md) 第 4.1.1 节。
