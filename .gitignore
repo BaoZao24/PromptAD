@@ -131,3 +131,20 @@ opencodex/
 # tracked because ignore rules do not remove files already in the index.
 docs/论文实验部分.pdf
 docs/paper/论文实验部分.pdf
+docs/paper/现有方案介绍.pdf
+简化视觉架构图.pdf
+
+# Downloaded model caches. Model definitions and configuration remain versioned.
+models/.locks/
+models/CACHEDIR.TAG
+models/models--*/
+
+# Large exploratory run directories retained locally; conclusions are recorded
+# in the corresponding Markdown experiment reports.
+analysis_outputs/exploratory/20260817_fedjam_spade_smoke/
+analysis_outputs/exploratory/20260817_spade_smoke/
+analysis_outputs/exploratory/20260819_ours_wrn50_replace/
+analysis_outputs/exploratory/20260819_wideresnet50_rf_layer1/
+analysis_outputs/exploratory/20260819_wideresnet50_rf_layer2/
+analysis_outputs/exploratory/20260819_wideresnet50_rf_layer3/
+analysis_outputs/exploratory/20260824_ours_vitl14_replace/
