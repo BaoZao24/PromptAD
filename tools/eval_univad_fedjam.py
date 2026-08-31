@@ -60,6 +60,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--encode-batch-size", type=int, default=1)
     parser.add_argument("--match-chunk-size", type=int, default=1024)
+    parser.add_argument(
+        "--dino-model",
+        choices=("dinov2_vitg14", "dinov2_vitb14"),
+        default="dinov2_vitg14",
+    )
     parser.add_argument("--max-test-per-label", type=int, default=0)
     parser.add_argument("--seed", type=int, default=111)
     parser.add_argument("--ours-summary", default=str(DEFAULT_OURS_SUMMARY))
@@ -97,6 +102,11 @@ def save_progress(args: argparse.Namespace, status: str, processed: int, rows: l
         "status": status,
         "method": "UniVAD-Texture-adapted",
         "official_method": "UniVAD",
+        "dino_model": args.dino_model,
+        "dino_backbone": {
+            "dinov2_vitg14": "DINOv2-G/14",
+            "dinov2_vitb14": "DINOv2-B/14",
+        }[args.dino_model],
         "protocol_note": "FedJam full independent test; spectrogram only; whole-image texture branch; C3/CAPM/GECM omitted",
         "support_protocol": "nested benign-only 1/2/4-shot",
         "processed_test_rows": processed,
@@ -193,6 +203,11 @@ def main() -> None:
         "status": "complete",
         "method": "UniVAD-Texture-adapted",
         "official_method": "UniVAD",
+        "dino_model": args.dino_model,
+        "dino_backbone": {
+            "dinov2_vitg14": "DINOv2-G/14",
+            "dinov2_vitb14": "DINOv2-B/14",
+        }[args.dino_model],
         "protocol_note": "FedJam full independent test; spectrogram only; whole-image texture branch; C3/CAPM/GECM omitted",
         "support_protocol": "nested benign-only 1/2/4-shot",
         "train_counts": train_counts,

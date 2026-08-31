@@ -1,13 +1,14 @@
-"""Archived exploratory paired TTA for spectrogram images.
+"""Paired spectral TTA for the formal spectrogram protocol.
 
 The transforms preserve the semantic axes instead of applying arbitrary image
-flips or rotations.  They are intended for paired use: the same transform is
-applied when constructing a normal support memory and when querying it.
+flips or rotations.  In the formal merged-memory protocol they are applied to
+normal support only; the original test image is encoded and queried once.
+Separate paired-view evaluation remains available for explicit ablations.
 
-This module is not part of SpectraMemAD's core method or architecture. It is
-available for the explicitly documented auxiliary TTA protocol and its matched
-no-TTA ablation; formal evaluators use the identity view unless that protocol
-is explicitly selected.
+This module is an auxiliary component of SpectraMemAD's formal protocol, not a
+core method innovation or architecture block. Formal evaluators use the frozen
+spectral-response bundle unless the matched no-TTA ablation is explicitly
+selected.
 """
 
 from __future__ import annotations

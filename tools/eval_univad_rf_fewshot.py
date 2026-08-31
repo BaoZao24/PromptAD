@@ -92,6 +92,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-test-abnormal", type=int, default=8)
     parser.add_argument("--encode-batch-size", type=int, default=1)
     parser.add_argument("--match-chunk-size", type=int, default=256)
+    parser.add_argument(
+        "--dino-model",
+        choices=("dinov2_vitg14", "dinov2_vitb14"),
+        default="dinov2_vitg14",
+        help="DINOv2 backbone; G preserves the old protocol and B is the size-matched rerun.",
+    )
     parser.add_argument("--output-json", default="")
     parser.add_argument("--ours-csv", default="")
     return parser.parse_args()
@@ -204,11 +210,31 @@ def build_model(args: argparse.Namespace) -> UniVAD:
     # UniVAD's reference code fixes its device to cuda.  CUDA_VISIBLE_DEVICES
     # can be used by the caller to select a physical GPU safely.
     univad_impl.DinoFeaturizer = _UnusedDinoFeaturizer
-    # The official constructor resolves its DINOv2 submodule relative to the
-    # UniVAD repository root.
-    os.chdir(UNIVAD_ROOT)
-    model = UniVAD(image_size=args.image_size)
+    # The official constructor hard-codes ``dinov2_vitg14``. Intercept only
+    # that local hub call so the official texture-path setup is unchanged when
+    # running the size-matched B/14 experiment. The default remains G/14.
+    requested_dino = getattr(args, "dino_model", "dinov2_vitg14")
+    if requested_dino not in {"dinov2_vitg14", "dinov2_vitb14"}:
+        raise ValueError(f"Unsupported UniVAD DINOv2 model: {requested_dino}")
+    original_hub_load = torch.hub.load
+
+    def patched_hub_load(repo_or_dir, model_name, *hub_args, **hub_kwargs):
+        if model_name in {"dinov2_vitg14", "dinov2_vitb14"}:
+            model_name = requested_dino
+        return original_hub_load(repo_or_dir, model_name, *hub_args, **hub_kwargs)
+
+    original_cwd = os.getcwd()
+    torch.hub.load = patched_hub_load
+    try:
+        # The official constructor resolves its DINOv2 submodule relative to
+        # the UniVAD repository root.
+        os.chdir(UNIVAD_ROOT)
+        model = UniVAD(image_size=args.image_size)
+    finally:
+        torch.hub.load = original_hub_load
+        os.chdir(original_cwd)
     model.eval()
+    model.dino_model_name = requested_dino
     return model
 
 
@@ -269,6 +295,11 @@ def build_result(args: argparse.Namespace, results: list[dict], status: str) -> 
         "status": status,
         "method": "UniVAD-Texture-adapted",
         "official_method": "UniVAD",
+        "dino_model": getattr(args, "dino_model", "dinov2_vitg14"),
+        "dino_backbone": {
+            "dinov2_vitg14": "DINOv2-G/14",
+            "dinov2_vitb14": "DINOv2-B/14",
+        }.get(getattr(args, "dino_model", "dinov2_vitg14"), "unknown"),
         "protocol_note": "whole-image texture branch; C3/GECM object components omitted for RF spectrograms",
         "selection": "all_cells" if args.all_cells else "single_cell",
         "signal": None if args.all_cells else args.signal,

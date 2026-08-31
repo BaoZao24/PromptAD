@@ -58,7 +58,11 @@ from tools.eval_cls_vit_patchcore_gallery import (
     select_gallery_subset,
     topk_cosine_distance_chunked,
 )
-from tools.eval_seg_resnet_gallery_fusion import ResNet18LocalEncoder, load_checkpoint
+from tools.eval_seg_resnet_gallery_fusion import (
+    ResNet18LocalEncoder,
+    WideResNet50LocalEncoder,
+    load_checkpoint,
+)
 from train_rf_target_pooled_universal import to_model_input
 from utils.confidence_gate import safe_support_only_gate
 from utils.normal_subspace import (
@@ -839,8 +843,20 @@ def main():
     parser.add_argument("--max-test-per-label", type=int, default=0)
     parser.add_argument("--distance-chunk-size", type=int, default=1024)
     parser.add_argument("--nn-topk", type=int, default=5)
+    parser.add_argument(
+        "--backbone",
+        default="ViT-B-16-plus-240",
+        choices=["ViT-B-16-plus-240", "ViT-B-16", "ViT-B-32", "ViT-L-14"],
+        help="Frozen ViT backbone used by the global branch; B16 preserves the formal default.",
+    )
     parser.add_argument("--cnn-top-ratio", type=float, default=0.1)
     parser.add_argument("--cnn-nn-topk", type=int, default=1)
+    parser.add_argument(
+        "--cnn-encoder",
+        choices=["resnet18", "wideresnet50"],
+        default="resnet18",
+        help="Frozen ImageNet backbone for the auxiliary CNN branch (layer3).",
+    )
     parser.add_argument("--coreset-ratio", type=float, default=0.5)
     parser.add_argument(
         "--vit-normal-model",
@@ -855,10 +871,13 @@ def main():
     parser.add_argument(
         "--vit-tta",
         choices=["none", "stft_shift_blur", "rf_spectral_response_v1"],
-        default="none",
-        help="Normal-memory view bundle; the formal default uses the identity view only.",
+        default="rf_spectral_response_v1",
+        help=(
+            "Normal-memory view bundle; the formal default merges identity, time-axis +/-4 px, "
+            "and frequency-response jitter. Use none for the matched ablation."
+        ),
     )
-    parser.add_argument("--vit-tta-frequency-response-strength", type=float, default=5.0)
+    parser.add_argument("--vit-tta-frequency-response-strength", type=float, default=3.0)
     parser.add_argument(
         "--vit-tta-memory-layout",
         choices=["separate", "merged"],
@@ -890,6 +909,12 @@ def main():
     parser.add_argument("--img-resize", type=int, default=240)
     parser.add_argument("--img-cropsize", type=int, default=240)
     args = parser.parse_args()
+
+    if args.backbone == "ViT-L-14":
+        if args.img_resize == 240:
+            args.img_resize = 224
+        if args.img_cropsize == 240:
+            args.img_cropsize = 224
 
     if not args.shots or min(args.shots) <= 0:
         raise ValueError("--shots must contain positive integers")
@@ -946,7 +971,7 @@ def main():
         "device": str(device),
         "out_size_h": args.resolution,
         "out_size_w": args.resolution,
-        "backbone": "ViT-B-16-plus-240",
+        "backbone": args.backbone,
         "pretrained_dataset": "laion400m_e32",
         "n_ctx": 4,
         "n_pro": 3,
@@ -964,7 +989,10 @@ def main():
     model = PromptAD(**model_kwargs).to(device)
     load_checkpoint(model, str(Path(args.checkpoint).resolve()))
     model.eval_mode()
-    encoder = ResNet18LocalEncoder().to(device).eval()
+    if args.cnn_encoder == "wideresnet50":
+        encoder = WideResNet50LocalEncoder().to(device).eval()
+    else:
+        encoder = ResNet18LocalEncoder().to(device).eval()
 
     vit_galleries = build_vit_galleries(model, support, shots, args, device)
     vit_subspaces = build_vit_subspaces(model, support, shots, args, device)
@@ -1159,7 +1187,9 @@ def main():
         "vit_reference_modes": list(VIT_REFERENCE_MODES) if args.vit_tta != "none" else [],
         "cnn_reference_modes": list(CNN_REFERENCE_MODES) if args.vit_tta != "none" else [],
         "vit_feature": "normalized ViT layer1+layer2 concat",
-        "cnn_feature": "ImageNet ResNet18 layer3",
+        "backbone": args.backbone,
+        "cnn_feature": f"ImageNet {args.cnn_encoder} layer3",
+        "cnn_encoder": args.cnn_encoder,
         "vit_coreset_ratio": args.coreset_ratio,
         "vit_nn_topk": args.nn_topk,
         "cnn_top_ratio": args.cnn_top_ratio,

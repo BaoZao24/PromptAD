@@ -53,6 +53,7 @@ from tools.eval_cls_vit_patchcore_gallery import (
 )
 from tools.eval_seg_resnet_gallery_fusion import (
     ResNet18LocalEncoder,
+    WideResNet50LocalEncoder,
     build_resnet_gallery,
     cnn_tta_batch,
     load_checkpoint,
@@ -97,7 +98,7 @@ FORMAL = {
     "rowwise_coreset": False,
     "memory_mode": "global_nn",
     "support_augment": "none",
-    "paired_tta": "none",
+    "paired_tta": "ofdma_spectral_response_v1",
     "paired_tta_fusion": "max",
     "paired_tta_memory_layout": "merged",
     "paired_tta_shift_px": 4,
@@ -174,6 +175,30 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument(
+        "--backbone",
+        default=FORMAL["backbone"],
+        choices=["ViT-B-16-plus-240", "ViT-B-16", "ViT-B-32", "ViT-L-14"],
+        help="Frozen ViT backbone used by the global branch; B16 preserves the formal default.",
+    )
+    parser.add_argument(
+        "--img-resize",
+        type=int,
+        default=None,
+        help="ViT input resize; defaults to 224 for ViT-L-14 and 240 for the formal B+ model.",
+    )
+    parser.add_argument(
+        "--img-cropsize",
+        type=int,
+        default=None,
+        help="ViT input crop size; defaults to 224 for ViT-L-14 and 240 for the formal B+ model.",
+    )
+    parser.add_argument(
+        "--cnn-encoder",
+        choices=["resnet18", "wideresnet50"],
+        default="resnet18",
+        help="Frozen ImageNet backbone for the auxiliary CNN branch (layer3).",
+    )
     parser.add_argument("--gpu-id", type=int, default=0)
     parser.add_argument("--use-cpu", action="store_true")
     parser.add_argument("--validate-only", action="store_true")
@@ -214,12 +239,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--vit-tta-ablation",
         choices=["formal", "none", "spectral_response"],
-        default="none",
+        default="spectral_response",
         help=(
-            "none is the current formal method and uses original normal support; "
+            "spectral_response is the current formal method and merges original, time-left/right, "
+            "and frequency-response normal views; none is the matched no-TTA ablation; "
             "formal is retained only to reproduce the historical paired-TTA protocol; "
-            "spectral_response merges original, time-left/right, and frequency-response "
-            "normal views, then queries each test image once."
+            "all modes query each test image once."
         ),
     )
     return parser.parse_args()
@@ -228,6 +253,13 @@ def parse_args() -> argparse.Namespace:
 def formal_args(cli: argparse.Namespace) -> SimpleNamespace:
     values = vars(cli).copy()
     values.update(FORMAL)
+    values["backbone"] = cli.backbone
+    if cli.backbone == "ViT-L-14":
+        values["img_resize"] = cli.img_resize or 224
+        values["img_cropsize"] = cli.img_cropsize or 224
+    else:
+        values["img_resize"] = cli.img_resize or FORMAL["img_resize"]
+        values["img_cropsize"] = cli.img_cropsize or FORMAL["img_cropsize"]
     if cli.vit_tta_ablation == "none":
         values.update({"paired_tta": "none", "paired_tta_memory_layout": "merged"})
     elif cli.vit_tta_ablation == "formal":
@@ -901,7 +933,10 @@ def main() -> None:
     device = "cpu" if args.use_cpu else "cuda:0"
     model = PromptAD(**model_kwargs(args, device, max(args.shots))).to(device)
     load_checkpoint(model, args.checkpoint)
-    encoder = ResNet18LocalEncoder().to(device)
+    if args.cnn_encoder == "wideresnet50":
+        encoder = WideResNet50LocalEncoder().to(device)
+    else:
+        encoder = ResNet18LocalEncoder().to(device)
 
     if args.support_reference_only:
         reference_root = output_root / "support_reference"

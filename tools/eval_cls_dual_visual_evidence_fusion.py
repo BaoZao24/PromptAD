@@ -257,7 +257,11 @@ def evaluate(args):
             vit_scores = vit_npz[VIT_SCORE_KEY][vit_indices].astype(
                 np.float64
             )
-            cnn_key = CNN_SCORE_KEYS[args.protocol]
+            cnn_key = (
+                args.cnn_score_key
+                if args.cnn_score_key
+                else CNN_SCORE_KEYS[args.protocol]
+            )
             if cnn_key not in cnn_npz:
                 raise KeyError(
                     f"{cnn_path} does not contain the fixed auxiliary CNN "
@@ -381,6 +385,13 @@ def main():
         help="Normal-only CNN reference output containing support_reference/*.npz",
     )
     parser.add_argument(
+        "--cnn-score-key",
+        help=(
+            "Override the auxiliary CNN score key inside the CNN npz files "
+            "(e.g. wideresnet50_layer3_top0.1_scores)."
+        ),
+    )
+    parser.add_argument(
         "--support-manifest",
         help=(
             "Optional model-independent public-RF support manifest used to "
@@ -420,7 +431,11 @@ def main():
         "vit_score_dir": args.vit_score_dir,
         "cnn_score_dir": args.cnn_score_dir,
         "support_manifest": args.support_manifest,
-        "cnn_score_key": CNN_SCORE_KEYS[args.protocol],
+        "cnn_score_key": (
+            args.cnn_score_key
+            if args.cnn_score_key
+            else CNN_SCORE_KEYS[args.protocol]
+        ),
         "support_manifest_sha256": (
             manifest_hashes[0]
             if len(manifest_hashes) == 1

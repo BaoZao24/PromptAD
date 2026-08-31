@@ -276,7 +276,7 @@ def get_args():
     # method related parameters
     parser.add_argument('--k-shot', type=int, default=1)
     parser.add_argument("--backbone", type=str, default="ViT-B-16-plus-240",
-                        choices=['ViT-B-16-plus-240', 'ViT-B-16'])
+                        choices=['ViT-B-16-plus-240', 'ViT-B-16', 'ViT-L-14'])
     parser.add_argument("--pretrained_dataset", type=str, default="laion400m_e32")
     parser.add_argument("--version", type=str, default='')
 
@@ -343,6 +343,11 @@ def get_args():
                         help="每隔多少个 epoch 做一次全量 seg 评估；最后一轮会强制评估")
 
     args = parser.parse_args()
+    if args.backbone == "ViT-L-14":
+        if args.img_resize == 240:
+            args.img_resize = 224
+        if args.img_cropsize == 240:
+            args.img_cropsize = 224
 
     return args
 

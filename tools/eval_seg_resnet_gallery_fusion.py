@@ -23,7 +23,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from scipy.ndimage import gaussian_filter
-from torchvision.models import ResNet18_Weights, resnet18
+from torchvision.models import (
+    ResNet18_Weights,
+    Wide_ResNet50_2_Weights,
+    resnet18,
+    wide_resnet50_2,
+)
 from tqdm import tqdm
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -100,6 +105,49 @@ class ResNet18LocalEncoder(nn.Module):
         super().__init__()
         weights = ResNet18_Weights.IMAGENET1K_V1
         net = resnet18(weights=weights)
+        self.stem = nn.Sequential(net.conv1, net.bn1, net.relu, net.maxpool)
+        self.layer1 = net.layer1
+        self.layer2 = net.layer2
+        self.layer3 = net.layer3
+        self.layer4 = net.layer4
+        self.register_buffer(
+            "mean",
+            torch.tensor(weights.transforms().mean).view(1, 3, 1, 1),
+            persistent=False,
+        )
+        self.register_buffer(
+            "std",
+            torch.tensor(weights.transforms().std).view(1, 3, 1, 1),
+            persistent=False,
+        )
+        for param in self.parameters():
+            param.requires_grad_(False)
+
+    def forward(self, images_bgr_uint8: torch.Tensor):
+        x = images_bgr_uint8.float() / 255.0
+        x = x[:, [2, 1, 0], :, :]
+        x = F.interpolate(x, size=(224, 224), mode="bilinear", align_corners=False)
+        x = (x - self.mean) / self.std
+        x = self.stem(x)
+        layer1 = self.layer1(x)
+        layer2 = self.layer2(layer1)
+        layer3 = self.layer3(layer2)
+        layer4 = self.layer4(layer3)
+        return {
+            "layer1": F.normalize(layer1.float(), dim=1),
+            "layer2": F.normalize(layer2.float(), dim=1),
+            "layer3": F.normalize(layer3.float(), dim=1),
+            "layer4": F.normalize(layer4.float(), dim=1),
+        }
+
+
+class WideResNet50LocalEncoder(nn.Module):
+    """Same interface as ResNet18LocalEncoder but with a WideResNet50-2 trunk."""
+
+    def __init__(self):
+        super().__init__()
+        weights = Wide_ResNet50_2_Weights.IMAGENET1K_V1
+        net = wide_resnet50_2(weights=weights)
         self.stem = nn.Sequential(net.conv1, net.bn1, net.relu, net.maxpool)
         self.layer1 = net.layer1
         self.layer2 = net.layer2

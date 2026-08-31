@@ -43,7 +43,7 @@ from .CLIPAD import SimpleTokenizer as _Tokenizer
 # 本地 tokenizer：这里仅创建对象备用，不会自动补 padding / SOS / EOS。
 _tokenizer = _Tokenizer()
 
-valid_backbones = ['ViT-B-16-plus-240', "ViT-B-16"]
+valid_backbones = ['ViT-B-16-plus-240', "ViT-B-16", "ViT-B-32", "ViT-L-14"]
 valid_pretrained_datasets = ['laion400m_e32']
 
 from torchvision import transforms

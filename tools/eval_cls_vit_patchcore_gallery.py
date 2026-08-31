@@ -1269,13 +1269,17 @@ def parse_args():
             "ofdma_spectral_response_v1",
             "ofdma_spectral_physics_v1",
         ],
-        default="none",
+        default="rf_spectral_response_v1",
+        help=(
+            "Formal mainline default: identity, time-axis +/-4 px, and frequency-response "
+            "jitter merged into one normal memory. Use none for the matched ablation."
+        ),
     )
     parser.add_argument("--paired-tta-fusion", choices=["mean", "max"], default="max")
     parser.add_argument(
         "--paired-tta-memory-layout",
         choices=["separate", "merged"],
-        default="separate",
+        default="merged",
         help=(
             "separate: match each augmented query with its own normal memory; "
             "merged: combine all augmented normal features into one memory and query the original once."
@@ -1500,6 +1504,8 @@ def main():
     summary = {
         "method": "vit_patchcore_gallery_cls",
         "checkpoint": args.checkpoint,
+        "backbone": args.backbone,
+        "pretrained_dataset": args.pretrained_dataset,
         "support_protocol": "target_scene",
         "support_manifest": args.support_manifest or None,
         "support_manifest_sha256": getattr(

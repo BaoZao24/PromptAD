@@ -32,6 +32,7 @@ from datasets.rf_target import (
 )
 from tools.eval_seg_resnet_gallery_fusion import (
     ResNet18LocalEncoder,
+    WideResNet50LocalEncoder,
     cnn_tta_batch,
     downsample_gallery,
     farthest_first_coreset,
@@ -65,7 +66,10 @@ SCORE_KEYS = {
     "public_rf": "resnet18_layer3_scores",
     "spectrum": "resnet18_layer3_scores",
 }
+CNN_ENCODERS = ("resnet18", "wideresnet50")
 CNN_FEATURE_MODES = (
+    "layer1",
+    "layer2",
     "layer3",
     "layer1_layer4_concat",
     "layer1_layer3_concat",
@@ -352,8 +356,8 @@ def cnn_feature_map(
     concatenation, and normalizes the concatenated descriptor once more.
     """
 
-    if feature_mode == "layer3":
-        return features["layer3"]
+    if feature_mode in {"layer1", "layer2", "layer3", "layer4"}:
+        return features[feature_mode]
     if feature_mode not in CNN_FEATURE_PAIRS:
         raise ValueError(f"Unsupported CNN feature mode: {feature_mode}")
 
@@ -468,7 +472,7 @@ def evaluate_job(encoder, gallery, job, args, device) -> dict:
     labels_array = np.asarray(labels, dtype=np.int32)
     scores_array = np.asarray(scores, dtype=np.float32)
     paths = [str(sample["path"]) for sample in job["test_samples"]]
-    score_key = SCORE_KEYS[args.protocol]
+    score_key = resolved_score_key(args)
     payload = {
         "names": np.asarray(names),
         "image_paths": np.asarray(paths),
@@ -493,7 +497,7 @@ def evaluate_job(encoder, gallery, job, args, device) -> dict:
     )
     np.savez_compressed(score_dir / f"{stem}-scores.npz", **payload)
     return {
-        "method": "resnet18_auxiliary_cnn",
+        "method": f"{args.cnn_encoder}_auxiliary_cnn",
         "feature_mode": args.cnn_feature_mode,
         "dataset": job["dataset"],
         "category": job["category"],
@@ -556,11 +560,26 @@ def train_signature(job) -> tuple[str, ...]:
     return tuple(str(sample["path"]) for sample in job["train_samples"])
 
 
+def build_encoder(name: str):
+    if name == "resnet18":
+        return ResNet18LocalEncoder()
+    if name == "wideresnet50":
+        return WideResNet50LocalEncoder()
+    raise ValueError(f"Unsupported CNN encoder: {name}")
+
+
+def resolved_score_key(args) -> str:
+    """Keep legacy npz keys for the formal resnet18/layer3 configuration."""
+    if args.cnn_encoder == "resnet18" and args.cnn_feature_mode == "layer3":
+        return SCORE_KEYS[args.protocol]
+    return f"{args.cnn_encoder}_{args.cnn_feature_mode}_top0.1_scores"
+
+
 def run_jobs(jobs, args, device) -> list[dict]:
-    encoder = ResNet18LocalEncoder().to(device).eval()
+    encoder = build_encoder(args.cnn_encoder).to(device).eval()
     gallery_args = SimpleNamespace(
         cnn_feature_mode=args.cnn_feature_mode,
-        max_gallery_patches=50000,
+        max_gallery_patches=args.max_gallery_patches,
         cnn_coreset_size=0,
         cnn_paired_tta="none",
         cnn_input_normalization="raw",
@@ -678,7 +697,19 @@ def parse_args():
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--num-workers", type=int, default=4)
     parser.add_argument("--distance-chunk-size", type=int, default=1024)
+    parser.add_argument(
+        "--max-gallery-patches",
+        type=int,
+        default=50000,
+        help="Random downsample cap for the normal patch gallery; 0 keeps all patches.",
+    )
     parser.add_argument("--seed", type=int, default=111)
+    parser.add_argument(
+        "--cnn-encoder",
+        choices=CNN_ENCODERS,
+        default="resnet18",
+        help="Frozen ImageNet backbone for the auxiliary CNN branch.",
+    )
     parser.add_argument(
         "--cnn-feature-mode",
         choices=CNN_FEATURE_MODES,
@@ -732,7 +763,7 @@ def main():
         (output_root / "support_reference_protocol.json").write_text(
             json.dumps(
                 {
-                    "method": "resnet18_auxiliary_cnn",
+                    "method": f"{args.cnn_encoder}_auxiliary_cnn",
                     "support_only": True,
                     "support_reference_protocol": args.support_reference_protocol,
                     "protocol": args.protocol,
@@ -755,7 +786,7 @@ def main():
     result_path = output_root / "results_aux_cnn.csv"
     write_csv(result_path, rows)
     summary = {
-        "method": "resnet18_auxiliary_cnn",
+        "method": f"{args.cnn_encoder}_auxiliary_cnn",
         "protocol": args.protocol,
         "normal_sampling": args.normal_sampling,
         "support_seed": getattr(args, "support_seed", None),
@@ -775,7 +806,11 @@ def main():
             "test_normal_paths_sha256",
             None,
         ),
-        "encoder": "resnet18_imagenet1k_v1",
+        "encoder": (
+            "resnet18_imagenet1k_v1"
+            if args.cnn_encoder == "resnet18"
+            else "wide_resnet50_2_imagenet1k_v1"
+        ),
         "feature_layer": args.cnn_feature_mode,
         "image_score": "mean_top_10_percent_patch_distance",
         "nearest_neighbours": 1,

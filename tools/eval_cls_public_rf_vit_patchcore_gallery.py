@@ -524,13 +524,17 @@ def main():
             "stft_physical_cfo_v1",
             "stft_physical_nuisance_v1",
         ],
-        default="none",
+        default="rf_spectral_response_v1",
+        help=(
+            "Formal Public RF mainline default: identity, time-axis +/-4 px, and "
+            "frequency-response jitter merged into one normal memory. Use none for the ablation."
+        ),
     )
     parser.add_argument("--paired-tta-fusion", choices=["mean", "max"], default="max")
     parser.add_argument(
         "--paired-tta-memory-layout",
         choices=["separate", "merged"],
-        default="separate",
+        default="merged",
         help="Keep paired view memories separate, or merge all normal TTA views into one memory.",
     )
     parser.add_argument("--paired-tta-contrast", type=float, default=1.04)
@@ -792,6 +796,8 @@ def main():
     summary = {
         "method": "public_rf_vit_patchcore_gallery_cls",
         "checkpoint": args.checkpoint,
+        "backbone": args.backbone,
+        "pretrained_dataset": args.pretrained_dataset,
         "normal_sampling": args.normal_sampling,
         "support_seed": args.support_seed,
         "support_manifest": args.support_manifest,

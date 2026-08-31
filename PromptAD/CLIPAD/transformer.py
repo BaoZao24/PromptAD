@@ -635,15 +635,32 @@ class V2VTransformer(nn.Module):
 
         self.init_parameters()
 
+        def _patch_tokens(output):
+            # V2V blocks return ``[v2v_path, original_path]`` in LND layout,
+            # while the unchanged early blocks of deeper ViTs return a single
+            # LND tensor.  Keep the original-path feature definition and make
+            # the extraction robust to both layouts.
+            if isinstance(output, (list, tuple)):
+                output = output[1]
+            if output.dim() != 3:
+                raise RuntimeError(
+                    f"Unexpected intermediate ViT feature shape: {tuple(output.shape)}"
+                )
+            return output.permute(1, 0, 2)[:, 1:, :]
+
         def hook_t1(module, input, output):
-            self.mid_feature1 = output[1].permute(1, 0, 2)[:, 1:, :]
+            self.mid_feature1 = _patch_tokens(output)
 
         def hook_t2(module, input, output):
-            self.mid_feature2 = output[1].permute(1, 0, 2)[:, 1:, :]
+            self.mid_feature2 = _patch_tokens(output)
 
-        # old
-        self.transformer.resblocks[2].register_forward_hook(hook_t1)
-        self.transformer.resblocks[7].register_forward_hook(hook_t2)
+        # Preserve the original relative positions (3rd and 8th block) within
+        # the 12-block V2V tail.  For ViT-L-14, the first 12 blocks remain on
+        # the original attention path, so the corresponding blocks are 14 and
+        # 19 rather than the B/16 indices 2 and 7.
+        v2v_tail_start = max(0, len(self.transformer.resblocks) - 12)
+        self.transformer.resblocks[v2v_tail_start + 2].register_forward_hook(hook_t1)
+        self.transformer.resblocks[v2v_tail_start + 7].register_forward_hook(hook_t2)
         # self.transformer.resblocks[6].register_forward_hook(hook_t2)
 
     def lock(self, unlocked_groups=0, freeze_bn_stats=False):

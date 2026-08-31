@@ -82,6 +82,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--encode-batch-size", type=int, default=1)
     parser.add_argument("--match-chunk-size", type=int, default=256)
+    parser.add_argument(
+        "--dino-model",
+        choices=("dinov2_vitg14", "dinov2_vitb14"),
+        default="dinov2_vitg14",
+    )
     parser.add_argument("--ks", type=int, nargs="+", default=[1, 2, 4])
     parser.add_argument("--signals", nargs="+", default=list(SIGNAL_JSRS))
     parser.add_argument("--jsrs", default="")
@@ -294,6 +299,11 @@ def result_payload(args: argparse.Namespace, rows: list[dict], status: str) -> d
         "status": status,
         "method": "UniVAD-Texture-adapted",
         "official_method": "UniVAD",
+        "dino_model": args.dino_model,
+        "dino_backbone": {
+            "dinov2_vitg14": "DINOv2-G/14",
+            "dinov2_vitb14": "DINOv2-B/14",
+        }[args.dino_model],
         "protocol_note": "Public RF k-per-frequency full test; whole-image texture branch; C3/CAPM/GECM omitted",
         "support_protocol": "nested k=1/2/4-per-frequency",
         "ks": sorted(set(args.ks)),
