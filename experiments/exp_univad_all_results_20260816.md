@@ -2,6 +2,8 @@
 
 本文档单独记录当前已经完成的 UniVAD 相关实验，不替代论文主表，也不把未完成的 OFDMA 多场景结果写成正式结论。
 
+> 说明：本文保留此前 DINOv2-G/14 的历史结果。为解决大骨干比较不公平的问题，已用 DINOv2-B/14 在相同协议下重新完成四套数据集实验，最新结果见：[UniVAD DINOv2-B/14 公平规模复现实验](exp_univad_b14_fair_comparison_20260818.md)。
+
 ## 1. 统一实验口径
 
 ### 1.1 方法名称
@@ -128,6 +130,43 @@ CLIP global evidence ───────────────────�
 ```
 
 它没有使用可学习融合层，也没有使用我们当前的 CNN 置信度门控；三个局部分支权重固定为 `1/3`，global 分数以固定系数 `1` 加到局部分数上。该公式是本次 `UniVAD-Texture-adapted` 适配器实际采用的实现口径。
+
+## 1.5 FedJam 各 UniVAD 分支表现
+
+下面单独记录 UniVAD 各分支在 FedJam 完整测试集上的结果。该实验共 7,200 条 test，使用
+benign-only 嵌套 1/2/4-shot support；每个分支独立评分，不使用目标域训练。这里的
+`texture_fusion` 是 CLIP patch、DINO patch、CLIP text map 等权平均后再加 CLIP global，
+不是特征向量 concat。
+
+| shot | 分支 | AUROC ↑ | AUPRC ↑ | FPR@95%TPR ↓ |
+|---:|---|---:|---:|---:|
+| 1 | CLIP global | 75.46 | 91.15 | 87.72 |
+| 1 | CLIP patch | 87.67 | 96.27 | 77.94 |
+| 1 | DINO patch | **93.27** | 97.98 | **52.11** |
+| 1 | CLIP text map | 82.11 | 92.76 | 67.39 |
+| 1 | **Texture fusion** | **93.28** | **98.03** | 59.28 |
+| 2 | CLIP global | 76.23 | 91.22 | 85.61 |
+| 2 | CLIP patch | 88.64 | 96.57 | 75.06 |
+| 2 | DINO patch | 93.20 | 97.94 | 52.28 |
+| 2 | CLIP text map | 82.11 | 92.76 | 67.39 |
+| 2 | **Texture fusion** | **93.74** | **98.14** | **50.11** |
+| 4 | CLIP global | 79.07 | 92.14 | 78.61 |
+| 4 | CLIP patch | 90.21 | 97.02 | 68.33 |
+| 4 | DINO patch | 93.36 | 97.97 | 48.61 |
+| 4 | CLIP text map | 82.11 | 92.76 | 67.39 |
+| 4 | **Texture fusion** | **94.12** | **98.22** | 46.67 |
+
+### 分支结论
+
+- DINO patch 是最强的单一局部视觉分支，三档 shot 的 AUROC 都约为 93% 以上。
+- CLIP patch 明显优于 CLIP global，说明局部 patch matching 比整图距离更适合 FedJam 频谱异常。
+- CLIP text map 单独使用有一定效果，但低于 CLIP patch 和 DINO patch。
+- Texture fusion 在 AUROC/AUPRC 上略高于单独 DINO patch；FPR@95%TPR 的改善取决于 shot，
+  2-shot 最明显，1-shot 和 4-shot 不一定优于 DINO patch。
+- 由于 C³、CAPM、GECM 需要物体/组件掩码，FedJam 频谱图实验没有运行这三个官方分支，不能
+  把上表称作完整官方 UniVAD 的全部模块结果。
+
+原始分支结果：[`univad-fedjam-four-branches-fixed-260816/summary.json`](../autoresearch/univad-fedjam-four-branches-fixed-260816/summary.json)。
 
 ## 2. 正式全量结果
 

@@ -23,6 +23,8 @@
 | SimpleNet | `references/SimpleNet/` | `https://github.com/DonaldRR/SimpleNet.git` | simple feature anomaly baseline | P2 |
 | FoundAD | `references/FoundAD/` | `https://github.com/ymxlzgy/FoundAD.git` | few-shot reference | P2 |
 | SAIFE | `references/saife/` | local cloned reference | adversarial-autoencoder spectrum baseline | P1 |
+| GRETEL | `references/Hussain 等 - 2026 - GRE℡ A Graph Attention Network for Low-SNR Spectrum Anomaly Detection in IoT Communications.pdf` | local paper PDF | graph-attention spectrum baseline；PNG spectrogram adaptation | P0 |
+| SPADE | `references/SPADE-pytorch/` | `https://github.com/byungjae89/SPADE-pytorch.git` | 免训练 kNN 特征匹配 few-shot baseline（2021） | P1 |
 
 ## 建议先适配的 baseline
 
@@ -59,10 +61,11 @@
    - WinCLIP 结论：Spectrum 上较强，但 RF self/public 明显弱于当前方法；适合作为 CLIP/few-shot anomaly detection 参考项。
    - 注意很多方法是 zero-shot 或需要 auxiliary 数据，不能直接和 normal-only few-shot 主协议混用；只能作为 reference baseline。
 
-   - UniVAD 的 RF 适配已完成三个 In-house 单元 smoke/full-cell 比较，但由于省略了其依赖物体
-     分割的 C³/GECM，并将 DINOv2-G 换为本机 DINOv2-B，结果只能标为
-     `UniVAD-Texture-B-adapted`，暂不进入主表。详见
-     [`exp_univad_rf_comparison_20260815.md`](../../experiments/exp_univad_rf_comparison_20260815.md)。
+   - UniVAD 的频谱图适配已完成 In-house RF、Public RF、FedJam 和 OFDMA 的正式协议实验。
+     为解决原先 DINOv2-G/14 骨干过大的公平性问题，主 baseline 采用
+     `UniVAD-Texture-adapted (DINOv2-B/14)`；由于频谱图缺少物体/组件掩码，仍不声称是完整官方
+     UniVAD。结果详见
+     [`UniVAD DINOv2-B/14 公平规模复现实验`](../../experiments/exp_univad_b14_fair_comparison_20260818.md)。
 
 ## 当前主对比建议（四个数据集统一口径）
 
@@ -73,7 +76,7 @@ ViT-only                         # internal branch ablation
 CNN-only                         # internal branch ablation
 Ours: Confidence Fusion          # proposed method
 VAE
-SAIFE
+GRETEL
 Deep SVDD
 PaDiM / STFPM
 WinCLIP
@@ -83,11 +86,11 @@ spectral kurtosis / CA-CFAR
 Ours: Confidence Fusion
 ```
 
-In-house RF、Public RF、OFDMA 和 FedJam 的统一主比较集合为 ED、CA-CFAR、SCSE
-(Support-Calibrated Spectral Ensemble)、KLD-Ref、IAD-PER、SAIFE、UDMA、PatchCore、
-WinCLIP 和 Ours。谱熵、谱平坦度、谱峭度是 SCSE 的组件，ICA-Frozen、VAE-MSE、Deep
-SVDD、PaDiM 和 STFPM 的完整结果保留为补充记录；具体表格按数据集分别列出，不把内部
-消融当作外部方法参与排名。
+In-house RF、Public RF、OFDMA 和 FedJam 的统一主比较集合为 ED、SCSE
+(Support-Calibrated Spectral Ensemble)、IAD-PER、UDMA、GRETEL、TFAM-AAE
+(spectrogram adaptation)、PatchCore、SPADE 和 Ours。谱熵、谱平坦度、谱峭度和 CA-CFAR
+是 SCSE 的组件，ICA-Frozen、KLD-Ref、VAE-MSE、Deep SVDD、PaDiM、STFPM、WinCLIP、SAIFE 和
+FADE 的完整结果保留为补充记录；具体表格按数据集分别列出，不把内部消融当作外部方法参与排名。
 
 补充实验表：
 
@@ -102,8 +105,38 @@ eigenvalue detector 混写。
 
 2026-07-25 的 self RF target-scene support 重跑（同一 manifest、seed=111、60
 个测试单元）已统一保存在
-`analysis_outputs/20260725_target_scene_self_rf_baselines_seed111/`，覆盖
-官方 PatchCore、VAE、SAIFE、Deep SVDD、PaDiM、STFPM 和 WinCLIP。
+`analysis_outputs/20260725_target_scene_self_rf_baselines_seed111/`；SAIFE 的历史结果仍保留在
+原始目录，当前主表使用 GRETEL 替代 SAIFE。
+
+## SPADE few-shot baseline 评估（2026-08-17）
+
+实现：`tools/eval_spade_cls.py`（复刻 byungjae89/SPADE-pytorch 图像级评分：
+wide_resnet50_2 的 avgpool 特征 + kNN top-k=5 距离均值；免训练，仅用
+normal support 建立 gallery；`--pixel-level` 可选保留 layer1/2/3 用于像素级
+定位）。协议与 PatchCore 等其他基线完全一致（同一 manifest、seed=111）。
+
+| 数据集 | 设置 | image AUROC | image AUPRC | FPR@95%TPR |
+|---|---:|---:|---:|---:|
+| In-house RF | 60 单元宏平均（per-frequency support） | 71.32 | 53.16 | 66.73 |
+| Public RF | k=1，15 单元宏平均 | 66.07 | 16.72 | 77.71 |
+| Public RF | k=2，15 单元宏平均 | 65.78 | 17.45 | 75.72 |
+| Public RF | k=4，15 单元宏平均 | 67.35 | 17.96 | 77.64 |
+| OFDMA | 1-shot，73,500 测试观测 | 56.70 | 76.80 | 92.50 |
+| OFDMA | 2-shot | 58.50 | 78.37 | 92.16 |
+| OFDMA | 4-shot | 58.33 | 77.72 | 92.26 |
+| FedJam | 1-shot，7,200 测试观测 | 65.71 | 86.65 | 88.89 |
+| FedJam | 2-shot | 62.88 | 84.15 | 88.72 |
+| FedJam | 4-shot | 64.68 | 85.23 | 86.50 |
+
+结果输出：`analysis_outputs/20260817_spade_*`（每 cell 的 npz scores +
+`results_spade_cls.csv` + `summary.json`），FedJam 为
+`analysis_outputs/20260817_fedjam_spade_formal/spade/`（metrics.csv +
+protocol.json）。
+
+结论：SPADE 在 In-house RF 上优于 VAE/Deep SVDD，与 PaDiM 接近；在
+OFDMA 上介于 PaDiM 与 STFPM 之间（56.7–58.5），在 FedJam 上明显弱于
+PatchCore（65 vs 81–84）；总体弱于现有正式方法（ViT normal memory
+73–78）。可作为经典免训练 kNN baseline 进入补充对照，不作为主表强基线。
 
 <!-- The visual-baseline citation numbers below link to the corresponding PDFs. -->
 [6]: https://spj.science.org/doi/pdf/10.34133/2022/9865016
