@@ -406,16 +406,19 @@ def build_cnn_gallery(encoder, train_loader, gallery_args, device) -> torch.Tens
         gallery_args.max_gallery_patches,
         gallery_seed,
     )
+    coreset_ratio = getattr(gallery_args, "cnn_coreset_ratio", 1.0)
+    coreset_size = (max(1, int(round(len(gallery) * coreset_ratio)))
+                    if coreset_ratio < 1.0 else int(gallery_args.cnn_coreset_size))
     gallery = farthest_first_coreset(
         gallery,
-        int(gallery_args.cnn_coreset_size),
+        coreset_size,
         gallery_seed,
     )
     gallery = F.normalize(gallery, dim=1)
     print(
         f"[cnn_gallery] mode={gallery_args.cnn_feature_mode} "
         f"patches={gallery.shape[0]} dim={gallery.shape[1]} "
-        f"coreset_size={gallery_args.cnn_coreset_size}"
+        f"coreset_size={coreset_size}"
     )
     return gallery
 
@@ -581,6 +584,7 @@ def run_jobs(jobs, args, device) -> list[dict]:
         cnn_feature_mode=args.cnn_feature_mode,
         max_gallery_patches=args.max_gallery_patches,
         cnn_coreset_size=0,
+        cnn_coreset_ratio=getattr(args, "cnn_coreset_ratio", 1.0),
         cnn_paired_tta="none",
         cnn_input_normalization="raw",
         seed=args.seed,
@@ -704,6 +708,8 @@ def parse_args():
         help="Random downsample cap for the normal patch gallery; 0 keeps all patches.",
     )
     parser.add_argument("--seed", type=int, default=111)
+    parser.add_argument("--cnn-coreset-ratio", type=float, default=1.0,
+                        help="Farthest-point retained fraction; 1 preserves the full-gallery default.")
     parser.add_argument(
         "--cnn-encoder",
         choices=CNN_ENCODERS,
@@ -744,6 +750,8 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if not 0 < args.cnn_coreset_ratio <= 1:
+        raise ValueError("--cnn-coreset-ratio must be in (0, 1]")
     setup_seed(args.seed)
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
     device = torch.device(
@@ -767,6 +775,7 @@ def main():
                     "support_only": True,
                     "support_reference_protocol": args.support_reference_protocol,
                     "protocol": args.protocol,
+                    "cnn_coreset_ratio": args.cnn_coreset_ratio,
                     "support_manifest": getattr(args, "support_manifest", None),
                     "support_manifest_sha256": getattr(args, "support_manifest_sha256", None),
                     "support_seed": getattr(args, "support_seed", None),
@@ -812,9 +821,10 @@ def main():
             else "wide_resnet50_2_imagenet1k_v1"
         ),
         "feature_layer": args.cnn_feature_mode,
+        "cnn_coreset_ratio": args.cnn_coreset_ratio,
         "image_score": "mean_top_10_percent_patch_distance",
         "nearest_neighbours": 1,
-        "memory": "complete",
+        "memory": "farthest_coreset" if args.cnn_coreset_ratio < 1 else "complete",
         "num_jobs": len(rows),
         "image_auroc_macro": float(
             np.mean([row["image_auroc"] for row in rows])
