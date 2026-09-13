@@ -132,7 +132,16 @@ opencodex/
 docs/论文实验部分.pdf
 docs/paper/论文实验部分.pdf
 docs/paper/现有方案介绍.pdf
+docs/paper/SpectraMemAD_English.pdf
+docs/paper/main_5.pdf
 简化视觉架构图.pdf
+
+# Local editor metadata, speech-model caches, and meeting recordings.
+/.qoder/
+/.speaker-model/
+/.whisper-models/
+/*.mp3
+/*_转写.txt
 
 # Downloaded model caches. Model definitions and configuration remain versioned.
 models/.locks/

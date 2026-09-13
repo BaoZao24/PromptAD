@@ -24,7 +24,7 @@ matplotlib.use("Agg")
 import matplotlib as mpl
 import markdown
 from matplotlib.font_manager import FontProperties, fontManager
-from matplotlib.mathtext import math_to_image
+from matplotlib.mathtext import MathTextParser, math_to_image
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -39,13 +39,16 @@ TIMES_FONT_FILES = (
 for _font_path in TIMES_FONT_FILES:
     if _font_path.is_file():
         fontManager.addfont(str(_font_path))
-FORMULA_SIZE_PT = 9.5
+FORMULA_SIZE_PT = 10.0
+MATH_DPI = 220
+MATH_PAD_X_PT = 0.75
+MATH_PAD_Y_PT = 1.5
 FORMULA_FONT = FontProperties(
-    fname=str(TIMES_FONT_FILES[0]) if TIMES_FONT_FILES[0].is_file() else None,
-    family="Times New Roman",
-    math_fontfamily="custom",
+    family="STIXGeneral",
+    math_fontfamily="stix",
     size=FORMULA_SIZE_PT,
 )
+MATH_PARSER = MathTextParser("path")
 
 CSS = r"""
 @page {
@@ -69,7 +72,8 @@ body {
 .paper {
   column-count: 2;
   column-gap: 0.25in;
-  column-fill: balance;
+  column-fill: auto;
+  padding-right: 2pt;
 }
 
 h1, h2, h3, h4 {
@@ -141,13 +145,45 @@ table {
 .table-block {
   break-inside: avoid;
   -webkit-column-break-inside: avoid;
-  margin: 5pt 0 7pt;
+  margin: 2pt 0 2pt;
 }
 .table-block.wide-table { column-span: all; }
+.table-block.wide-table {
+  width: calc(100% - 2pt);
+  margin-left: 1pt;
+  margin-right: 1pt;
+  margin-top: 2pt;
+  margin-bottom: 1pt;
+}
+.table-block.wide-table table {
+  font-size: 7.4pt;
+  line-height: 1;
+}
+.table-block.wide-table th,
+.table-block.wide-table td {
+  padding: 1.2pt 1.5pt;
+}
+.table-caption {
+  margin: 0 0 2pt;
+  font-size: 8pt;
+  line-height: 1.05;
+  text-align: center;
+  font-weight: normal;
+}
+.table-caption .table-label,
+.table-caption .table-title {
+  display: block;
+}
+.table-caption .table-title {
+  text-transform: uppercase;
+}
+.table-caption.zh .table-title {
+  text-transform: none;
+}
 .table-block p { margin: 0 0 2pt; text-align: left; text-indent: 0; }
 .table-block table { margin: 0; }
 th, td {
-  padding: 2.5pt 3pt;
+  padding: 1pt 3pt;
   border-top: 0.45pt solid #000;
   border-bottom: 0.45pt solid #000;
   vertical-align: middle;
@@ -170,17 +206,42 @@ img {
   margin: 6pt 0;
 }
 .figure-block.wide-figure { column-span: all; }
+.figure-block.wide-figure {
+  margin: 3pt 0 4pt;
+}
+.figure-block.wide-figure img {
+  width: 95%;
+  max-width: 95%;
+  height: auto;
+  max-height: none;
+  margin: 1pt auto;
+}
 .figure-block.compact-figure {
-  margin: 3pt 0 5pt;
+  margin: 2pt 0 3pt;
 }
 .figure-block.compact-figure img {
   width: auto;
   max-width: 100%;
-  max-height: 2.25in;
-  margin: 2pt auto;
+  max-height: 1.70in;
+  margin: 1pt auto;
 }
 .figure-block p { margin: 0; text-align: center; text-indent: 0; }
-.figure-block p + p { margin-top: 2pt; font-size: 8.5pt; }
+.figure-block p + p { margin-top: 1pt; font-size: 8pt; font-style: normal; }
+.figure-block p + p em { font-style: normal; }
+
+.references {
+  font-size: 8.2pt;
+  line-height: 1.05;
+}
+.references h2 {
+  font-size: 10pt;
+  margin: 5pt 0 2pt;
+}
+.references ol {
+  margin: 0;
+  padding-left: 1.7em;
+}
+.references li { margin: 0; }
 
 hr { border: 0; border-top: 0.5pt solid #000; margin: 6pt 0; }
 strong { font-weight: bold; }
@@ -190,7 +251,7 @@ em { font-style: italic; }
 .equation {
   column-span: none;
   font-family: "Times New Roman", serif;
-  font-size: 9.5pt;
+  font-size: 10pt;
   line-height: 1;
   text-align: center;
   text-indent: 0;
@@ -209,17 +270,18 @@ em { font-style: italic; }
   top: 50%;
   transform: translateY(-50%);
   font-family: "Times New Roman", serif;
-  font-size: 9.5pt;
+  font-size: 10pt;
   font-style: normal;
 }
 .inline-equation {
   display: inline-block;
   width: auto;
   height: auto;
-  margin: 0 1pt;
+  margin: 0;
   line-height: 1;
-  vertical-align: -0.18em;
+  vertical-align: baseline;
 }
+.equation-explanation { text-indent: 0; }
 .figure-section {
   column-span: all;
   break-inside: avoid;
@@ -302,8 +364,8 @@ def find_chrome() -> str:
     raise RuntimeError("Chrome/Chromium is required for PDF rendering")
 
 
-def write_math_svg(formula: str, equation_path: Path) -> None:
-    """Write all equations with the same Times New Roman, 9.5 pt settings."""
+def write_math_svg(formula: str, equation_path: Path) -> float:
+    """Write a vector equation and return its baseline depth in points."""
 
     # Markdown display equations may wrap across source lines.  Matplotlib's
     # mathtext parser treats a literal newline as an end-of-expression, so
@@ -312,23 +374,25 @@ def write_math_svg(formula: str, equation_path: Path) -> None:
 
     with mpl.rc_context(
         {
-            "mathtext.fontset": "custom",
-            "mathtext.rm": "Times New Roman",
-            "mathtext.it": "Times New Roman:italic",
-            "mathtext.bf": "Times New Roman:bold",
-            "mathtext.sf": "Times New Roman",
-            "mathtext.tt": "Times New Roman",
-            "mathtext.cal": "Times New Roman:italic",
-            "svg.fonttype": "none",
+            "mathtext.fontset": "stix",
+            "svg.fonttype": "path",
         }
     ):
         math_to_image(
             f"${formula}$",
             equation_path,
             prop=FORMULA_FONT,
-            dpi=220,
+            dpi=MATH_DPI,
             format="svg",
         )
+
+        # MathText reports the distance from the formula baseline to its
+        # lowest glyph.  Preserve that value so inline SVGs align with the
+        # surrounding text even when they contain subscripts or fractions.
+        parsed = MATH_PARSER.parse(
+            f"${formula}$", dpi=MATH_DPI, prop=FORMULA_FONT
+        )
+        baseline_depth_pt = parsed.depth * 72.0 / MATH_DPI + MATH_PAD_Y_PT
 
     # Matplotlib crops math SVGs tightly to their glyph bounds. Descenders,
     # fraction denominators, and stacked subscripts can then lose their bottom
@@ -345,8 +409,8 @@ def write_math_svg(formula: str, equation_path: Path) -> None:
         height = float(match.group(4))
         view_width = float(match.group(6))
         view_height = float(match.group(7))
-        pad_x = 0.75
-        pad_y = 1.5
+        pad_x = MATH_PAD_X_PT
+        pad_y = MATH_PAD_Y_PT
         return (
             f'{match.group(1)}{width + 2 * pad_x:g}pt'
             f'{match.group(3)}{height + 2 * pad_y:g}pt'
@@ -359,6 +423,7 @@ def write_math_svg(formula: str, equation_path: Path) -> None:
     if count != 1:
         raise RuntimeError(f"Could not pad math SVG canvas: {equation_path}")
     equation_path.write_text(svg, encoding="utf-8")
+    return baseline_depth_pt
 
 
 def replace_display_math(source: str, temp_dir: Path) -> str:
@@ -399,10 +464,11 @@ def replace_inline_math(source: str, temp_dir: Path) -> str:
         formula = match.group(1).strip()
         equation_path = temp_dir / f"inline_equation_{replacement.counter:02d}.svg"
         replacement.counter += 1
-        write_math_svg(formula, equation_path)
+        baseline_depth_pt = write_math_svg(formula, equation_path)
         encoded = base64.b64encode(equation_path.read_bytes()).decode("ascii")
         return (
             '<img class="inline-equation" '
+            f'style="vertical-align:-{baseline_depth_pt:.3f}pt" '
             f'src="data:image/svg+xml;base64,{encoded}" alt="equation">'
         )
 
@@ -428,6 +494,7 @@ def collapse_chinese_soft_wraps(source: str) -> str:
         return (
             not stripped
             or stripped.startswith(("#", "|", "```", "$$", ">", "![", "---", "***"))
+            or bool(re.match(r"^(?:表|图)\s*\d+\s+", stripped))
         )
 
     def starts_new_block(text: str) -> bool:
@@ -462,34 +529,91 @@ def collapse_chinese_soft_wraps(source: str) -> str:
 def group_table_captions(body: str) -> str:
     """Keep each Markdown table caption attached to its table."""
 
-    pattern = re.compile(r"(<p><strong>表[^<]*?</strong></p>\s*<table>.*?</table>)", re.DOTALL)
+    pattern = re.compile(
+        r'<p>(?:<strong>)?(?P<label>Table|表)\s*(?P<number>\d+)'
+        r'(?:[.\u3000]?\s+)(?P<title>[^<]*?)(?:</strong>)?</p>\s*'
+        r'(?P<table><table>.*?</table>)',
+        re.DOTALL | re.IGNORECASE,
+    )
 
     def replacement(match: re.Match[str]) -> str:
-        block = match.group(1)
-        table = re.search(r"<table>.*?</table>", block, flags=re.DOTALL)
-        header_count = len(re.findall(r"<th(?:\s|>)", table.group(0))) if table else 0
+        table = match.group("table")
+        header_count = len(re.findall(r"<th(?:\s|>)", table))
         class_name = "table-block wide-table" if header_count >= 6 else "table-block"
-        return f'<div class="{class_name}">{block}</div>'
+
+        label = match.group("label")
+        number = int(match.group("number"))
+        title = match.group("title").strip().rstrip(".")
+        values = (
+            (1000, "M"), (900, "CM"), (500, "D"), (400, "CD"),
+            (100, "C"), (90, "XC"), (50, "L"), (40, "XL"),
+            (10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I"),
+        )
+        remainder = number
+        roman_parts: list[str] = []
+        for value, numeral in values:
+            while remainder >= value:
+                roman_parts.append(numeral)
+                remainder -= value
+        roman = "".join(roman_parts)
+        if label.lower() == "table":
+            caption = (
+                '<div class="table-caption">'
+                f'<span class="table-label">TABLE {roman}</span>'
+                f'<span class="table-title">{title}</span>'
+                '</div>'
+            )
+        else:
+            caption = (
+                '<div class="table-caption zh">'
+                f'<span class="table-label">表 {roman}</span>'
+                f'<span class="table-title">{title}</span>'
+                '</div>'
+            )
+        return f'<div class="{class_name}">{caption}{table}</div>'
 
     return pattern.sub(replacement, body)
 
 
 def group_figure_blocks(body: str) -> str:
-    """Keep figures with captions and span wide multi-panel figures across columns."""
+    """Keep figures with captions and span the architecture figure across columns."""
 
     pattern = re.compile(
-        r"(<p><img.*?</p>\s*<p><em>(.*?)</em></p>)",
-        re.DOTALL,
+        r'(<p><img.*?</p>\s*<p>(?:<em>)?'
+        r'((?:图\s*\d+|Fig\.\s*\d+)[^<]*?)(?:</em>)?</p>)',
+        re.DOTALL | re.IGNORECASE,
     )
 
     def replacement(match: re.Match[str]) -> str:
         caption = re.sub(r"<.*?>", "", match.group(2)).strip()
-        figure_html = match.group(1)
-        is_wide = caption.startswith("图1")
-        class_name = "figure-block wide-figure" if is_wide else "figure-block compact-figure"
+        is_architecture = bool(
+            re.match(r"^(?:图\s*1|Fig\.\s*1\b)", caption, re.IGNORECASE)
+        )
+        class_name = "figure-block wide-figure" if is_architecture else "figure-block compact-figure"
         return f'<div class="{class_name}">{match.group(1)}</div>'
 
     return pattern.sub(replacement, body)
+
+
+def group_references(body: str) -> str:
+    """Apply the compact IEEE reference-list typography."""
+
+    pattern = re.compile(
+        r"(<h2>References</h2>.*)$",
+        re.DOTALL | re.IGNORECASE,
+    )
+    return pattern.sub(r'<section class="references">\1</section>', body)
+
+
+def mark_equation_explanations(body: str) -> str:
+    """Remove paragraph indentation from text that immediately defines equation symbols."""
+
+    pattern = re.compile(
+        r'(<p class="equation(?: numbered)?">.*?</p>\s*)'
+        r'<p>((?:where\b|Here,))',
+        re.DOTALL,
+    )
+    return pattern.sub(r'\1<p class="equation-explanation">\2', body)
 
 
 def render(input_path: Path, output_path: Path, single_column: bool = False) -> None:
@@ -511,6 +635,8 @@ def render(input_path: Path, output_path: Path, single_column: bool = False) -> 
         )
         body = group_table_captions(body)
         body = group_figure_blocks(body)
+        body = mark_equation_explanations(body)
+        body = group_references(body)
         document = f'''<!doctype html>
 <html lang="zh-CN">
 <head>
