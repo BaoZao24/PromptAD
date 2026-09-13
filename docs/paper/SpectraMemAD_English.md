@@ -2,7 +2,7 @@
 
 ## Abstract
 
-Spectrum anomaly detection supports interference monitoring, but deployment at a new site or frequency band often begins with only a few normal spectrograms. This scarcity limits target-scene model training, while detection must account for both global occupancy changes and local interference. We propose SpectraMemAD, which shifts scene adaptation from parameter learning to memory learning using frozen pretrained visual encoders. Vision Transformer and convolutional neural network features form separate normal memories, and nearest-neighbor search measures global and local deviations. Normal patch-distance statistics calibrate the two score maps, allowing CNN evidence to supplement the ViT response at selected spatial positions. The maximum of the fused map gives the image-level anomaly score. Across seven few-shot settings on three radio frequency (RF) datasets, SpectraMemAD improves the area under the receiver operating characteristic curve (AUROC) by 0.77–10.91 percentage points over the strongest compared baseline in each setting. The full model also exceeds the stronger individual branch by 0.20–2.88 points.
+Spectrum anomaly detection supports interference monitoring, but deployment at a new site or frequency band often begins with only a few normal spectrograms. This scarcity limits target-scene model training, while detection must account for both global occupancy changes and local interference. We propose SpectraMemAD, which shifts scene adaptation from parameter learning to memory learning using frozen pretrained visual encoders. Vision Transformer (ViT) and convolutional neural network (CNN) features form separate normal memories for overall time-frequency structure and local texture. Nearest-neighbor distances produce spatial anomaly maps, which are calibrated using normal patch-distance statistics and selectively fused. The maximum of the fused map gives the image-level anomaly score. Across seven few-shot settings on three radio frequency (RF) datasets, SpectraMemAD improves the area under the receiver operating characteristic curve (AUROC) by 0.77–10.91 percentage points over the strongest compared baseline in each setting. The full model also exceeds the stronger individual branch by 0.20–2.88 points.
 
 **Index Terms—** Spectrum anomaly detection, few-shot learning, training-free adaptation, feature memory, multi-scale features.
 
@@ -12,9 +12,9 @@ Spectrum anomaly detection identifies unauthorized transmissions, interference, 
 
 Statistical detectors construct test statistics from energy, background distributions, or propagation properties [1]–[4], but require scene-specific threshold or background recalibration. Data-driven methods learn normal power-spectrum representations [5] and detect deviations through reconstruction [6]. Noise attention exploits the elevated noise floor after variational autoencoder (VAE) reconstruction of anomalous samples [7], while spatio-temporal models use prediction residuals [8]. These models require normal training data, and their detection scores depend on how anomalies affect reconstruction or prediction.
 
-Recent spectrum methods use time-frequency attention and fingerprint distance [9], memory-enhanced distillation [10], graph modeling [11], and multisensor reverse distillation [12], but still require data to train or update model parameters. PatchCore [13] and SPADE [14] offer a useful alternative: they store normal visual features and detect deviations through nearest-neighbor search without parameter updates. However, their feature and scoring designs target industrial appearance anomalies rather than the global occupancy changes and localized time-frequency interference encountered in spectrograms. Scores for these two scales can also differ in normal range and variability, making direct addition unreliable.
+Recent spectrum methods use time-frequency attention and fingerprint distance [9], memory-enhanced distillation [10], graph modeling [11], and multisensor reverse distillation [12], but still require data to train or update model parameters. PatchCore [13] and SPADE [14] offer a useful alternative: they store normal visual features and detect deviations through nearest-neighbor search without parameter updates. However, their feature and scoring designs target industrial appearance anomalies rather than the global occupancy changes and localized time-frequency interference encountered in spectrograms. Combining global and local evidence also requires attention to their numerical scales. A branch with larger normal distances can dominate a direct sum even when it shows little deviation from its own normal reference.
 
-Three issues remain: adapting to a scene from a few normal samples without parameter updates, representing both global and local spectrum anomalies, and coordinating branch scores with different numerical scales and normal patch-distance statistics.
+Applying feature-memory detection to few-shot spectrum monitoring therefore requires adaptation from scarce normal references, joint representation of overall occupancy and local interference, and calibration of the two branches before fusion.
 
 SpectraMemAD addresses these issues through dual-scale feature memories and fusion calibrated by normal patch-distance statistics. Our main contributions are as follows:
 
@@ -22,7 +22,7 @@ SpectraMemAD addresses these issues through dual-scale feature memories and fusi
 
 2. We construct dual-scale spectrum memories using vision Transformer (ViT) and convolutional neural network (CNN) features. Independent nearest-neighbor searches in the two memories measure deviations in overall time-frequency structure and local texture, supplying complementary spatial anomaly score maps.
 
-3. We design a spatial fusion rule calibrated by normal patch-distance statistics. At each position, it supplements the ViT response with CNN evidence that is elevated relative to normal patch distances and exceeds the calibrated ViT response. The maximum of the fused map yields the image-level anomaly score.
+3. We design a spatial fusion rule that accounts for differences in the normal distance ranges of the two branches. Normal patch-distance statistics calibrate their responses, and a position-wise gate adds CNN evidence only where its distance is elevated relative to normal references and its calibrated response exceeds ViT's.
 
 Across three radio frequency (RF) datasets, SpectraMemAD achieves the highest area under the receiver operating characteristic (ROC) curve (AUROC) among the compared methods in all seven few-shot settings and exceeds both individual branches.
 
@@ -36,7 +36,7 @@ $$
 \hat{y}(x)=\mathbf{1}\{s(x)>\delta\},\tag{1}
 $$
 
-where $\hat y(x)=1$ denotes an anomaly and $\delta$ is the decision threshold. Spectrum anomalies can manifest as changes in overall time-frequency structure or as interference confined to localized regions. As shown in Fig. 1, frozen ViT and CNN encoders extract features from the normal references to construct separate memories. For each test feature, nearest-neighbor search finds the closest normal feature in the corresponding memory; the resulting distance maps are calibrated and fused spatially before their maximum determines the image-level score. Adaptation to a new scene uses its normal references to construct the memories and compute calibration statistics, while the encoders remain frozen.
+where $\hat y(x)=1$ denotes an anomaly and $\delta$ is the decision threshold. Spectrum anomalies can manifest as changes in overall time-frequency structure or as interference confined to localized regions. As shown in Fig. 1, frozen ViT and CNN encoders extract features from the normal references to construct separate memories. For each test feature, nearest-neighbor search finds the closest normal feature in the corresponding memory. The resulting distance maps are calibrated and fused at corresponding positions, and the maximum fused response gives the image-level score. Adaptation to a new scene uses its normal references to construct the memories and compute calibration statistics, while the encoders remain frozen.
 
 ![Overall framework](../../简化视觉架构图.png)
 
@@ -44,7 +44,7 @@ Fig. 1. Overall framework of SpectraMemAD.
 
 ### B. Spectrum-Aware Dual-Scale Feature Memory
 
-A frozen ViT $f_{\mathrm{V}}$ extracts features that capture overall time-frequency structure, while a frozen CNN $f_{\mathrm{C}}$ extracts local texture features. Both encoders retain features at individual spatial locations. For normal reference $x_i$,
+Overall occupancy changes involve the arrangement of activity across time and frequency, whereas localized interference can alter texture within a small region. We use a frozen ViT $f_{\mathrm{V}}$ to extract overall structural features and a frozen CNN $f_{\mathrm{C}}$ to extract local texture features. Both retain spatial locations so that their anomaly responses can be combined in the same time-frequency region. For normal reference $x_i$,
 
 $$
 \mathbf{v}_i=f_{\mathrm{V}}(x_i),\qquad \mathbf{c}_i=f_{\mathrm{C}}(x_i),\qquad i=1,\ldots,K.
@@ -71,7 +71,7 @@ Here, $d_{\mathrm{cos}}$ denotes cosine distance. A large minimum distance indic
 
 ### C. Normal-Reference-Calibrated Fusion
 
-We calibrate the two anomaly score maps using normal patch-distance statistics. For each branch, every normal patch feature is matched to its nearest remaining normal feature, excluding its exact self-match. Collecting these distances across the normal reference patches gives $\mathcal{R}_{\mathrm{V}}$ and $\mathcal{R}_{\mathrm{C}}$. Their medians describe typical normal patch distances, and their interquartile ranges (IQRs) describe variation among these distances.
+Normal patch-distance statistics provide a reference for comparing the two branches. Within each branch, we match every normal patch feature to its nearest remaining normal feature, excluding its exact self-match. These distances form $\mathcal{R}_{\mathrm{V}}$ and $\mathcal{R}_{\mathrm{C}}$. Their medians set the normal baselines, and their interquartile ranges (IQRs) set the scales of variation.
 
 The two distance maps are spatially aligned by interpolation onto a common grid $\Omega$. Let $V(x,q)$ and $C(x,q)$ denote their values at position $q\in\Omega$. Each position is calibrated using the corresponding branch's normal patch-distance statistics:
 
@@ -106,7 +106,7 @@ $$
 A(x,q)=V(x,q)+\alpha\,\operatorname{IQR}(\mathcal{R}_{\mathrm{V}})\,g(x,q).\tag{5}
 $$
 
-Here, $g(x,q)$ is the gated local correction, $[u]_+=\max(u,0)$, and $\mathbf{1}\{\cdot\}$ is the indicator function. The gate selects locally elevated CNN distances; the positive difference retains only the calibrated CNN excess at the same position. The IQR factor scales this correction in ViT distance units, and $\alpha$ controls its magnitude. The image-level anomaly score is the maximum of the fused map:
+Here, $g(x,q)$ is the gated local correction, $[u]_+=\max(u,0)$, and $\mathbf{1}\{\cdot\}$ is the indicator function. The indicator enforces the normal-reference rank threshold, while the positive difference determines the local correction. The IQR factor scales this correction in ViT distance units, and $\alpha$ controls its magnitude. The image-level anomaly score is the maximum of the fused map:
 
 $$
 s(x)=\max_{q\in\Omega}A(x,q).\tag{6}
@@ -232,7 +232,7 @@ Table 5 compares the ViT-only and CNN-only variants with the full model using th
 
 ## IV. Conclusion
 
-We have presented SpectraMemAD for few-shot spectrum anomaly detection, shifting target-scene adaptation from parameter learning to memory learning. With frozen encoders, the method builds global and local feature memories from a few normal spectrograms and calibrates and fuses patch-distance maps using normal patch-distance statistics. The maximum fused response determines the image-level score. Across seven few-shot settings on three datasets, SpectraMemAD improves AUROC over the strongest baseline in each setting by 0.77–10.91 percentage points. Combining the branches further improves AUROC over the stronger individual branch by 0.20–2.88 percentage points. Future work will focus on reducing false alarms at high recall, motivated by the results on FedJam.
+We have presented SpectraMemAD for few-shot spectrum anomaly detection, shifting target-scene adaptation from parameter learning to memory learning. Frozen encoders build global and local feature memories from a few normal spectrograms. Normal patch-distance statistics guide spatial fusion, and the maximum fused response determines the image-level score. Across seven few-shot settings on three datasets, SpectraMemAD improves AUROC over the strongest baseline in each setting by 0.77–10.91 percentage points. Combining the branches further improves AUROC over the stronger individual branch by 0.20–2.88 percentage points. Future work will focus on reducing false alarms at high recall, motivated by the results on FedJam.
 
 ## References
 
